@@ -7,6 +7,9 @@ Also a lot of inspiration is taken from AAR github: https://github.com/aasensio/
 
 '''
 
+import scipy as sp
+from scipy.special import voigt_profile, wofz
+
 class ME_Atmosphere():
     ''' Class to contain the ME atmosphere properties'''
 
@@ -71,10 +74,18 @@ class ME_Atmosphere():
 
         return res
 
-    def Voigt(da, dv):
+    def compute_scattering_profiles(self, nu, sigma, gamma):
+
+
+        self.voigt = voigt_profile(nu, sigma, gamma)
+        self.dispersion = 0
+
+    def Voigt(self, nu_array, sigma, gamma):
         ''' Compute the Voigt and anomalous dispersion profiles
         from See Humlicek (1982) JQSRT 27, 437
         '''
+
+
 
         return 0
 
