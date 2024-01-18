@@ -80,103 +80,122 @@ class ME_Atmosphere():
         self.voigt = voigt_profile(nu, sigma, gamma)
         self.dispersion = 0
 
-    def Voigt(self, nu_array, sigma, gamma):
+    def Voigt(self, nu_array, sigma, gamma, mu):
         ''' Compute the Voigt and anomalous dispersion profiles
         from See Humlicek (1982) JQSRT 27, 437
         '''
 
+        phi_profile = voigt_profile(nu_array - mu, sigma, gamma) * 1.414
 
+        return phi_profile
 
-        return 0
-
-    def Faraday_Voigt(da, dv):
+    def Faraday_Voigt(self, nu_array, sigma, gamma, mu):
         ''' Compute the Faraday-Voigt and anomalous dispersion profiles
         from See Humlicek (1982) JQSRT 27, 437
         '''
 
-        return 0
+        def z(x, sigma, gamma, mu):
+            gamma_i = complex(0, gamma)
+            return (x - mu + gamma_i) / (np.sqrt(2) * sigma)
 
-    phi_b = lambda self: Lorentzian(self.nu, (self.nu_0 + self.nu_L), self.Gamma)
-    phi_r = lambda self: Lorentzian(self.nu, (self.nu_0 - self.nu_L), self.Gamma)
-    phi_p = lambda self: Lorentzian(self.nu, (self.nu_0), self.Gamma)
+        z_arr = z(nu_array, sigma, gamma, mu)
+        z11 = wofz(z1)
+        psi_profile = -1 * z11.imag / 1.772
 
-    psi_b = lambda self: Faraday_fake(self.nu, (self.nu_0 + self.nu_L), self.Gamma)
-    psi_r = lambda self: Faraday_fake(self.nu, (self.nu_0 - self.nu_L), self.Gamma)
-    psi_p = lambda self: Faraday_fake(self.nu, (self.nu_0), self.Gamma)
+        return psi_profile
+
+    phi_b = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, -1*self.nu_m)
+    phi_r = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, self.nu_m)
+    phi_r = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, 0)
+
+    psi_b = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, -1*self.nu_m)
+    psi_r = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, self.nu_m)
+    psi_r = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, 0)
+
+    def calculate_Voigt_Faraday_profiles(self):
+
+        self.phi_b_arr = phi_b(self)
+        self.phi_r_arr = phi_r(self)
+        self.phi_p_arr = phi_p(self)
+
+        self.psi_b_arr = psi_b(self)
+        self.psi_r_arr = psi_r(self)
+        self.psi_p_arr = psi_p(self)
 
     # Defining the propagation matrix elements from L^2 book
-    def nu_I(nu, nu_0, nu_L, Gamma, theta, chi):
-        nuI = (phi_p(nu, nu_0, nu_L, Gamma) * np.sin(theta) ** 2
-               + (phi_r(nu, nu_0, nu_L, Gamma) + phi_b(nu, nu_0, nu_L, Gamma)) / 2 * (1 + np.cos(theta) ** 2))
+    def eta_I(self):
+        self.eta_I_arr = (self.phi_p_arr * np.sin(self.theta) ** 2
+                         + (self.phi_r_arr + self.phi_b_arr) / 2 * (1 + np.cos(self.theta) ** 2))
 
-        return 0.5 * nuI
+    def eta_Q(self):
+        self.eta_Q_arr = (self.phi_p_arr
+                         - 0.5 * (self.phi_r_arr + self.phi_b_arr)) * np.sin(self.theta) ** 2 * np.cos(2 * self.chi)
 
-    def eta_Q(nu, nu_0, nu_L, Gamma, theta, chi):
-        nuQ = (phi_p(nu, nu_0, nu_L, Gamma) - 0.5 * (phi_r(nu, nu_0, nu_L, Gamma) + phi_b(nu, nu_0, nu_L, Gamma)))
-        nuQ = nuQ * np.sin(theta) ** 2 * np.cos(2 * chi)
+    def eta_U(self):
+        self.eta_U_arr = (self.phi_p_arr
+                          - 0.5 * (self.phi_r_arr + self.phi_b_arr)) * np.sin(self.theta) ** 2 * np.sin(2 * self.chi)
 
-        return 0.5 * nuQ
+    def eta_V(self):
+        self.eta_V_arr = (self.phi_r_arr - self.phi_b_arr) * np.cos(self.theta)
 
-    def eta_U(nu, nu_0, nu_L, Gamma, theta, chi):
-        nuU = (phi_p(nu, nu_0, nu_L, Gamma) - 0.5 * (phi_r(nu, nu_0, nu_L, Gamma) + phi_b(nu, nu_0, nu_L, Gamma)))
-        nuU = nuU * np.sin(theta) ** 2 * np.sin(2 * chi)
+    def rho_Q(self):
+        self.rho_Q_arr = (self.psi_p_arr
+                          - 0.5 * (self.psi_r_arr + self.psi_b_arr)) * np.sin(self.theta) ** 2 * np.cos(2 * self.chi)
 
-        return 0.5 * nu_U
+    def rho_U(self):
+        self.rho_U_arr = (self.psi_p_arr
+                          - 0.5 * (self.psi_r_arr + self.psi_b_arr)) * np.sin(self.theta) ** 2 * np.sin(2 * self.chi)
 
-    def eta_V(nu, nu_0, nu_L, Gamma, theta, chi):
-        nuV = (phi_r(nu, nu_0, nu_L, Gamma) - phi_b(nu, nu_0, nu_L, Gamma)) * np.cos(theta)
+    def rho_V(self):
+        self.rho_V_arr = (self.psi_r_arr - self.psi_b_arr) * np.cos(self.theta)
 
-        return 0.5 * nu_V
+    def calc_Delta(self):
+        dd = ((1 + eta_I_arr) ** 2
+              * ((1 + self.eta_I_arr) ** 2
+                 - self.eta_Q_arr ** 2
+                 - self.eta_U_arr ** 2
+                 - self.eta_V_arr ** 2
+                 + self.rho_Q_arr ** 2
+                 + self.rho_U_arr ** 2
+                 + self.rho_V_arr ** 2)
+              - (self.eta_Q_arr * self.rho_Q_arr
+                 + self.eta_U_arr * self.rho_U_arr
+                 + self.eta_V_arr * self.rho_V_arr) ** 2)
+        self.Delta = dd
 
-    def rho_Q(nu, nu_0, nu_L, Gamma, theta, chi):
-        rhoQ = (psi_p(nu, nu_0, nu_L, Gamma) - 0.5 * (psi_r(nu, nu_0, nu_L, Gamma) + psi_b(nu, nu_0, nu_L, Gamma)))
-        rhoQ = rhoQ * np.sin(theta) ** 2 * np.cos(2 * chi)
 
-        return 0.5 * rhoQ
-
-    def rho_U(nu, nu_0, nu_L, Gamma, theta, chi):
-        rhoU = (psi_p(nu, nu_0, nu_L, Gamma) - 0.5 * (psi_r(nu, nu_0, nu_L, Gamma) + psi_b(nu, nu_0, nu_L, Gamma)))
-        rhoU = rhoU * np.sin(theta) ** 2 * np.sin(2 * chi)
-
-        return 0.5 * rhoU
-
-    def rho_V(nu, nu_0, nu_L, Gamma, theta, chi):
-        rhoV = (psi_r(nu, nu_0, nu_L, Gamma) - psi_b(nu, nu_0, nu_L, Gamma)) * np.cos(theta)
-
-        return 0.5 * rhoV
-
-    def Delta(nu, nu_0, nu_L, Gamma, theta, chi):
-        dd = ((1 + eta_I(nu, nu_0, nu_L, Gamma, theta, chi)) ** 2
-              * ((1 + eta_I(nu, nu_0, nu_L, Gamma, theta, chi)) ** 2
-                 - eta_Q(nu, nu_0, nu_L, Gamma, theta, chi) ** 2
-                 - eta_U(nu, nu_0, nu_L, Gamma, theta, chi) ** 2
-                 - eta_V(nu, nu_0, nu_L, Gamma, theta, chi) ** 2
-                 + rho_Q(nu, nu_0, nu_L, Gamma, theta, chi) ** 2
-                 + rho_U(nu, nu_0, nu_L, Gamma, theta, chi) ** 2
-                 + rho_V(nu, nu_0, nu_L, Gamma, theta, chi) ** 2)
-              - (eta_Q(nu, nu_0, nu_L, Gamma, theta, chi) * rho_Q(nu, nu_0, nu_L, Gamma, theta, chi)
-                 + eta_U(nu, nu_0, nu_L, Gamma, theta, chi) * rho_U(nu, nu_0, nu_L, Gamma, theta, chi)
-                 + eta_V(nu, nu_0, nu_L, Gamma, theta, chi) * rho_V(nu, nu_0, nu_L, Gamma, theta, chi)) ** 2)
-
-        return dd
-
-        
     def compute_I(self):
-        I = (self.B0
-             + self.mu * self.B1 / Delta())
+        I = self.B0 + self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr) * ((1 + self.eta_I_arr) **2
+                                                                                + self.rho_Q_arr ** 2
+                                                                                + self.rho_U_arr ** 2
+                                                                                + self.rho_V_arr ** 2))                                                                               ))
         self.I = I
-    def compute_Q(self): 
 
-    def compute_U(self): 
-
+    def compute_Q(self):
+        self.Q = - self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr)**2 * self.eta_Q_arr
+                                                     + (1 + self.eta_I_arr)*(self.eta_V_arr*self.rho_U_arr
+                                                                             - self.eta_U_arr*self.rho_V_arr)
+                                                     + self.rho_Q_arr * (self.eta_Q_arr*self.rho_Q_arr
+                                                                         + self.eta_U_arr * self.rho_U_arr
+                                                                         + self.eta_V_arr * self.rho_V_arr))
+    def compute_U(self):
+        self.U = - self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr) ** 2 * self.eta_U_arr
+                                                     + (1 + self.eta_I_arr) * (self.eta_Q_arr * self.rho_V_arr
+                                                                               - self.eta_V_arr * self.rho_Q_arr)
+                                                     + self.rho_U_arr * (self.eta_Q_arr * self.rho_Q_arr
+                                                                         + self.eta_U_arr * self.rho_U_arr
+                                                                         + self.eta_V_arr * self.rho_V_arr))
     def compute_V(self):
-
+        self.V = - self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr) ** 2 * self.eta_V_arr
+                                                     + self.rho_V_arr * (self.eta_Q_arr * self.rho_Q_arr
+                                                                         + self.eta_U_arr * self.rho_U_arr
+                                                                         + self.eta_V_arr * self.rho_V_arr))
     def compute_all_Stokes(self):
-        compute_I(self) 
+        compute_I(self)
         compute_Q(self)
         compute_U(self)
         compute_V(self)
-        
+
     def synth_atmos(self):
 
         compute_all_Stokes(self)
