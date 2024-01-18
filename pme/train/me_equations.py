@@ -8,6 +8,7 @@ Also a lot of inspiration is taken from AAR github: https://github.com/aasensio/
 '''
 
 import scipy as sp
+import numpy as np
 from scipy.special import voigt_profile, wofz
 
 class ME_Atmosphere():
@@ -18,14 +19,30 @@ class ME_Atmosphere():
                  vmac = 0.0, damping = 0.0, B0 = 0.8, B1 = 0.2, mu = 1.0,
                  vdop = 0.0, kl = 5.0):
 
-        self.lambda0 = lambda0
+
+        self.c = 3e8
+        
+        self.lambda0 = lambda0 * 1e-10
         self.JUp = JUp
         self.JLow = JLow
         self.gUp = gUp
         self.gLow = gLow
-        self.lambdaStart = lambdaStart
-        self.lambdaStep = lambdaStep
+        self.lambdaStart = lambdaStart * 1e-10
+        self.lambdaStep = lambdaStep * 1e-10
         self.nLambda = nLambda
+        self.dLambda = self.lambda0 * vmac / self.c * 1e3
+        
+        self.lambdaEnd = (self.lambdaStart 
+                          + self.lambdaStep* ( -1 + self.nLambda))
+        
+        self.lambdaGrid = np.linspace(-.5 *(self.lambdaEnd - self.lambdaStart), 
+                                      .5 * (self.lambdaEnd - self.lambdaStart),
+                                       num = self.nLambda)
+        self.nuArray = self.lambdaGrid / self.dLambda
+        
+
+        self.a = damping
+        
         self.BField = BField
         self.theta = theta
         self.chi = chi
@@ -35,13 +52,26 @@ class ME_Atmosphere():
         self.B1 = B1
         self.mu = mu
         self.vdop = vdop
+        self.lambdaDop = self.lambda0 * vdop * 1e3 / self.c
         self.kl = kl
 
         self.nu_L =  1.3996e6 * self.BField # in 1/s for Bfield in Gauss
         self.nu_D = 0
         self.Gamma = damping
+        self.compute_larmor_freq()
 
-
+    def compute_larmor_freq(self):
+        e = 1.6e-19 # C
+        me = 9.109e-31 # kg
+        hbar = 1.54e-34 # J.s / 4pi
+        c = 3e8
+        
+        dlambda_B = (self.lambda0 ** 2 / c**2 * e * self.BField / 4 / 3.1415
+                     / me)
+        print(dlambda_B, self.dLambda)
+        
+        self.nu_m = dlambda_B/ self.dLambda
+        
 
     def Lorentzian(x, x0, gamma):
         '''
@@ -99,28 +129,34 @@ class ME_Atmosphere():
             return (x - mu + gamma_i) / (np.sqrt(2) * sigma)
 
         z_arr = z(nu_array, sigma, gamma, mu)
-        z11 = wofz(z1)
+        z11 = wofz(z_arr)
         psi_profile = -1 * z11.imag / 1.772
 
         return psi_profile
 
-    phi_b = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, -1*self.nu_m)
-    phi_r = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, self.nu_m)
-    phi_r = lambda self: Voigt(self.nu_array, self.lambda_d, self.a, 0)
+    phi_b = lambda self: self.Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop - 1*self.nu_m )
+    phi_p = lambda self: self.Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop)
+    phi_r = lambda self: self.Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop + 1*self.nu_m )
 
-    psi_b = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, -1*self.nu_m)
-    psi_r = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, self.nu_m)
-    psi_r = lambda self: Faraday_Voigt(self.nu_array, self.lambda_d, self.a, 0)
-
+    psi_b = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop - 1*self.nu_m )
+    psi_p = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop)
+    psi_r = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
+                                    self.a, self.lambdaDop + 1*self.nu_m )
+    
     def calculate_Voigt_Faraday_profiles(self):
 
-        self.phi_b_arr = phi_b(self)
-        self.phi_r_arr = phi_r(self)
-        self.phi_p_arr = phi_p(self)
+        self.phi_b_arr = self.phi_b()
+        self.phi_r_arr = self.phi_r()
+        self.phi_p_arr = self.phi_p()
 
-        self.psi_b_arr = psi_b(self)
-        self.psi_r_arr = psi_r(self)
-        self.psi_p_arr = psi_p(self)
+        self.psi_b_arr = self.psi_b()
+        self.psi_r_arr = self.psi_r()
+        self.psi_p_arr = self.psi_p()
 
     # Defining the propagation matrix elements from L^2 book
     def eta_I(self):
@@ -150,7 +186,7 @@ class ME_Atmosphere():
         self.rho_V_arr = (self.psi_r_arr - self.psi_b_arr) * np.cos(self.theta)
 
     def calc_Delta(self):
-        dd = ((1 + eta_I_arr) ** 2
+        dd = ((1 + self.eta_I_arr) ** 2
               * ((1 + self.eta_I_arr) ** 2
                  - self.eta_Q_arr ** 2
                  - self.eta_U_arr ** 2
@@ -165,11 +201,12 @@ class ME_Atmosphere():
 
 
     def compute_I(self):
-        I = self.B0 + self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr) * ((1 + self.eta_I_arr) **2
-                                                                                + self.rho_Q_arr ** 2
-                                                                                + self.rho_U_arr ** 2
-                                                                                + self.rho_V_arr ** 2))                                                                               ))
-        self.I = I
+        self.I = (self.B0 
+             + self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr) 
+                                                 * ((1 + self.eta_I_arr)**2
+                                                    + self.rho_Q_arr ** 2
+                                                    + self.rho_U_arr ** 2
+                                                    + self.rho_V_arr**2 )))
 
     def compute_Q(self):
         self.Q = - self.mu * self.B1 / self.Delta * ((1 + self.eta_I_arr)**2 * self.eta_Q_arr
@@ -190,12 +227,27 @@ class ME_Atmosphere():
                                                      + self.rho_V_arr * (self.eta_Q_arr * self.rho_Q_arr
                                                                          + self.eta_U_arr * self.rho_U_arr
                                                                          + self.eta_V_arr * self.rho_V_arr))
+    
+    def compute_profiles(self):
+        
+        self.calculate_Voigt_Faraday_profiles()
+        self.eta_I()
+        self.eta_Q()
+        self.eta_U()
+        self.eta_V()
+        self.rho_Q()
+        self.rho_U()
+        self.rho_V()
+    
     def compute_all_Stokes(self):
-        compute_I(self)
-        compute_Q(self)
-        compute_U(self)
-        compute_V(self)
+        
+        self.compute_profiles()
+        self.calc_Delta()
+        self.compute_I()
+        self.compute_Q()
+        self.compute_U()
+        self.compute_V()
 
     def synth_atmos(self):
 
-        compute_all_Stokes(self)
+        self.compute_all_Stokes(self)
