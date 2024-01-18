@@ -7,15 +7,15 @@ Also a lot of inspiration is taken from AAR github: https://github.com/aasensio/
 
 '''
 
-import scipy as sp
 import numpy as np
 from scipy.special import voigt_profile, wofz
 
-class ME_Atmosphere():
+class MeAtmosphere:
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, JUp, JLow, gUp, gLow,
-                 lambdaStart, lambdaStep, nLambda, BField = 100.0, theta = 20.0, chi = 20.0,
+    def __init__(self, lambda0, jUp, jLow, gUp, gLow,
+                 lambdaStart, lambdaStep, nLambda, 
+                 BField = 100.0, theta = 20.0, chi = 20.0,
                  vmac = 0.0, damping = 0.0, B0 = 0.8, B1 = 0.2, mu = 1.0,
                  vdop = 0.0, kl = 5.0):
 
@@ -23,8 +23,8 @@ class ME_Atmosphere():
         self.c = 3e8
         
         self.lambda0 = lambda0 * 1e-10
-        self.JUp = JUp
-        self.JLow = JLow
+        self.JUp = jUp
+        self.JLow = jLow
         self.gUp = gUp
         self.gLow = gLow
         self.lambdaStart = lambdaStart * 1e-10
@@ -44,8 +44,8 @@ class ME_Atmosphere():
         self.a = damping
         
         self.BField = BField
-        self.theta = theta
-        self.chi = chi
+        self.theta = theta / 180 * 3.1415
+        self.chi = chi / 180 * 3.1415
         self.vmac = vmac
         self.damping = damping
         self.B0 = B0
@@ -66,10 +66,7 @@ class ME_Atmosphere():
         hbar = 1.54e-34 # J.s / 4pi
         c = 3e8
         
-        dlambda_B = (self.lambda0 ** 2 / c**2 * e * self.BField / 4 / 3.1415
-                     / me)
-        print(dlambda_B, self.dLambda)
-        
+        dlambda_B = 1e-13 * 4.6686e10 * (self.lambda0 **2) * self.BField
         self.nu_m = dlambda_B/ self.dLambda
         
 
@@ -247,7 +244,3 @@ class ME_Atmosphere():
         self.compute_Q()
         self.compute_U()
         self.compute_V()
-
-    def synth_atmos(self):
-
-        self.compute_all_Stokes(self)
