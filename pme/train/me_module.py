@@ -1,29 +1,34 @@
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-from lightning import LightningModule
+import wandb
+from pytorch_lightning import LightningModule
 from torch.optim.lr_scheduler import ExponentialLR
 
 from pme.model import MEModel
+from pme.train.me_equations import MEAtmosphere
 
 
 class MEModule(LightningModule):
 
-    def __init__(self, dim=256, lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
+    def __init__(self, lambda_grid, voigt_function_files, dim=256,
+                 lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
                  use_positional_encoding=True, **kwargs):
-
         super().__init__()
+
         # init model
+        self.parameter_model = MEModel(2, dim, pos_encoding=use_positional_encoding)
 
-        model = MEModel(3, 3, dim, pos_encoding=use_positional_encoding)
-
-        self.model = model
-        self.validation_settings = validation_settings
-        assert 'boundary' not in validation_settings['names'], "'boundary' is a reserved callback name!"
+        self.forward_model = MEAtmosphere(lambda0 = 6301.5080, jUp = 2.0, jLow = 2.0, gUp = 1.5, gLow = 1.83,
+                                          lambdaGrid=lambda_grid,
+                                          voigt_pt=voigt_function_files['voigt'],
+                                          faraday_voigt_pt=voigt_function_files['faraday_voigt'])
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
 
     def configure_optimizers(self):
-        parameters = list(self.model.parameters())
+        parameters = list(self.parameter_model.parameters())
         if isinstance(self.lr_params, dict):
             lr_start = self.lr_params['start']
             lr_end = self.lr_params['end']
@@ -41,24 +46,18 @@ class MEModule(LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_nb):
-        coords = batch['coords']
-        stokes_true = batch['values']
-
-        random_coords = batch['random']
-        random_coords.requires_grad = True
+        coords,  stokes_true = batch
 
         # forward step
-        parameters = self.model(coords)
+        output = self.parameter_model(coords)
 
-        stokes_pred = self.to_profile(parameters)
+        I, Q, U, V = self.forward_model(**output)
+        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
         loss = (stokes_pred - stokes_true).pow(2).mean()
+
         loss_dict = {'loss': loss}
         return loss_dict
-
-    def to_profile(self, parameters):
-        # do stuff here
-        return parameters
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -71,28 +70,57 @@ class MEModule(LightningModule):
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
-    @torch.enable_grad()
-    def validation_step(self, batch, batch_nb, dataloader_idx):
-        coords = batch['coords']
-        stokes_true = batch['values']
+    def validation_step(self, batch, batch_nb):
+        coords,  stokes_true = batch
 
-        parameters = self.model(coords)
-        stokes_pred = self.to_profile(parameters)
+        output = self.parameter_model(coords)
+
+        I, Q, U, V = self.forward_model(**output)
+        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
         diff = torch.abs(stokes_true - stokes_pred)
-        diff = diff.mean()
 
-        return {'diff': diff.detach()}
+        return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
+                **output}
 
     def validation_epoch_end(self, outputs_list):
-        self.validation_outputs = {}  # reset validation outputs
         if len(outputs_list) == 0 or any([len(o) == 0 for o in outputs_list]):
             return  # skip invalid validation steps
 
-        outputs = outputs_list[0]  # unpack data loader 0
-        diff = torch.stack([o['diff'] for o in outputs]).mean()
-        self.validation_outputs['boundary'] = {'diff': diff}
+        outputs = {}
+        for k in outputs_list[0].keys():
+            outputs[k] = torch.cat([o[k] for o in outputs_list], dim=0)
 
-        self.log("valid", {"diff": diff})
+        self.log("valid", {"diff": outputs['diff'].mean()})
 
-        return {'progress_bar': {'diff': diff}}
+        b_field = outputs['b_field'].reshape(41, 41).cpu().numpy()
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        im = ax.imshow(b_field)
+        fig.colorbar(im)
+
+        fig.tight_layout()
+        wandb.log({"B Field": fig})
+        plt.close('all')
+
+        fig, axs = plt.subplots(4, 1, figsize=(8, 8))
+        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(41, 41, 4, 50)
+        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(41, 41, 4, 50)
+        for i, label in enumerate(['I', 'Q', 'U', 'V']):
+            axs[i].plot(stokes_true[20, 20, i], label=f'true - {label}')
+            axs[i].plot(stokes_pred[20, 20, i], label=f'pred - {label}')
+            if i == 0:
+                continue
+            v_min_max = np.abs(stokes_true[20, 20, i]).max()
+            v_min_max = max(0.1, v_min_max)
+            axs[i].set_ylim([-v_min_max, v_min_max])
+
+        [ax.legend(loc='upper right') for ax in axs[1:]]
+        # set minimum y axis to 0.1
+
+
+        # log figure
+        fig.tight_layout()
+        wandb.log({"Profile": wandb.Image(fig)})
+        plt.close('all')
+
+

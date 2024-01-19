@@ -2,10 +2,11 @@ import glob
 import os
 
 import numpy as np
+import torch
 from astropy import units as u
-from lightning import LightningDataModule
+from pytorch_lightning import LightningDataModule
 from sunpy.map import Map, all_coordinates_from_map
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset, RandomSampler
 
 
 class HMIDataModule(LightningDataModule):
@@ -90,6 +91,73 @@ class HMIDataModule(LightningDataModule):
                                      shuffle=False)
         return boundary_loader
 
+
+class BatchDataset(Dataset):
+
+    def __init__(self, *tensors, batch_size):
+        super().__init__()
+        self.tensors = tensors
+        assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
+
+        self.batch_size = batch_size
+        self.n_batches = np.ceil(tensors[0].shape[0] / batch_size).astype(np.int32)
+
+    def __len__(self):
+        return self.n_batches
+
+    def __getitem__(self, idx):
+        return [t[idx * self.batch_size: (idx + 1) * self.batch_size] for t in self.tensors]
+
+
+class TestDataModule(LightningDataModule):
+
+    def __init__(self, file,  spatial_norm=41, batch_size=4096, num_workers=None, **kwargs):
+        super().__init__()
+
+        # train parameters
+        self.batch_size = batch_size
+        self.num_workers = num_workers if num_workers is not None else os.cpu_count()
+
+        lambdaStart = 6300.8 * 1e-10
+        lambdaStep = 0.03 * 1e-10
+        nLambda = 50
+        lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
+        self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
+
+        stokes_vector = np.load(file)['stokes_map']
+        coordinates = np.stack(np.mgrid[0:stokes_vector.shape[0], 0:stokes_vector.shape[1]], -1)
+
+        # flatten data
+        coords = coordinates.reshape(-1, 2).astype(np.float32)
+        stokes_profile = stokes_vector.reshape(-1, 4, nLambda).astype(np.float32)
+
+        # normalize data
+        stokes_profile = stokes_profile
+        coords = (coords / spatial_norm)
+
+        cube_shape = [[coords[:, i].min(), coords[:, i].max()] for i in range(2)]
+        self.cube_shape = cube_shape
+
+        coords = torch.tensor(coords, dtype=torch.float32)
+        stokes_profile = torch.tensor(stokes_profile, dtype=torch.float32)
+
+        self.valid_dataset = BatchDataset(coords, stokes_profile, batch_size=batch_size)
+
+        # shuffle data
+        r = np.random.permutation(coords.shape[0])
+        coords = coords[r]
+        stokes_profile = stokes_profile[r]
+        self.train_dataset = BatchDataset(coords, stokes_profile, batch_size=batch_size)
+
+    def train_dataloader(self):
+        data_loader = DataLoader(self.train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+                                 sampler=RandomSampler(self.train_dataset, replacement=True, num_samples=int(1e3)))
+        return data_loader
+
+    def val_dataloader(self):
+        data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
+                                 pin_memory=True, shuffle=False)
+        return data_loader
 
 class BatchesDataset(Dataset):
 

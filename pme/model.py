@@ -13,7 +13,7 @@ class Sine(nn.Module):
 
 class MEModel(nn.Module):
 
-    def __init__(self, in_coords, out_parameters, dim, pos_encoding=False):
+    def __init__(self, in_coords, dim, pos_encoding=False):
         super().__init__()
         if pos_encoding:
             posenc = PositionalEncoding(8, 20)
@@ -23,18 +23,30 @@ class MEModel(nn.Module):
             self.d_in = nn.Linear(in_coords, dim)
         lin = [nn.Linear(dim, dim) for _ in range(8)]
         self.linear_layers = nn.ModuleList(lin)
-        self.d_out = nn.Linear(dim, out_parameters)
+        self.d_out = nn.Linear(dim, 10)
         self.activation = Sine()  # torch.tanh
+        self.softplus = nn.Softplus()
 
     def forward(self, x):
         x = self.activation(self.d_in(x))
         for l in self.linear_layers:
             x = self.activation(l(x))
-        b = self.d_out(x)
+        params = self.d_out(x)
+        params = self.softplus(params)
+        output = {
+            "b_field": params[..., 0:1] * 100,
+            "theta": params[..., 1:2],
+            "chi": params[..., 1:2],
+            "vmac": params[..., 3:4],
+            "damping": params[..., 4:5],
+            "b0": params[..., 5:6],
+            "b1": params[..., 6:7],
+            "mu": params[..., 7:8],
+            "vdop": params[..., 8:9],
+            "kl": params[..., 9:10],
+        }
 
-        
-
-        return {'b': b}
+        return output
 
 
 class PositionalEncoding(nn.Module):

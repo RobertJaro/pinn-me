@@ -5,7 +5,7 @@ Test the ME module
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as pl
-from me_equations import MeAtmosphere
+from me_equations import MEAtmosphere
 
 def plot_all_Stokes(atmos):
     
@@ -54,9 +54,9 @@ if __name__ == '__main__':
     vdop = 0.0
     kl = 5.0
 
-    atmos = MeAtmosphere(lambda0, jUp, jLow, gUp, gLow,
+    atmos = MEAtmosphere(lambda0, jUp, jLow, gUp, gLow,
                          lambdaStart, lambdaStep, nLambda, BField, theta, chi,
-                         vmac , damping, B0, B1, mu,
+                         vmac, damping, B0, B1, mu,
                          vdop, kl)
     atmos.compute_all_Stokes()
     
