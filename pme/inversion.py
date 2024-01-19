@@ -57,8 +57,6 @@ me_module = MEModule(data_module.lambda_grid, **args.model, **args.training)
 
 config = {'data': args.data, 'model': args.model, 'training': args.training}
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
-                                      every_n_train_steps=args.training[
-                                          "validation_interval"] if "validation_interval" in args.training else None,
                                       every_n_epochs=args.training[
                                           'check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
                                       save_last=True)
@@ -72,6 +70,7 @@ trainer = Trainer(max_epochs=int(args.training['epochs']) if 'epochs' in args.tr
                   strategy='dp' if n_gpus > 1 else None,  # ddp breaks memory and wandb
                   num_sanity_val_steps=0,
                   check_val_every_n_epoch=args.training['check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
-                  gradient_clip_val=0.1)
+                  gradient_clip_val=0.1,
+                  callbacks=[checkpoint_callback],)
 
 trainer.fit(me_module, data_module, ckpt_path='last')

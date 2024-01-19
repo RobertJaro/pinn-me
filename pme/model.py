@@ -26,24 +26,36 @@ class MEModel(nn.Module):
         self.d_out = nn.Linear(dim, 10)
         self.activation = Sine()  # torch.tanh
         self.softplus = nn.Softplus()
+        self.register_buffer("c", torch.tensor(3e8))
 
     def forward(self, x):
         x = self.activation(self.d_in(x))
         for l in self.linear_layers:
             x = self.activation(l(x))
         params = self.d_out(x)
-        params = self.softplus(params)
+        #
+        b_field = self.softplus(params[..., 0:1]) * 100
+        theta = torch.sigmoid(params[..., 1:2]) * 180
+        chi = torch.sigmoid(params[..., 3:4]) * 180
+        vmac = self.softplus(params[..., 3:4])
+        damping = self.softplus(params[..., 4:5])
+        b0 = torch.sigmoid(params[..., 5:6])
+        b1 = torch.sigmoid(params[..., 6:7])
+        mu = torch.sigmoid(params[..., 7:8])
+        vdop = torch.tanh(params[..., 8:9]) * 10
+        kl = self.softplus(params[..., 9:10])
+        #
         output = {
-            "b_field": params[..., 0:1] * 100,
-            "theta": params[..., 1:2],
-            "chi": params[..., 1:2],
-            "vmac": params[..., 3:4],
-            "damping": params[..., 4:5],
-            "b0": params[..., 5:6],
-            "b1": params[..., 6:7],
-            "mu": params[..., 7:8],
-            "vdop": params[..., 8:9],
-            "kl": params[..., 9:10],
+            "b_field": b_field,
+            "theta": theta,
+            "chi": chi,
+            "vmac": vmac,
+            "damping": damping,
+            "b0": b0,
+            "b1": b1,
+            "mu": mu,
+            "vdop": vdop,
+            "kl": kl,
         }
 
         return output
