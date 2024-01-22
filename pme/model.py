@@ -2,6 +2,15 @@ import torch
 from torch import nn
 
 
+class Swish(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor(1., dtype=torch.float32), requires_grad=True)
+
+    def forward(self, x):
+        return x * torch.sigmoid(self.beta * x)
+
 class Sine(nn.Module):
     def __init__(self, w0=1.):
         super().__init__()
@@ -24,7 +33,7 @@ class MEModel(nn.Module):
         lin = [nn.Linear(dim, dim) for _ in range(8)]
         self.linear_layers = nn.ModuleList(lin)
         self.d_out = nn.Linear(dim, 10)
-        self.activation = Sine()  # torch.tanh
+        self.activation = Swish()  # torch.tanh
         self.softplus = nn.Softplus()
         self.register_buffer("c", torch.tensor(3e8))
 
@@ -36,13 +45,13 @@ class MEModel(nn.Module):
         #
         b_field = self.softplus(params[..., 0:1]) * 100
         theta = torch.sigmoid(params[..., 1:2]) * 180
-        chi = torch.sigmoid(params[..., 3:4]) * 180
+        chi = torch.sigmoid(params[..., 2:3]) * 180
         vmac = self.softplus(params[..., 3:4])
         damping = self.softplus(params[..., 4:5])
         b0 = torch.sigmoid(params[..., 5:6])
         b1 = torch.sigmoid(params[..., 6:7])
         mu = torch.sigmoid(params[..., 7:8])
-        vdop = torch.tanh(params[..., 8:9]) * 10
+        vdop = torch.tanh(params[..., 8:9]) * 0
         kl = self.softplus(params[..., 9:10])
         #
         output = {
@@ -76,7 +85,7 @@ class PositionalEncoding(nn.Module):
             num_freqs (int): number of frequencies between [0, max_freq]
         """
         super().__init__()
-        freqs = 2 ** torch.linspace(0, max_freq, num_freqs)
+        freqs = 2 ** torch.linspace(-max_freq, max_freq, num_freqs)
         self.register_buffer("freqs", freqs)  # (num_freqs)
 
     def forward(self, x):
@@ -91,3 +100,11 @@ class PositionalEncoding(nn.Module):
         out = torch.cat([torch.sin(x_proj), torch.cos(x_proj)],
                         dim=-1)  # (num_rays, num_samples, 2*num_freqs*in_features)
         return out
+
+def jacobian(output, coords):
+    jac_matrix = [torch.autograd.grad(output[:, i], coords,
+                                      grad_outputs=torch.ones_like(output[:, i]).to(output),
+                                      retain_graph=True, create_graph=True, allow_unused=True)[0]
+                  for i in range(output.shape[1])]
+    jac_matrix = torch.stack(jac_matrix, dim=1)
+    return jac_matrix

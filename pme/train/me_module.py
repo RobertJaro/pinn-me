@@ -11,7 +11,7 @@ from pme.train.me_equations import MEAtmosphere
 
 class MEModule(LightningModule):
 
-    def __init__(self, lambda_grid, voigt_function_files, dim=256,
+    def __init__(self, lambda_grid, dim=256,
                  lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
                  use_positional_encoding=False, **kwargs):
         super().__init__()
@@ -19,15 +19,13 @@ class MEModule(LightningModule):
         # init model
         self.parameter_model = MEModel(2, dim, pos_encoding=use_positional_encoding)
 
-        self.forward_model = MEAtmosphere(lambda0 = 6301.5080, jUp = 2.0, jLow = 2.0, gUp = 1.5, gLow = 1.83,
-                                          lambdaGrid=lambda_grid,
-                                          voigt_pt=voigt_function_files['voigt'],
-                                          faraday_voigt_pt=voigt_function_files['faraday_voigt'])
+        self.forward_model = MEAtmosphere(lambda0=6301.5080, jUp=2.0, jLow=2.0, gUp=1.5, gLow=1.83,
+                                          lambdaGrid=lambda_grid, )
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
-        weight = torch.tensor([1., 1, 1, 1]).reshape(1, 4)
-        weight = weight #/ weight.sum()
+        weight = torch.tensor([1., 1e5, 1e5, 1e2], dtype=torch.float32).reshape(1, 4)
+        weight = weight  # / weight.sum()
         self.weight = weight
 
     def configure_optimizers(self):
@@ -49,7 +47,7 @@ class MEModule(LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_nb):
-        coords,  stokes_true = batch
+        coords, stokes_true = batch
 
         # forward step
         output = self.parameter_model(coords)
@@ -65,8 +63,8 @@ class MEModule(LightningModule):
         stokes_pred = torch.cat([I_pred, normalized_QUV_pred], dim=-2)
         stokes_true = torch.cat([I_true, normalized_QUV_true], dim=-2)
 
-        stokes_true = torch.asinh(stokes_true / 1e-4) / np.arcsinh(1 / 1e-4)
-        stokes_pred = torch.asinh(stokes_pred / 1e-4) / np.arcsinh(1 / 1e-4)
+        # stokes_pred = torch.arcsinh(stokes_pred / 1e-3) / np.arcsinh(1 / 1e-3)
+        # stokes_true = torch.arcsinh(stokes_true / 1e-3) / np.arcsinh(1 / 1e-3)
 
         weight = self.weight.to(stokes_pred.device)
         loss = (stokes_pred - stokes_true).pow(2).sum(-1)
@@ -87,7 +85,7 @@ class MEModule(LightningModule):
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
     def validation_step(self, batch, batch_nb):
-        coords,  stokes_true = batch
+        coords, stokes_true = batch
 
         output = self.parameter_model(coords)
 
@@ -125,8 +123,8 @@ class MEModule(LightningModule):
         stokes_true[..., 1:, :] = stokes_true[..., 1:, :] / stokes_true[..., 0:1, :]
         stokes_pred[..., 1:, :] = stokes_pred[..., 1:, :] / stokes_pred[..., 0:1, :]
 
-        stokes_true = np.arcsinh(stokes_true / 1e-4) / np.arcsinh(1 / 1e-4)
-        stokes_pred = np.arcsinh(stokes_pred / 1e-4) / np.arcsinh(1 / 1e-4)
+        # stokes_true = np.arcsinh(stokes_true / 1e-4) / np.arcsinh(1 / 1e-4)
+        # stokes_pred = np.arcsinh(stokes_pred / 1e-4) / np.arcsinh(1 / 1e-4)
 
         pos = np.stack(np.meshgrid(np.linspace(10, 30, 3, dtype=int), np.linspace(10, 30, 3, dtype=int)), -1)
         pos = pos.reshape(-1, 2)
@@ -145,7 +143,5 @@ class MEModule(LightningModule):
             [ax.legend(loc='upper right') for ax in axs]
             # log figure
             fig.tight_layout()
-            wandb.log({f"Profile x:{x:02d} y:{y:02d}":wandb.Image(fig)})
+            wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
             plt.close('all')
-
-

@@ -9,7 +9,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from pme.train.data_loader import TestDataModule
-from pme.train.generic_function import GenericFunction
 from pme.train.me_module import MEModule
 
 parser = argparse.ArgumentParser()
@@ -49,10 +48,6 @@ if wandb_id is not None:
 
 data_module = TestDataModule(**args.data)
 
-# TODO fix this workaround
-GenericFunction(3)
-torch.load('/glade/work/rjarolim/pinn_me/profile/voigt.pt')
-
 me_module = MEModule(data_module.lambda_grid, **args.model, **args.training)
 
 config = {'data': args.data, 'model': args.model, 'training': args.training}
@@ -69,8 +64,9 @@ trainer = Trainer(max_epochs=int(args.training['epochs']) if 'epochs' in args.tr
                   accelerator='gpu' if n_gpus >= 1 else None,
                   strategy='dp' if n_gpus > 1 else None,  # ddp breaks memory and wandb
                   num_sanity_val_steps=0,
-                  check_val_every_n_epoch=args.training['check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
+                  check_val_every_n_epoch=args.training[
+                      'check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
                   gradient_clip_val=0.1,
-                  callbacks=[checkpoint_callback],)
+                  callbacks=[checkpoint_callback], )
 
 trainer.fit(me_module, data_module, ckpt_path='last')

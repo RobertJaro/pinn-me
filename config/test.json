@@ -1,5 +1,5 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v01",
+  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v02",
   "data": {
     "file": "/glade/work/rjarolim/data/inversion/stokes_map_train.npz"
   },
@@ -11,10 +11,6 @@
   },
   "model": {
     "dim": 64,
-    "voigt_function_files": {
-      "voigt": "/glade/work/rjarolim/pinn_me/profile/voigt.pt",
-      "faraday_voigt": "/glade/work/rjarolim/pinn_me/profile/faraday_voigt.pt"
-    },
     "use_positional_encoding": true
   },
   "training": {

@@ -6,23 +6,23 @@ The formalism follows the computations on p. 159 in Landi Degl'Innocenti & Lando
 Also a lot of inspiration is taken from AAR github: https://github.com/aasensio/milne/blob/master/maths.f90
 
 '''
-
+import numpy as np
 import torch
+from matplotlib import pyplot as plt
 from scipy.special import voigt_profile, wofz
 from torch import nn
 
-from pme.train.generic_function import GenericFunction
+from pme.train.generic_function import FaradayVoigt, Voigt
 
 
 class MEAtmosphere(nn.Module):
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, jUp, jLow, gUp, gLow, lambdaGrid, voigt_pt, faraday_voigt_pt):
+    def __init__(self, lambda0, jUp, jLow, gUp, gLow, lambdaGrid):
         super().__init__()
 
-        m = GenericFunction(3)
-        self.voigt = torch.load(voigt_pt)
-        self.faraday_voigt = torch.load(faraday_voigt_pt)
+        self.voigt = Voigt()
+        self.faraday_voigt = FaradayVoigt()
 
         self.c = 3e8
         
@@ -42,61 +42,36 @@ class MEAtmosphere(nn.Module):
         
         dlambda_B = 1e-13 * 4.6686e10 * (self.lambda0 **2) * self.BField
         self.nu_m = dlambda_B/ self.dLambda
-
-    def compute_scattering_profiles(self, nu, sigma, gamma):
-
-
-        self.voigt = voigt_profile(nu, sigma, gamma)
-        self.dispersion = 0
-
-    phi_b = lambda self: self.Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop - 1*self.nu_m )
-    phi_p = lambda self: self.Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop)
-    phi_r = lambda self: self.Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop + 1*self.nu_m )
-
-    psi_b = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop - 1*self.nu_m )
-    psi_p = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop)
-    psi_r = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
-                                    self.a, self.lambdaDop + 1*self.nu_m )
     
     def calculate_Voigt_Faraday_profiles(self):
         nu = self.nuArray # [batch, n_lambda]
         gamma = torch.ones_like(nu) * self.a # [batch, n_lambda]
-
+        sigma = torch.ones_like(nu)
 
         mu = torch.ones_like(nu) * (self.lambdaDop - 1 * self.nu_m) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-        self.phi_b_arr = self.voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-        self.phi_r_arr = self.voigt(parameters)
+        self.phi_b_arr = self.voigt(nu - mu, sigma, gamma)
 
         mu = torch.ones_like(nu) * (self.lambdaDop + 1 * self.nu_m) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-        self.phi_p_arr = self.voigt(parameters)
+        self.phi_r_arr = self.voigt(nu - mu, sigma, gamma)
+
+        mu = torch.ones_like(nu) * (self.lambdaDop) # [batch, n_lambda]
+        self.phi_p_arr = self.voigt(nu - mu, sigma, gamma)
 
         mu = torch.ones_like(nu) * (self.lambdaDop - 1 * self.nu_m)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
-        self.psi_b_arr = self.faraday_voigt(parameters)
+        self.psi_b_arr = self.faraday_voigt(nu - mu, sigma, gamma)
 
         mu = torch.ones_like(nu) * (self.lambdaDop)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
-        self.psi_p_arr = self.faraday_voigt(parameters)
+        self.psi_p_arr = self.faraday_voigt(nu - mu, sigma, gamma)
 
         mu = torch.ones_like(nu) * (self.lambdaDop + 1 * self.nu_m)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)
-        self.psi_r_arr = self.faraday_voigt(parameters)
+        self.psi_r_arr = self.faraday_voigt(nu - mu, sigma, gamma)
 
 
     # Defining the propagation matrix elements from L^2 book
     def eta_I(self):
         self.eta_I_arr = (self.phi_p_arr * torch.sin(self.theta) ** 2
-                         + (self.phi_r_arr + self.phi_b_arr) / 2 * (1 + torch.cos(self.theta) ** 2))
+                          + (self.phi_r_arr + self.phi_b_arr) / 2 * (1 + torch.cos(self.theta) ** 2))
+
 
     def eta_Q(self):
         self.eta_Q_arr = (self.phi_p_arr
@@ -215,3 +190,74 @@ class MEAtmosphere(nn.Module):
         return I, Q, U, V
 
 
+if __name__ == '__main__':
+    lambdaStart = 6300.8 * 1e-10
+    lambdaStep = 0.03 * 1e-10
+    nLambda = 50
+    lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
+    lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
+
+    forward_model = MEAtmosphere(lambda0=6301.5080, jUp=2.0, jLow=2.0, gUp=1.5, gLow=1.83,
+                                 lambdaGrid=lambda_grid)
+    forward_model.cpu()
+
+    b_field = torch.tensor([[1000.]], dtype=torch.float32)
+    theta = torch.tensor([[20.]], dtype=torch.float32)
+    chi = torch.tensor([[20.]], dtype=torch.float32)
+    vmac = torch.tensor([[2.]], dtype=torch.float32)
+    damping = torch.tensor([[0.2]], dtype=torch.float32)
+    b0 = torch.tensor([[.8]], dtype=torch.float32)
+    b1 = torch.tensor([[.2]], dtype=torch.float32)
+    mu = torch.tensor([[1.]], dtype=torch.float32)
+    vdop = torch.tensor([[0.]], dtype=torch.float32)
+    kl = torch.tensor([[5.]], dtype=torch.float32)
+    I, Q, U, V = forward_model.forward(b_field, theta, chi,
+                            vmac, damping, b0, b1, mu,
+                            vdop, kl)
+
+    # plot stokes vectors
+    fig, ax = plt.subplots(4, 1, figsize=(10, 5))
+    ax[0].plot(lambda_grid, I[0].detach().numpy(), label='I')
+    ax[1].plot(lambda_grid, Q[0].detach().numpy(), label='Q')
+    ax[2].plot(lambda_grid, U[0].detach().numpy(), label='U')
+    ax[3].plot(lambda_grid, V[0].detach().numpy(), label='V')
+    [ax.legend() for ax in ax]
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_stokes.jpg')
+    plt.close('all')
+
+    # eta
+    plt.plot(lambda_grid, forward_model.eta_Q_arr[0].detach().numpy(), label='eta_Q')
+    plt.plot(lambda_grid, forward_model.eta_U_arr[0].detach().numpy(), label='eta_U')
+    plt.plot(lambda_grid, forward_model.eta_V_arr[0].detach().numpy(), label='eta_V')
+    plt.legend()
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_eta.jpg')
+    plt.close('all')
+
+    # phi
+    plt.plot(lambda_grid, forward_model.phi_p_arr[0].detach().numpy(), label='phi_p')
+    plt.plot(lambda_grid, forward_model.phi_b_arr[0].detach().numpy(), label='phi_b')
+    plt.plot(lambda_grid, forward_model.phi_r_arr[0].detach().numpy(), label='phi_r')
+    plt.legend()
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_phi.jpg')
+    plt.close('all')
+
+    # psi
+    plt.plot(lambda_grid, forward_model.psi_p_arr[0].detach().numpy(), label='psi_p')
+    plt.plot(lambda_grid, forward_model.psi_b_arr[0].detach().numpy(), label='psi_b')
+    plt.plot(lambda_grid, forward_model.psi_r_arr[0].detach().numpy(), label='psi_r')
+    plt.legend()
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_psi.jpg')
+    plt.close('all')
+
+    # rho
+    plt.plot(lambda_grid, forward_model.rho_Q_arr[0].detach().numpy(), label='rho_Q')
+    plt.plot(lambda_grid, forward_model.rho_U_arr[0].detach().numpy(), label='rho_U')
+    plt.plot(lambda_grid, forward_model.rho_V_arr[0].detach().numpy(), label='rho_V')
+    plt.legend()
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_rho.jpg')
+    plt.close('all')
+
+    arr = (forward_model.psi_r_arr - forward_model.psi_b_arr) * torch.cos(forward_model.theta)
+    plt.plot(lambda_grid, arr[0].detach().numpy(), label='phi_p')
+    plt.savefig('/glade/work/rjarolim/pinn_me/profile/test_arr.jpg')
+    plt.close('all')
