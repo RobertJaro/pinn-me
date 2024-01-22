@@ -5,7 +5,7 @@ Test the ME module
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as pl
-from me_equations import MEAtmosphere
+from pme.train.me_equations import MEAtmosphere
 
 def plot_all_Stokes(atmos):
     
