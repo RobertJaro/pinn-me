@@ -1,9 +1,9 @@
 #!/bin/bash -l
 
-#PBS -N global
+#PBS -N evaluation
 #PBS -A P22100000
 #PBS -q preempt
-#PBS -l select=1:ncpus=1:mem=4gb
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
 #PBS -l walltime=02:00:00
 
 module load conda/latest

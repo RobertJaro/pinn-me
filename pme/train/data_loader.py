@@ -3,10 +3,13 @@ import os
 
 import numpy as np
 import torch
+import wandb
 from astropy import units as u
+from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
+from scipy.signal import convolve2d
 from sunpy.map import Map, all_coordinates_from_map
-from torch.utils.data import DataLoader, Dataset, TensorDataset, RandomSampler
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 
 class HMIDataModule(LightningDataModule):
@@ -97,7 +100,7 @@ class BatchDataset(Dataset):
     def __init__(self, *tensors, batch_size):
         super().__init__()
         self.tensors = tensors
-        assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
+        assert all(t.shape[0] == tensors[0].shape[0] for t in tensors), f'Invalid shapes: {[t.shape for t in tensors]}'
 
         self.batch_size = batch_size
         self.n_batches = np.ceil(tensors[0].shape[0] / batch_size).astype(np.int32)
@@ -111,7 +114,7 @@ class BatchDataset(Dataset):
 
 class TestDataModule(LightningDataModule):
 
-    def __init__(self, file,  spatial_norm=41, batch_size=4096, num_workers=None, **kwargs):
+    def __init__(self, file, batch_size=4096, num_workers=None, noise=None, psf=None, **kwargs):
         super().__init__()
 
         # train parameters
@@ -124,8 +127,65 @@ class TestDataModule(LightningDataModule):
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
 
-        stokes_vector = np.load(file)['stokes_map']
-        coordinates = np.stack(np.mgrid[0:stokes_vector.shape[0], 0:stokes_vector.shape[1]], -1)
+        stokes_vector = list(np.load(file).values())[0]
+        print('LOADING STOKES VECTOR: ', stokes_vector.shape)
+        coordinates = np.stack(np.meshgrid(np.linspace(-1, 1, stokes_vector.shape[0], dtype=np.float32),
+                                           np.linspace(-1, 1, stokes_vector.shape[1], dtype=np.float32),
+                                           indexing='ij'), -1)
+
+        self.img_shape = stokes_vector.shape[0:2]
+
+        # add noise
+        if noise is not None:
+            stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
+
+        # convolve with psf
+        if psf is not None:
+            psf = np.load(psf)['PSF']
+            psf /= psf.sum()  # assure valid psf
+            # stokes vector (x, y, lambda); psf (x, y)
+            stokes_I = np.stack(
+                [convolve2d(stokes_vector[..., 0, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
+            stokes_Q = np.stack(
+                [convolve2d(stokes_vector[..., 1, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
+            stokes_U = np.stack(
+                [convolve2d(stokes_vector[..., 2, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
+            stokes_V = np.stack(
+                [convolve2d(stokes_vector[..., 3, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
+            stokes_vector = np.stack([stokes_I, stokes_Q, stokes_U, stokes_V], -2)
+
+            fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
+            im = ax.imshow(psf, vmin=0)
+            fig.colorbar(im)
+            fig.tight_layout()
+            wandb.log({'Ground-truth PSF': fig})
+            plt.close('all')
+
+        # plot coordinates
+        fig, axs = plt.subplots(2, 1, figsize=(8, 8), dpi=100)
+        im = axs[0].imshow(coordinates[..., 0])
+        fig.colorbar(im)
+        axs[0].set_title('y')
+        im = axs[1].imshow(coordinates[..., 1])
+        fig.colorbar(im)
+        axs[1].set_title('x')
+        fig.tight_layout()
+        wandb.log({'Coordinates': fig})
+        plt.close('all')
+
+        # plot stokes vector
+        stokes_min_max = np.abs(stokes_vector).max((0, 1, -1))
+        for l in range(nLambda):
+            fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
+            for i, label in enumerate(['I', 'Q', 'U', 'V']):
+                im = axs[i].imshow(stokes_vector[..., i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
+                axs[i].set_title(label)
+                fig.colorbar(im, ax=axs[i])
+            fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
+            fig.tight_layout()
+            wandb.log({'Stokes vector': fig})
+            plt.close('all')
+
 
         # flatten data
         coords = coordinates.reshape(-1, 2).astype(np.float32)
@@ -133,31 +193,33 @@ class TestDataModule(LightningDataModule):
 
         # normalize data
         stokes_profile = stokes_profile
-        coords = (coords / spatial_norm)
-
-        cube_shape = [[coords[:, i].min(), coords[:, i].max()] for i in range(2)]
-        self.cube_shape = cube_shape
 
         coords = torch.tensor(coords, dtype=torch.float32)
         stokes_profile = torch.tensor(stokes_profile, dtype=torch.float32)
 
         self.valid_dataset = BatchDataset(coords, stokes_profile, batch_size=batch_size)
 
-        # shuffle data
-        r = np.random.permutation(coords.shape[0])
-        coords = coords[r]
-        stokes_profile = stokes_profile[r]
-        self.train_dataset = BatchDataset(coords, stokes_profile, batch_size=batch_size)
+        self.coords = coords
+        self.stokes_profile = stokes_profile
+
 
     def train_dataloader(self):
-        data_loader = DataLoader(self.train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
-                                 sampler=RandomSampler(self.train_dataset, replacement=True, num_samples=int(1e3)))
+        # shuffle data
+        r = np.random.permutation(self.coords.shape[0])
+        coords = self.coords[r]
+        stokes_profile = self.stokes_profile[r]
+
+        train_dataset = BatchDataset(coords, stokes_profile, batch_size=self.batch_size)
+
+        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+                                 sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
         return data_loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
                                  pin_memory=True, shuffle=False)
         return data_loader
+
 
 class BatchesDataset(Dataset):
 

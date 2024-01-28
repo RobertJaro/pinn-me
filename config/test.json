@@ -1,7 +1,10 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v02",
+  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v06",
   "data": {
-    "file": "/glade/work/rjarolim/data/inversion/stokes_map_train.npz"
+    "file": "/glade/work/rjarolim/data/inversion/stokes_map_train.npz",
+    "psf": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz",
+    "noise": null,
+    "num_workers": 8
   },
   "logging": {
     "wandb_entity": "robert_jarolim",
@@ -11,7 +14,7 @@
   },
   "model": {
     "dim": 64,
-    "use_positional_encoding": true
+    "positional_encoding": "encoding"
   },
   "training": {
     "epochs": 1e3,

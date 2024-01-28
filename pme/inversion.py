@@ -48,7 +48,7 @@ if wandb_id is not None:
 
 data_module = TestDataModule(**args.data)
 
-me_module = MEModule(data_module.lambda_grid, **args.model, **args.training)
+me_module = MEModule(data_module.img_shape, data_module.lambda_grid, **args.model, **args.training)
 
 config = {'data': args.data, 'model': args.model, 'training': args.training}
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
@@ -67,6 +67,7 @@ trainer = Trainer(max_epochs=int(args.training['epochs']) if 'epochs' in args.tr
                   check_val_every_n_epoch=args.training[
                       'check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
                   gradient_clip_val=0.1,
+                  reload_dataloaders_every_n_epochs=1, # reload dataloaders every epoch to avoid oscillating loss
                   callbacks=[checkpoint_callback], )
 
 trainer.fit(me_module, data_module, ckpt_path='last')

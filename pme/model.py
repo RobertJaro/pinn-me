@@ -11,6 +11,7 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(self.beta * x)
 
+
 class Sine(nn.Module):
     def __init__(self, w0=1.):
         super().__init__()
@@ -20,11 +21,33 @@ class Sine(nn.Module):
         return torch.sin(self.w0 * x)
 
 
+class PeriodicBoundary(nn.Module):
+
+    def __init__(self, max_x, max_y, padding):
+        super().__init__()
+        self.register_buffer('max_x', torch.tensor(max_x))
+        self.register_buffer('max_y', torch.tensor(max_y))
+        self.register_buffer('padding', torch.tensor((max_x ** 2 + max_y ** 2) ** 0.5 * padding))
+
+    def forward(self, coord):
+        scaled_x = (coord[..., 0:1] + self.padding) / (self.max_x + 2 * self.padding) * 2 * torch.pi
+        scaled_y = (coord[..., 1:2] + self.padding) / (self.max_y + 2 * self.padding) * 2 * torch.pi
+        encoded_coord = torch.cat([
+            torch.sin(scaled_x), torch.cos(scaled_x),
+            torch.sin(scaled_y), torch.cos(scaled_y),
+            coord[..., 2:]], -1)
+        return encoded_coord
+
+
 class MEModel(nn.Module):
 
     def __init__(self, in_coords, dim, pos_encoding=False):
         super().__init__()
-        if pos_encoding:
+        if pos_encoding == "periodic":
+            posenc = PeriodicBoundary(1, 1, 0)
+            d_in = nn.Linear(in_coords * 2, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif pos_encoding == "encoding":
             posenc = PositionalEncoding(8, 20)
             d_in = nn.Linear(in_coords * 40, dim)
             self.d_in = nn.Sequential(posenc, d_in)
@@ -43,9 +66,9 @@ class MEModel(nn.Module):
             x = self.activation(l(x))
         params = self.d_out(x)
         #
-        b_field = self.softplus(params[..., 0:1]) * 100
-        theta = torch.sigmoid(params[..., 1:2]) * 180
-        chi = torch.sigmoid(params[..., 2:3]) * 180
+        b_field = params[..., 0:1] * 1000
+        theta = params[..., 1:2] * 180 #torch.sigmoid(params[..., 1:2]) * 180
+        chi = params[..., 2:3] * 180#torch.sigmoid(params[..., 2:3]) * 180
         vmac = self.softplus(params[..., 3:4])
         damping = self.softplus(params[..., 4:5])
         b0 = torch.sigmoid(params[..., 5:6])
@@ -100,6 +123,7 @@ class PositionalEncoding(nn.Module):
         out = torch.cat([torch.sin(x_proj), torch.cos(x_proj)],
                         dim=-1)  # (num_rays, num_samples, 2*num_freqs*in_features)
         return out
+
 
 def jacobian(output, coords):
     jac_matrix = [torch.autograd.grad(output[:, i], coords,
