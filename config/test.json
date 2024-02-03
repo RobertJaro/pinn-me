@@ -14,7 +14,8 @@
   },
   "model": {
     "dim": 64,
-    "positional_encoding": "encoding"
+    "encoding": "positional",
+    "psf_config": {"type": "load", "path": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
   },
   "training": {
     "epochs": 1e3,

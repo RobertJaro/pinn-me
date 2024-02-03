@@ -186,6 +186,16 @@ class TestDataModule(LightningDataModule):
             wandb.log({'Stokes vector': fig})
             plt.close('all')
 
+        # plot integrated stokes vector
+        integerated_stokes_vector = np.abs(stokes_vector).sum(-1)
+        fig, ax = plt.subplots(1, 4, figsize=(16, 8), dpi=100)
+        for i, label in enumerate(['I', 'Q', 'U', 'V']):
+            im = ax[i].imshow(integerated_stokes_vector[..., i])
+            ax[i].set_title(label)
+            fig.colorbar(im, ax=ax[i])
+        fig.tight_layout()
+        wandb.log({'Integrated Stokes vector': fig})
+        plt.close('all')
 
         # flatten data
         coords = coordinates.reshape(-1, 2).astype(np.float32)

@@ -12,36 +12,53 @@ from pme.train.me_equations import MEAtmosphere
 
 class MEModule(LightningModule):
 
-    def __init__(self, img_shape, lambda_grid, psf_shape=(5, 5), dim=256,
+    def __init__(self, img_shape, lambda_grid, psf_config={'type': None}, dim=256,
                  lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
-                 positional_encoding="periodic", use_psf=True, **kwargs):
+                 encoding="positional", **kwargs):
         super().__init__()
 
         self.img_shape = img_shape
 
         # init model
-        self.parameter_model = MEModel(2, dim, pos_encoding=positional_encoding)
+        self.parameter_model = MEModel(2, dim, encoding=encoding)
 
-        self.use_psf = use_psf
-        self.psf = PSF(*psf_shape)
-        coords_psf = np.stack(np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0]),
-                                          np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1]),
-                                          indexing='ij'), -1)
-        print("IMG_shape", img_shape)
-        coords_psf /= (img_shape[0] / 2)
-        self.coords_psf = nn.Parameter(torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 2)),
-                                       requires_grad=False)
+        self.use_psf = True
+        print(psf_config)
+        if psf_config['type'] is None:
+            self.use_psf = False
+        elif psf_config['type'] == 'load':
+            self.psf = LoadPSF(psf_config['path'])
+            psf_shape = self.psf.psf_shape
+            coords_psf = np.stack(np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0]),
+                                              np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1]),
+                                              indexing='ij'), -1)
+            coords_psf *= (2 / img_shape[0])
+            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 2))
+            self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
+        elif psf_config['type'] == 'learn':
+            self.psf = PSF(*psf_config['shape'])
+            psf_shape = psf_config['shape']
+            coords_psf = np.stack(np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0]),
+                                              np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1]),
+                                              indexing='ij'), -1)
+            coords_psf *= (2 / img_shape[0])
+            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 2))
+            self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
+        else:
+            raise ValueError(f"Invalid PSF type: {psf_config['type']}")
 
         self.forward_model = MEAtmosphere(lambda0=6301.5080, jUp=2.0, jLow=2.0, gUp=1.5, gLow=1.83,
                                           lambdaGrid=lambda_grid, )
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
-        weight = torch.tensor([1., 1e5, 1e5, 1e2], dtype=torch.float32).reshape(1, 4)
+        weight = torch.tensor([1., 1e2, 1e2, 1e1], dtype=torch.float32).reshape(1, 4, 1)
         self.weight = weight
 
     def configure_optimizers(self):
-        parameters = list(self.parameter_model.parameters()) #+ list(self.psf.parameters())
+        parameters = list(self.parameter_model.parameters())
+        if self.use_psf:
+            parameters += list(self.psf.parameters())
         if isinstance(self.lr_params, dict):
             lr_start = self.lr_params['start']
             lr_end = self.lr_params['end']
@@ -85,12 +102,12 @@ class MEModule(LightningModule):
         # stokes_pred = torch.arcsinh(stokes_pred / 1e-3) / np.arcsinh(1 / 1e-3)
         # stokes_true = torch.arcsinh(stokes_true / 1e-3) / np.arcsinh(1 / 1e-3)
 
-        weight = self.weight.to(stokes_pred.device)
-        loss = (stokes_pred - stokes_true).pow(2).sum(-1).pow(0.5)
-        loss = torch.mean(loss * weight)
 
-        loss_dict = {'loss': loss}
-        return loss_dict
+        weight = self.weight.to(stokes_pred.device)
+        loss = ((stokes_pred - stokes_true) * weight).pow(2).sum(-1)
+        loss = torch.mean(loss)
+
+        return {"loss": loss}
 
     def convolve_psf(self, I, Q, U, V, coords):
         # filter_outside = (coords[..., 0] < 0) | (coords[..., 0] > 1) | (coords[..., 1] < 0) | (coords[..., 1] > 1)
@@ -120,20 +137,25 @@ class MEModule(LightningModule):
     def validation_step(self, batch, batch_nb):
         coords, stokes_true = batch
 
-        coords = coords[:, None, None, :] + self.coords_psf
+        if self.use_psf:
+            coords = coords[:, None, None, :] + self.coords_psf
 
         output = self.parameter_model(coords)
 
         I, Q, U, V = self.forward_model(**output)
 
-        I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
+        if self.use_psf:
+            I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
 
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
         diff = torch.abs(stokes_true - stokes_pred)
 
-        center = coords.shape[1] // 2, coords.shape[2] // 2
-        output = {k: v[:, center[0], center[1], :] for k, v in output.items()}  # select center pixel
+        if self.use_psf:
+            center = coords.shape[1] // 2, coords.shape[2] // 2
+            output = {k: v[:, center[0], center[1], :] for k, v in output.items()}  # select center pixel
+        else:
+            output = {k: v for k, v in output.items()}
 
         return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
                 **output}
@@ -152,9 +174,9 @@ class MEModule(LightningModule):
             field = outputs[k].reshape(*self.img_shape).cpu().numpy()
             plot_settings = {}
             if k == 'theta' or k == 'chi':
-                field = np.cos(field) # reproject angles to cosine
-                plot_settings['vmin'] = -1
-                plot_settings['vmax'] = 1
+                field = np.rad2deg(np.arccos(np.cos(field))) # reproject angles to cosine
+                plot_settings['vmin'] = 0
+                plot_settings['vmax'] = 180
             if k == 'b_field':
                 v_min_max = np.abs(field).max()
                 plot_settings['vmin'] = -v_min_max
@@ -223,11 +245,30 @@ class PSF(nn.Module):
     def __init__(self, *shape):
         super().__init__()
         assert len(shape) == 2 and shape[0] % 2 == 1 and shape[1] % 2 == 1, "Invalid PSF shape"
-        psf = torch.ones(*shape, dtype=torch.float32) * 1e-2
+        psf = torch.ones(*shape, dtype=torch.float32) * -1
         psf[shape[0] // 2, shape[1] // 2] = 1
-        self.psf = nn.Parameter(psf, requires_grad=True)
+        #
+        psf = np.load('/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz')['PSF']
+        psf = torch.tensor(psf, dtype=torch.float32)
+        self.psf = nn.Parameter(psf, requires_grad=False)
+        #
+        # self.psf = nn.Parameter(psf, requires_grad=True)
+        self.activation = nn.Softplus()
 
     def forward(self):
-        psf = torch.softmax(self.psf)
-        psf = psf / psf.sum()
-        return psf
+        # psf = self.activation(self.psf)
+        # psf = psf / psf.sum()
+        return self.psf
+
+class LoadPSF(nn.Module):
+
+    def __init__(self, path):
+        super().__init__()
+        #
+        psf = np.load(path)['PSF']
+        psf = torch.tensor(psf, dtype=torch.float32)
+        self.psf = nn.Parameter(psf, requires_grad=False)
+        self.psf_shape = psf.shape
+
+    def forward(self):
+        return self.psf

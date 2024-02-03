@@ -41,18 +41,20 @@ class PeriodicBoundary(nn.Module):
 
 class MEModel(nn.Module):
 
-    def __init__(self, in_coords, dim, pos_encoding=False):
+    def __init__(self, in_coords, dim, encoding='positional'):
         super().__init__()
-        if pos_encoding == "periodic":
+        if encoding == "periodic":
             posenc = PeriodicBoundary(1, 1, 0)
             d_in = nn.Linear(in_coords * 2, dim)
             self.d_in = nn.Sequential(posenc, d_in)
-        elif pos_encoding == "encoding":
+        elif encoding == "positional":
             posenc = PositionalEncoding(8, 20)
             d_in = nn.Linear(in_coords * 40, dim)
             self.d_in = nn.Sequential(posenc, d_in)
-        else:
+        elif encoding == "linear":
             self.d_in = nn.Linear(in_coords, dim)
+        else:
+            raise ValueError(f"Unknown encoding: {encoding}")
         lin = [nn.Linear(dim, dim) for _ in range(8)]
         self.linear_layers = nn.ModuleList(lin)
         self.d_out = nn.Linear(dim, 10)
