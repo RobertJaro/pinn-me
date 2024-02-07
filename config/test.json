@@ -1,21 +1,22 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v06",
+  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v12",
   "data": {
-    "file": "/glade/work/rjarolim/data/inversion/stokes_map_train.npz",
+    "file": "/glade/work/rjarolim/data/inversion/MEset_v1_nt_100_spatial_400_400_withPSF_11x11_s_4.npz",
     "psf": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz",
     "noise": null,
-    "num_workers": 8
+    "num_workers": 8,
+    "batch_size": 4096
   },
   "logging": {
     "wandb_entity": "robert_jarolim",
     "wandb_project": "pinn-me",
-    "wandb_name": "test",
+    "wandb_name": "time_256",
     "wandb_id": null
   },
   "model": {
-    "dim": 64,
+    "dim": 256,
     "encoding": "positional",
-    "psf_config": {"type": "load", "path": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
+    "psf_config": {"type": "load", "file": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
   },
   "training": {
     "epochs": 1e3,

@@ -164,8 +164,8 @@ class MEAtmosphere(nn.Module):
 
         self.a = damping
         self.BField = b_field
-        self.theta = theta / 180 * 3.1415
-        self.chi = chi / 180 * 3.1415
+        self.theta = theta
+        self.chi = chi
         self.vmac = vmac
         self.damping = damping
         self.B0 = b0

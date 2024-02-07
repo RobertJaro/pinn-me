@@ -1,4 +1,5 @@
 import glob
+import itertools
 import os
 
 import numpy as np
@@ -10,6 +11,7 @@ from pytorch_lightning import LightningDataModule
 from scipy.signal import convolve2d
 from sunpy.map import Map, all_coordinates_from_map
 from torch.utils.data import DataLoader, Dataset, RandomSampler
+from tqdm import tqdm
 
 
 class HMIDataModule(LightningDataModule):
@@ -111,6 +113,14 @@ class BatchDataset(Dataset):
     def __getitem__(self, idx):
         return [t[idx * self.batch_size: (idx + 1) * self.batch_size] for t in self.tensors]
 
+def apply_along_space(f, np_array, axes, progress_bar=True):
+    # apply the function f on each subspace given by iterating over the axes listed in axes, e.g. axes=(0,2)
+    iter = itertools.product(*map(lambda ax: range(np_array.shape[ax]) if ax in axes else [slice(None, None, None)],
+                                     range(len(np_array.shape))))
+    iter = iter if not progress_bar else tqdm(iter, total=np.prod(np_array.shape))
+    for slic in iter:
+        np_array[slic] = f(np_array[slic])
+    return np_array
 
 class TestDataModule(LightningDataModule):
 
@@ -127,13 +137,18 @@ class TestDataModule(LightningDataModule):
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
 
-        stokes_vector = list(np.load(file).values())[0]
+        stokes_list = []
+        stokes_vector = np.load(file)['Stokes_profiles'] # (4, 100, 400, 400, 50)
+        # reshape to (400, 400, 100, 4, 50)
+        stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
+
         print('LOADING STOKES VECTOR: ', stokes_vector.shape)
         coordinates = np.stack(np.meshgrid(np.linspace(-1, 1, stokes_vector.shape[0], dtype=np.float32),
                                            np.linspace(-1, 1, stokes_vector.shape[1], dtype=np.float32),
+                                           np.linspace(0, 1, stokes_vector.shape[2], dtype=np.float32),
                                            indexing='ij'), -1)
 
-        self.img_shape = stokes_vector.shape[0:2]
+        self.cube_shape = stokes_vector.shape[0:2]
 
         # add noise
         if noise is not None:
@@ -144,15 +159,8 @@ class TestDataModule(LightningDataModule):
             psf = np.load(psf)['PSF']
             psf /= psf.sum()  # assure valid psf
             # stokes vector (x, y, lambda); psf (x, y)
-            stokes_I = np.stack(
-                [convolve2d(stokes_vector[..., 0, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
-            stokes_Q = np.stack(
-                [convolve2d(stokes_vector[..., 1, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
-            stokes_U = np.stack(
-                [convolve2d(stokes_vector[..., 2, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
-            stokes_V = np.stack(
-                [convolve2d(stokes_vector[..., 3, l], psf, mode='same', boundary='symm') for l in range(nLambda)], -1)
-            stokes_vector = np.stack([stokes_I, stokes_Q, stokes_U, stokes_V], -2)
+            conv_f = lambda img: convolve2d(img, psf, mode='same', boundary='symm')
+            stokes_vector = apply_along_space(conv_f, stokes_vector, axes=[2, 3, 4])
 
             fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
             im = ax.imshow(psf, vmin=0)
@@ -161,12 +169,13 @@ class TestDataModule(LightningDataModule):
             wandb.log({'Ground-truth PSF': fig})
             plt.close('all')
 
+        ref_time = stokes_vector.shape[2] // 2
         # plot coordinates
         fig, axs = plt.subplots(2, 1, figsize=(8, 8), dpi=100)
-        im = axs[0].imshow(coordinates[..., 0])
+        im = axs[0].imshow(coordinates[:, :, ref_time, 0])
         fig.colorbar(im)
         axs[0].set_title('y')
-        im = axs[1].imshow(coordinates[..., 1])
+        im = axs[1].imshow(coordinates[:, :, ref_time, 1])
         fig.colorbar(im)
         axs[1].set_title('x')
         fig.tight_layout()
@@ -174,11 +183,11 @@ class TestDataModule(LightningDataModule):
         plt.close('all')
 
         # plot stokes vector
-        stokes_min_max = np.abs(stokes_vector).max((0, 1, -1))
+        stokes_min_max = np.abs(stokes_vector).max((0, 1, 2, -1))
         for l in range(nLambda):
             fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
             for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                im = axs[i].imshow(stokes_vector[..., i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
+                im = axs[i].imshow(stokes_vector[:, :, ref_time, i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
             fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
@@ -190,7 +199,7 @@ class TestDataModule(LightningDataModule):
         integerated_stokes_vector = np.abs(stokes_vector).sum(-1)
         fig, ax = plt.subplots(1, 4, figsize=(16, 8), dpi=100)
         for i, label in enumerate(['I', 'Q', 'U', 'V']):
-            im = ax[i].imshow(integerated_stokes_vector[..., i])
+            im = ax[i].imshow(integerated_stokes_vector[:, :, ref_time, i])
             ax[i].set_title(label)
             fig.colorbar(im, ax=ax[i])
         fig.tight_layout()
@@ -198,16 +207,19 @@ class TestDataModule(LightningDataModule):
         plt.close('all')
 
         # flatten data
-        coords = coordinates.reshape(-1, 2).astype(np.float32)
+        coords = coordinates.reshape(-1, 3).astype(np.float32)
         stokes_profile = stokes_vector.reshape(-1, 4, nLambda).astype(np.float32)
-
-        # normalize data
-        stokes_profile = stokes_profile
 
         coords = torch.tensor(coords, dtype=torch.float32)
         stokes_profile = torch.tensor(stokes_profile, dtype=torch.float32)
 
-        self.valid_dataset = BatchDataset(coords, stokes_profile, batch_size=batch_size)
+        valid_coords = coordinates[:, :, ref_time:ref_time+1]
+        valid_stokes_profile = stokes_vector[:, :, ref_time:ref_time+1]
+
+        valid_coords = torch.tensor(valid_coords, dtype=torch.float32)
+        valid_stokes_profile = torch.tensor(valid_stokes_profile, dtype=torch.float32)
+
+        self.valid_dataset = BatchDataset(valid_coords, valid_stokes_profile, batch_size=batch_size)
 
         self.coords = coords
         self.stokes_profile = stokes_profile

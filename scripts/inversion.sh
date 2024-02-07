@@ -1,10 +1,10 @@
 #!/bin/bash -l
 
-#PBS -N evaluation
+#PBS -N inversion
 #PBS -A P22100000
-#PBS -q preempt
-#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
-#PBS -l walltime=02:00:00
+#PBS -q casper
+#PBS -l select=1:ncpus=16:ngpus=4:mem=128gb
+#PBS -l walltime=06:00:00
 
 module load conda/latest
 module load cuda/11.7.1

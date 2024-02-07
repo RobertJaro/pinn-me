@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
@@ -12,37 +13,44 @@ from pme.train.me_equations import MEAtmosphere
 
 class MEModule(LightningModule):
 
-    def __init__(self, img_shape, lambda_grid, psf_config={'type': None}, dim=256,
+    def __init__(self, cube_shape, lambda_grid, psf_config={'type': None}, dim=256,
                  lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
-                 encoding="positional", **kwargs):
+                 encoding="positional", plot_profiles=False, **kwargs):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.plot_profiles = plot_profiles
+
+        self.cube_shape = cube_shape
 
         # init model
-        self.parameter_model = MEModel(2, dim, encoding=encoding)
+        self.parameter_model = MEModel(3, dim, encoding=encoding)
 
         self.use_psf = True
-        print(psf_config)
         if psf_config['type'] is None:
             self.use_psf = False
         elif psf_config['type'] == 'load':
             self.psf = LoadPSF(psf_config['path'])
             psf_shape = self.psf.psf_shape
-            coords_psf = np.stack(np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0]),
-                                              np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1]),
-                                              indexing='ij'), -1)
-            coords_psf *= (2 / img_shape[0])
-            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 2))
+            coords_psf = np.stack(
+                np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
+                            np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1], dtype=np.float32),
+                            np.zeros(1, dtype=np.float32),
+                            indexing='ij'), -1)
+            coords_psf = coords_psf[:, :, 0]  # remove time axis
+            coords_psf *= (2 / cube_shape[0])
+            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
             self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
         elif psf_config['type'] == 'learn':
             self.psf = PSF(*psf_config['shape'])
             psf_shape = psf_config['shape']
-            coords_psf = np.stack(np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0]),
-                                              np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1]),
-                                              indexing='ij'), -1)
-            coords_psf *= (2 / img_shape[0])
-            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 2))
+            coords_psf = np.stack(
+                np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
+                            np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1], dtype=np.float32),
+                            np.zeros(1, dtype=np.float32),
+                            indexing='ij'), -1)
+            coords_psf = coords_psf[:, :, 0]  # remove time axis
+            coords_psf *= (2 / cube_shape[0])
+            coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
             self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
         else:
             raise ValueError(f"Invalid PSF type: {psf_config['type']}")
@@ -82,9 +90,14 @@ class MEModule(LightningModule):
             coords = coords[:, None, None, :] + self.coords_psf
 
         # forward step
-        output = self.parameter_model(coords)
+        coords_shape = coords.shape
+        output = self.parameter_model(coords.reshape(-1, 3))
 
         I, Q, U, V = self.forward_model(**output)
+        I = I.reshape(*coords_shape[:-1], -1)
+        Q = Q.reshape(*coords_shape[:-1], -1)
+        U = U.reshape(*coords_shape[:-1], -1)
+        V = V.reshape(*coords_shape[:-1], -1)
 
         if self.use_psf:
             I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
@@ -92,16 +105,16 @@ class MEModule(LightningModule):
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
         # normalize stokes vector by I
+        I_normalization = stokes_true[..., 0:1, :]
+        normalized_QUV_pred = stokes_pred[..., 1:, :] / (I_normalization + 1e-8)
+        normalized_QUV_true = stokes_true[..., 1:, :] / (I_normalization + 1e-8)
         I_pred = stokes_pred[..., 0:1, :]
         I_true = stokes_true[..., 0:1, :]
-        normalized_QUV_pred = stokes_pred[..., 1:, :] / (I_pred + 1e-8)
-        normalized_QUV_true = stokes_true[..., 1:, :] / (I_true + 1e-8)
         stokes_pred = torch.cat([I_pred, normalized_QUV_pred], dim=-2)
         stokes_true = torch.cat([I_true, normalized_QUV_true], dim=-2)
 
         # stokes_pred = torch.arcsinh(stokes_pred / 1e-3) / np.arcsinh(1 / 1e-3)
         # stokes_true = torch.arcsinh(stokes_true / 1e-3) / np.arcsinh(1 / 1e-3)
-
 
         weight = self.weight.to(stokes_pred.device)
         loss = ((stokes_pred - stokes_true) * weight).pow(2).sum(-1)
@@ -140,9 +153,18 @@ class MEModule(LightningModule):
         if self.use_psf:
             coords = coords[:, None, None, :] + self.coords_psf
 
-        output = self.parameter_model(coords)
+        coords_shape = coords.shape
+        output = self.parameter_model(coords.reshape(-1, 3))
 
         I, Q, U, V = self.forward_model(**output)
+
+        # reshape to original coords shape
+        I = I.reshape(*coords_shape[:-1], -1)
+        Q = Q.reshape(*coords_shape[:-1], -1)
+        U = U.reshape(*coords_shape[:-1], -1)
+        V = V.reshape(*coords_shape[:-1], -1)
+
+        output = {k: v.reshape(*coords_shape[:-1], -1) for k, v in output.items()}
 
         if self.use_psf:
             I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
@@ -171,22 +193,30 @@ class MEModule(LightningModule):
         self.log("valid", {"diff": outputs['diff'].mean()})
 
         for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'mu', 'vdop', 'kl']:
-            field = outputs[k].reshape(*self.img_shape).cpu().numpy()
+            field = outputs[k].reshape(*self.cube_shape).cpu().numpy()
             plot_settings = {}
-            if k == 'theta' or k == 'chi':
-                field = np.rad2deg(np.arccos(np.cos(field))) # reproject angles to cosine
+            if k == 'theta':
+                field = field * np.sign(outputs['b_field'].reshape(*self.cube_shape).cpu().numpy()) # flip negative B
+                field = np.rad2deg(field)
+                field = field % 180
                 plot_settings['vmin'] = 0
                 plot_settings['vmax'] = 180
-            if k == 'b_field':
-                v_min_max = np.abs(field).max()
-                plot_settings['vmin'] = -v_min_max
-                plot_settings['vmax'] = v_min_max
                 plot_settings['cmap'] = 'RdBu_r'
+            if k == 'chi':
+                field = np.rad2deg(field)
+                field = field % 360
+                plot_settings['vmin'] = 0
+                plot_settings['vmax'] = 360
+                plot_settings['cmap'] = 'twilight_shifted'
+            if k == 'b_field':
+                field = np.abs(field)
+                plot_settings['vmin'] = 0
+                plot_settings['vmax'] = field.max()
+                plot_settings['cmap'] = 'cividis'
             if k == "b0" or k == "b1" or k == "mu":
-                plot_settings['vmin'] = 0
-                plot_settings['vmax'] = 1
+                pass
             if k == "vmac" or k == "damping" or k == "kl":
-                plot_settings['vmin'] = 0
+                plot_settings['vmin'] = 0.
 
             fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
             im = ax.imshow(field, **plot_settings)
@@ -196,37 +226,58 @@ class MEModule(LightningModule):
             wandb.log({k: fig})
             plt.close('all')
 
-        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.img_shape, 4, 50)
-        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.img_shape, 4, 50)
+        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape, 4, 50)
+        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape, 4, 50)
 
         stokes_true[..., 1:, :] = stokes_true[..., 1:, :] / stokes_true[..., 0:1, :]
         stokes_pred[..., 1:, :] = stokes_pred[..., 1:, :] / stokes_pred[..., 0:1, :]
 
+        # plot comparison of integrated stokes vectors
+        integerated_stokes_true = np.abs(stokes_true).sum(-1)
+        integerated_stokes_pred = np.abs(stokes_pred).sum(-1)
+        fig, ax = plt.subplots(2, 4, figsize=(16, 8), dpi=100)
+        for i, label in enumerate(['I', 'Q', 'U', 'V']):
+            v_min = integerated_stokes_true[:, :, i].min()
+            v_max = integerated_stokes_true[:, :, i].max()
+            im = ax[0, i].imshow(integerated_stokes_true[:, :, i], vmin=v_min, vmax=v_max)
+            ax[0, i].set_title(f"true - {label}")
+            divider = make_axes_locatable(ax[0, i])
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            fig.colorbar(im, cax=cax)
+            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i], vmin=v_min, vmax=v_max)
+            ax[1, i].set_title(f"pred - {label}")
+            divider = make_axes_locatable(ax[1, i])
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            fig.colorbar(im, cax=cax)
+        fig.tight_layout()
+        wandb.log({"Integrated Stokes vector - Comparison": fig})
+        plt.close('all')
+
         # stokes_true = np.arcsinh(stokes_true / 1e-4) / np.arcsinh(1 / 1e-4)
         # stokes_pred = np.arcsinh(stokes_pred / 1e-4) / np.arcsinh(1 / 1e-4)
 
-        y_range = stokes_true.shape[0]
-        x_range = stokes_true.shape[1]
-        pos = np.stack(np.meshgrid(np.linspace(x_range * 0.1, x_range * 0.9, 3, dtype=int),
-                                   np.linspace(y_range * 0.1, y_range * 0.9, 3, dtype=int)), -1)
-        pos = pos.reshape(-1, 2)
-        for x, y in pos:
-            fig, axs = plt.subplots(4, 1, figsize=(8, 8))
+        if self.plot_profiles:
+            y_range = stokes_true.shape[0]
+            x_range = stokes_true.shape[1]
+            pos = np.stack(np.meshgrid(np.linspace(x_range * 0.1, x_range * 0.9, 3, dtype=int),
+                                       np.linspace(y_range * 0.1, y_range * 0.9, 3, dtype=int)), -1)
+            pos = pos.reshape(-1, 2)
+            for x, y in pos:
+                fig, axs = plt.subplots(4, 1, figsize=(8, 8))
+                for i, label in enumerate(['I', 'Q', 'U', 'V']):
+                    axs[i].plot(stokes_true[y, x, i], label=f'true - {label}')
+                    axs[i].plot(stokes_pred[y, x, i], label=f'pred - {label}')
+                    if i == 0:
+                        continue
+                    # v_min_max = np.abs(stokes_true[20, 20, i]).max()
+                    # v_min_max = max(1e-4, v_min_max)
+                    # axs[i].set_ylim([-v_min_max, v_min_max])
 
-            for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                axs[i].plot(stokes_true[y, x, i], label=f'true - {label}')
-                axs[i].plot(stokes_pred[y, x, i], label=f'pred - {label}')
-                if i == 0:
-                    continue
-                # v_min_max = np.abs(stokes_true[20, 20, i]).max()
-                # v_min_max = max(1e-4, v_min_max)
-                # axs[i].set_ylim([-v_min_max, v_min_max])
-
-            [ax.legend(loc='upper right') for ax in axs]
-            # log figure
-            fig.tight_layout()
-            wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
-            plt.close('all')
+                [ax.legend(loc='upper right') for ax in axs]
+                # log figure
+                fig.tight_layout()
+                wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
+                plt.close('all')
 
         # plot PSF
         if self.use_psf:
@@ -259,6 +310,7 @@ class PSF(nn.Module):
         # psf = self.activation(self.psf)
         # psf = psf / psf.sum()
         return self.psf
+
 
 class LoadPSF(nn.Module):
 
