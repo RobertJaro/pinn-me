@@ -59,9 +59,9 @@ checkpoint_callback = ModelCheckpoint(dirpath=base_path,
                                       save_last=True)
 
 # save callback
-save_path = os.path.join(base_path, 'inversion.pme')
+save_path = os.path.join(base_path, 'inversion.pinnme')
 def save(*args, **kwargs):
-    torch.save({'forward_model': me_module.forward_model,
+    torch.save({
                 'parameter_model': me_module.parameter_model,
                 'cube_shape': data_module.cube_shape, 'lambda_grid': data_module.lambda_grid,
                 'data_range': data_module.data_range}, save_path)

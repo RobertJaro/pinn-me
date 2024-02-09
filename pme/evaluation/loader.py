@@ -14,7 +14,6 @@ class PINNMEOutput:
         self.parameter_model = nn.DataParallel(self.parameter_model)
         self.parameter_model.eval()
 
-        self.forward_model = state['forward_model']
         self.cube_shape = state['cube_shape']
         self.lambda_grid = state['lambda_grid']
         self.data_range = state['data_range']
