@@ -29,7 +29,7 @@ class MEModule(LightningModule):
         if psf_config['type'] is None:
             self.use_psf = False
         elif psf_config['type'] == 'load':
-            self.psf = LoadPSF(psf_config['path'])
+            self.psf = LoadPSF(psf_config['file'])
             psf_shape = self.psf.psf_shape
             coords_psf = np.stack(
                 np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
@@ -193,26 +193,24 @@ class MEModule(LightningModule):
         self.log("valid", {"diff": outputs['diff'].mean()})
 
         for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'mu', 'vdop', 'kl']:
-            field = outputs[k].reshape(*self.cube_shape).cpu().numpy()
+            field = outputs[k].reshape(*self.cube_shape[:2]).cpu().numpy()
             plot_settings = {}
             if k == 'theta':
-                field = field * np.sign(outputs['b_field'].reshape(*self.cube_shape).cpu().numpy()) # flip negative B
-                field = np.rad2deg(field)
-                field = field % 180
+                # field = field * np.sign(outputs['b_field'].reshape(*self.cube_shape[:2]).cpu().numpy()) # flip negative B
+                field = field % np.pi
                 plot_settings['vmin'] = 0
-                plot_settings['vmax'] = 180
+                plot_settings['vmax'] = np.pi
                 plot_settings['cmap'] = 'RdBu_r'
             if k == 'chi':
-                field = np.rad2deg(field)
-                field = field % 360
+                field = field % np.pi
                 plot_settings['vmin'] = 0
-                plot_settings['vmax'] = 360
+                plot_settings['vmax'] = np.pi
                 plot_settings['cmap'] = 'twilight_shifted'
             if k == 'b_field':
-                field = np.abs(field)
-                plot_settings['vmin'] = 0
-                plot_settings['vmax'] = field.max()
-                plot_settings['cmap'] = 'cividis'
+                b_norm = np.abs(field).max()
+                plot_settings['vmin'] = -b_norm
+                plot_settings['vmax'] = b_norm
+                plot_settings['cmap'] = 'RdBu_r'
             if k == "b0" or k == "b1" or k == "mu":
                 pass
             if k == "vmac" or k == "damping" or k == "kl":
@@ -226,8 +224,8 @@ class MEModule(LightningModule):
             wandb.log({k: fig})
             plt.close('all')
 
-        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape, 4, 50)
-        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape, 4, 50)
+        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 50)
+        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 50)
 
         stokes_true[..., 1:, :] = stokes_true[..., 1:, :] / stokes_true[..., 0:1, :]
         stokes_pred[..., 1:, :] = stokes_pred[..., 1:, :] / stokes_pred[..., 0:1, :]
@@ -289,7 +287,6 @@ class MEModule(LightningModule):
             fig.tight_layout()
             wandb.log({"PSF": fig})
             plt.close('all')
-
 
 class PSF(nn.Module):
 

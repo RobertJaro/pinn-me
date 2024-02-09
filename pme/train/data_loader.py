@@ -1,6 +1,7 @@
 import glob
 import itertools
 import os
+from multiprocessing import Pool
 
 import numpy as np
 import torch
@@ -148,7 +149,8 @@ class TestDataModule(LightningDataModule):
                                            np.linspace(0, 1, stokes_vector.shape[2], dtype=np.float32),
                                            indexing='ij'), -1)
 
-        self.cube_shape = stokes_vector.shape[0:2]
+        self.cube_shape = coordinates.shape[:3]
+        self.data_range = [[-1, 1], [-1, 1], [0, 1]]
 
         # add noise
         if noise is not None:
@@ -158,9 +160,15 @@ class TestDataModule(LightningDataModule):
         if psf is not None:
             psf = np.load(psf)['PSF']
             psf /= psf.sum()  # assure valid psf
+            print('CONVOLVING WITH PSF: ', psf.shape)
             # stokes vector (x, y, lambda); psf (x, y)
-            conv_f = lambda img: convolve2d(img, psf, mode='same', boundary='symm')
-            stokes_vector = apply_along_space(conv_f, stokes_vector, axes=[2, 3, 4])
+            flat_stokes_vector = stokes_vector.reshape(*stokes_vector.shape[:2], -1)
+            flat_stokes_vector = np.moveaxis(flat_stokes_vector, -1, 0)
+            conv = ParallelConvolution(psf)
+            with Pool(16) as p:
+                convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
+                                                           total=flat_stokes_vector.shape[0])], -1)
+            stokes_vector = convolved_maps.reshape(stokes_vector.shape)
 
             fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
             im = ax.imshow(psf, vmin=0)
@@ -216,8 +224,8 @@ class TestDataModule(LightningDataModule):
         valid_coords = coordinates[:, :, ref_time:ref_time+1]
         valid_stokes_profile = stokes_vector[:, :, ref_time:ref_time+1]
 
-        valid_coords = torch.tensor(valid_coords, dtype=torch.float32)
-        valid_stokes_profile = torch.tensor(valid_stokes_profile, dtype=torch.float32)
+        valid_coords = torch.tensor(valid_coords, dtype=torch.float32).reshape(-1, 3)
+        valid_stokes_profile = torch.tensor(valid_stokes_profile, dtype=torch.float32).reshape(-1, 4, nLambda)
 
         self.valid_dataset = BatchDataset(valid_coords, valid_stokes_profile, batch_size=batch_size)
 
@@ -263,3 +271,12 @@ class BatchesDataset(Dataset):
         data = {k: np.copy(np.load(bf, mmap_mode='r')[idx * self.batch_size: (idx + 1) * self.batch_size])
                 for k, bf in self.batches_file_paths.items()}
         return data
+
+
+class ParallelConvolution:
+
+    def __init__(self, psf):
+        self.psf = psf
+
+    def conv_f(self, img):
+        return convolve2d(img, self.psf, mode='same', boundary='symm')

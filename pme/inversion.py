@@ -5,7 +5,7 @@ import shutil
 
 import torch
 from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LambdaCallback
 from pytorch_lightning.loggers import WandbLogger
 
 from pme.train.data_loader import TestDataModule
@@ -28,7 +28,9 @@ if not hasattr(args, 'work_directory'):
     setattr(args, 'work_directory', base_path)
 os.makedirs(args.work_directory, exist_ok=True)
 
-save_path = os.path.join(base_path, 'inversion.pme')
+
+
+
 
 # init logging
 wandb_id = args.logging['wandb_id'] if 'wandb_id' in args.logging else None
@@ -56,6 +58,17 @@ checkpoint_callback = ModelCheckpoint(dirpath=base_path,
                                           'check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
                                       save_last=True)
 
+# save callback
+save_path = os.path.join(base_path, 'inversion.pme')
+def save(*args, **kwargs):
+    torch.save({'forward_model': me_module.forward_model,
+                'parameter_model': me_module.parameter_model,
+                'cube_shape': data_module.cube_shape, 'lambda_grid': data_module.lambda_grid,
+                'data_range': data_module.data_range}, save_path)
+
+save_callback = LambdaCallback(on_validation_epoch_end=save)
+
+
 torch.set_float32_matmul_precision('medium')  # for A100 GPUs
 n_gpus = torch.cuda.device_count()
 trainer = Trainer(max_epochs=int(args.training['epochs']) if 'epochs' in args.training else 1,
@@ -68,6 +81,6 @@ trainer = Trainer(max_epochs=int(args.training['epochs']) if 'epochs' in args.tr
                       'check_val_every_n_epoch'] if 'check_val_every_n_epoch' in args.training else None,
                   gradient_clip_val=0.1,
                   reload_dataloaders_every_n_epochs=1, # reload dataloaders every epoch to avoid oscillating loss
-                  callbacks=[checkpoint_callback], )
+                  callbacks=[checkpoint_callback, save_callback], )
 
 trainer.fit(me_module, data_module, ckpt_path='last')
