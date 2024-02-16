@@ -11,4 +11,4 @@ module load cuda/11.7.1
 conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
-python3 -i -m pme.evaluation.video --input /glade/work/rjarolim/pinn_me/train/test_v11/inversion.pme --output /glade/work/rjarolim/pinn_me/train/test_v11
+python3 -i -m pme.evaluation.video --input /glade/work/rjarolim/pinn_me/train/test_v22/inversion.pme --output /glade/work/rjarolim/pinn_me/train/test_v22

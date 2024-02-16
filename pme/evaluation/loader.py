@@ -38,13 +38,6 @@ class PINNMEOutput:
         parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], -1)
                       for key, value in parameters.items()}
 
-        # adjust angles and b_field
-        # flip_mask = np.zeros_like(parameters['b_field'])
-        # flip_mask[np.sign(parameters['b_field']) == -1] = np.pi / 2
-        parameters['theta'] = (parameters['theta']) % np.pi
-        parameters['chi'] = parameters['chi'] % np.pi
-        parameters['b_field'] = parameters['b_field']
-
         return parameters
 
     def load_cube(self):
@@ -66,3 +59,16 @@ class PINNMEOutput:
         coords = np.stack(coords, axis=-1)
 
         return self.load(coords)
+
+
+def to_cartesian(b_field, theta, chi):
+    b_x = b_field * np.sin(theta) * np.cos(chi)
+    b_y = b_field * np.sin(theta) * np.sin(chi)
+    b_z = b_field * np.cos(theta)
+    return np.stack([b_x, b_y, b_z], axis=-1)
+
+def to_spherical(b):
+    b_field = np.linalg.norm(b, axis=-1)
+    theta = np.arccos(b[..., 2] / b_field)
+    chi = np.arctan2(b[..., 1], b[..., 0])
+    return b_field, theta, chi

@@ -1,7 +1,7 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v12",
+  "base_path": "/glade/work/rjarolim/pinn_me/train/test_v18",
   "data": {
-    "file": "/glade/work/rjarolim/data/inversion/MEset_v1_nt_100_spatial_400_400_withPSF_11x11_s_4.npz",
+    "file": "/glade/work/rjarolim/data/inversion/MEset_v3_nt_100_spatial_400_400_withPSF_11x11_s_4.npz",
     "psf": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz",
     "noise": null,
     "num_workers": 8,
@@ -16,7 +16,7 @@
   "model": {
     "dim": 256,
     "encoding": "positional",
-    "psf_config": {"type": "load", "file": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
+    "psf_config": {"type": "load", "file":  "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
   },
   "training": {
     "epochs": 1e3,

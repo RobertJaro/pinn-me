@@ -50,7 +50,7 @@ if wandb_id is not None:
 
 data_module = TestDataModule(**args.data)
 
-me_module = MEModule(data_module.cube_shape, data_module.lambda_grid, **args.model, **args.training)
+me_module = MEModule(data_module.cube_shape, data_module.lambda_grid, data_module.value_range, **args.model, **args.training)
 
 config = {'data': args.data, 'model': args.model, 'training': args.training}
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
@@ -59,7 +59,7 @@ checkpoint_callback = ModelCheckpoint(dirpath=base_path,
                                       save_last=True)
 
 # save callback
-save_path = os.path.join(base_path, 'inversion.pinnme')
+save_path = os.path.join(base_path, 'inversion.pme')
 def save(*args, **kwargs):
     torch.save({
                 'parameter_model': me_module.parameter_model,

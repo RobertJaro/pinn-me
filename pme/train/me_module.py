@@ -2,18 +2,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
+from astropy.visualization import ImageNormalize, AsinhStretch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
-from pme.model import MEModel
+from pme.model import MEModel, NormalizationModule
 from pme.train.me_equations import MEAtmosphere
 
 
 class MEModule(LightningModule):
 
-    def __init__(self, cube_shape, lambda_grid, psf_config={'type': None}, dim=256,
+    def __init__(self, cube_shape, lambda_grid, value_range, psf_config={'type': None}, dim=256,
                  lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
                  encoding="positional", plot_profiles=False, **kwargs):
         super().__init__()
@@ -60,8 +61,8 @@ class MEModule(LightningModule):
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
-        weight = torch.tensor([1., 1e2, 1e2, 1e1], dtype=torch.float32).reshape(1, 4, 1)
-        self.weight = weight
+        self.normalization = NormalizationModule(value_range)
+        self.loss_function = nn.MSELoss(reduction='none')
 
     def configure_optimizers(self):
         parameters = list(self.parameter_model.parameters())
@@ -116,11 +117,18 @@ class MEModule(LightningModule):
         # stokes_pred = torch.arcsinh(stokes_pred / 1e-3) / np.arcsinh(1 / 1e-3)
         # stokes_true = torch.arcsinh(stokes_true / 1e-3) / np.arcsinh(1 / 1e-3)
 
-        weight = self.weight.to(stokes_pred.device)
-        loss = ((stokes_pred - stokes_true) * weight).pow(2).sum(-1)
-        loss = torch.mean(loss)
+        # weight = self.weight.to(stokes_pred.device)
+        stokes_true = self.normalization(stokes_true)
+        stokes_pred = self.normalization(stokes_pred)
 
-        return {"loss": loss}
+        loss = self.loss_function(stokes_pred, stokes_true)
+        loss = loss.sum(dim=-1)
+        total_loss = loss.mean()
+        I_loss, Q_loss, U_loss, V_loss = loss.mean(dim=0)
+
+        return {"loss": total_loss,
+                "I_loss": I_loss, "Q_loss": Q_loss,
+                "U_loss": U_loss, "V_loss": V_loss}
 
     def convolve_psf(self, I, Q, U, V, coords):
         # filter_outside = (coords[..., 0] < 0) | (coords[..., 0] > 1) | (coords[..., 1] < 0) | (coords[..., 1] > 1)
@@ -191,7 +199,6 @@ class MEModule(LightningModule):
             outputs[k] = torch.cat([o[k] for o in outputs_list], dim=0)
 
         self.log("valid", {"diff": outputs['diff'].mean()})
-
         for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'mu', 'vdop', 'kl']:
             field = outputs[k].reshape(*self.cube_shape[:2]).cpu().numpy()
             plot_settings = {}
@@ -234,15 +241,16 @@ class MEModule(LightningModule):
         integerated_stokes_true = np.abs(stokes_true).sum(-1)
         integerated_stokes_pred = np.abs(stokes_pred).sum(-1)
         fig, ax = plt.subplots(2, 4, figsize=(16, 8), dpi=100)
-        for i, label in enumerate(['I', 'Q', 'U', 'V']):
+        for i, label in enumerate(['I', 'Q/I', 'U/I', 'V/I']):
             v_min = integerated_stokes_true[:, :, i].min()
             v_max = integerated_stokes_true[:, :, i].max()
-            im = ax[0, i].imshow(integerated_stokes_true[:, :, i], vmin=v_min, vmax=v_max)
+            norm = ImageNormalize(stretch=AsinhStretch(1e-1), vmin=v_min, vmax=v_max)
+            im = ax[0, i].imshow(integerated_stokes_true[:, :, i], norm = norm)
             ax[0, i].set_title(f"true - {label}")
             divider = make_axes_locatable(ax[0, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
             fig.colorbar(im, cax=cax)
-            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i], vmin=v_min, vmax=v_max)
+            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i], norm=norm)
             ax[1, i].set_title(f"pred - {label}")
             divider = make_axes_locatable(ax[1, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)

@@ -214,6 +214,12 @@ class TestDataModule(LightningDataModule):
         wandb.log({'Integrated Stokes vector': fig})
         plt.close('all')
 
+        normalized_stokes_vector = np.copy(stokes_vector)
+        normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
+
+        self.value_range = np.stack([normalized_stokes_vector.min((0, 1, 2, -1)),
+                                     normalized_stokes_vector.max((0, 1, 2, -1))], -1)
+
         # flatten data
         coords = coordinates.reshape(-1, 3).astype(np.float32)
         stokes_profile = stokes_vector.reshape(-1, 4, nLambda).astype(np.float32)

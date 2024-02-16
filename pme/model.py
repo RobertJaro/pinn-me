@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 
@@ -142,3 +143,16 @@ def jacobian(output, coords):
                   for i in range(output.shape[1])]
     jac_matrix = torch.stack(jac_matrix, dim=1)
     return jac_matrix
+
+
+class NormalizationModule(nn.Module):
+
+    def __init__(self, value_range):
+        super().__init__()
+        self.register_buffer("value_range", torch.tensor(value_range, dtype=torch.float32)[None, :, None, :])
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
+
+    def forward(self, x):
+        x = (x - self.value_range[..., 0]) / (self.value_range[..., 1] - self.value_range[..., 0])
+        x = torch.asinh(x * 1e1) / self.stretch
+        return x
