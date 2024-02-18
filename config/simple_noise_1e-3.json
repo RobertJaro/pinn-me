@@ -1,22 +1,22 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_psf",
+  "base_path": "/glade/work/rjarolim/pinn_me/train/test_simple_noise_1e-3",
   "data": {
     "file": "/glade/work/rjarolim/data/inversion/MEset_v4_nt_100_spatial_400_400_withPSF_11x11_s_4.npz",
     "psf": "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz",
-    "noise": null,
+    "noise": 1e-3,
     "num_workers": 8,
-    "batch_size": 4096
+    "batch_size": 16384
   },
   "logging": {
     "wandb_entity": "robert_jarolim",
     "wandb_project": "pinn-me",
-    "wandb_name": "PSF",
+    "wandb_name": "simple - noise 1e-3",
     "wandb_id": null
   },
   "model": {
     "dim": 256,
     "encoding": "positional",
-    "psf_config": {"type": "load", "file":  "/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz"}
+    "psf_config": {"type": null}
   },
   "training": {
     "epochs": 1e3,

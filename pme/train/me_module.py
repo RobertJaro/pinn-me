@@ -198,12 +198,13 @@ class MEModule(LightningModule):
         for k in outputs_list[0].keys():
             outputs[k] = torch.cat([o[k] for o in outputs_list], dim=0)
 
-        self.log("valid", {"diff": outputs['diff'].mean()})
+        I_diff, Q_diff, U_diff, V_diff = outputs['diff'].mean(dim=(0, 2))
+        self.log("valid", {"diff": outputs['diff'].mean(),
+                           'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff})
         for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'mu', 'vdop', 'kl']:
             field = outputs[k].reshape(*self.cube_shape[:2]).cpu().numpy()
             plot_settings = {}
             if k == 'theta':
-                # field = field * np.sign(outputs['b_field'].reshape(*self.cube_shape[:2]).cpu().numpy()) # flip negative B
                 field = field % np.pi
                 plot_settings['vmin'] = 0
                 plot_settings['vmax'] = np.pi

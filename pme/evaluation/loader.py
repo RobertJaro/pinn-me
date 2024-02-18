@@ -35,8 +35,19 @@ class PINNMEOutput:
                 value = value.cpu().numpy()
                 parameters[key].append(value)
 
+
+
         parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], -1)
                       for key, value in parameters.items()}
+
+        # reproject magnetic field vector
+        b = parameters['b_field']
+        theta = parameters['theta']
+        chi = parameters['chi']
+        b, theta, chi = to_spherical(to_cartesian(b, theta, chi))
+        parameters['b_field'] = b
+        parameters['theta'] = theta
+        parameters['chi'] = chi
 
         return parameters
 

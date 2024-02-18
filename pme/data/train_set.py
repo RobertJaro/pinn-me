@@ -69,9 +69,9 @@ def create_tstep(tt):
     # B[..., None] --> (100, 100, 1); lambda[None, None, :] --> (1, 1, 50)
 
     BField = BField0 * (r0 / (r + r0)) ** 2
-    # theta is defined between 0 and 180
+    # theta is defined between 0 and pi
     t_arr = ((r % r0) / r0 * np.pi)
-    ch_arr = t + tt
+    ch_arr = t + tt / 180 * np.pi # slow down the rotation
 
     B0_arr = B0 * (10 * r0 / (r + 10 * r0)) ** 2
     B1_arr = B1 * (10 * r0 / (r + 10 * r0)) ** 2
@@ -93,14 +93,22 @@ def create_tstep(tt):
     B0_arr = torch.tensor(B0_arr, dtype=torch.float32)
     B1_arr = torch.tensor(B1_arr, dtype=torch.float32)
 
+    vmac_arr = vmac * torch.ones_like(BField)
+    damping_arr = damping * torch.ones_like(BField)
+    mu_arr = mu * torch.ones_like(BField)
+    vdop_arr = vdop * torch.ones_like(BField)
+    kl_arr = kl * torch.ones_like(BField)
+
     I, Q, U, V = atmos.forward(BField, t_arr, ch_arr,
-                         vmac * torch.ones_like(BField),
-                         damping * torch.ones_like(BField),
-                         B0_arr, B1_arr, mu * torch.ones_like(BField),
-                         vdop * torch.ones_like(BField), kl * torch.ones_like(BField))
+                               vmac_arr,
+                               damping_arr,
+                               B0_arr, B1_arr, mu_arr,
+                               vdop_arr, kl_arr)
     Stokes_profiles = torch.cat([I, Q, U, V]).cpu().numpy()
 
-    return Stokes_profiles, B0_arr[..., 0], B1_arr[..., 0], t_arr[..., 0], ch_arr[..., 0], BField[..., 0]
+    return {'Stokes_profiles': Stokes_profiles, 'BField': BField, 'theta': t_arr, 'chi': ch_arr,
+                             'B0': B0_arr, 'B1': B1_arr, 'vmac': vmac_arr, 'damping': damping_arr, 'mu': mu_arr,
+                             'vdop': vdop_arr, 'kl': kl_arr}
 
 
 if __name__ == '__main__':
@@ -132,29 +140,25 @@ if __name__ == '__main__':
     rMax = np.sqrt((nx / 2) ** 2 + (ny / 2) ** 2)
 
     # Make the X, Y meshgrid instead of np.tile
-    xs = np.linspace(-2 * np.pi, 2 * np.pi, nx) * 180 / 3.1415
-    ys = np.linspace(-6 * np.pi, 6 * np.pi, ny) * 180 / 3.1415
+    xs = np.linspace(-2 * np.pi, 2 * np.pi, nx)
+    ys = np.linspace(-6 * np.pi, 6 * np.pi, ny)
     tau, phi = np.meshgrid(xs, ys)
     # Z evaluation
     amp = np.sin(tau + phi)
 
-    Stokes_profiles = np.zeros((nStokes, nTime, nx, ny, nLambda))
-    # Stokes_profiles_PSF = np.zeros((nStokes,nTime, nx, ny, nLambda))
-
-    Bf_arr = np.zeros((nTime, nx, ny))
-    t_arr = np.zeros((nTime, nx, ny))
-    ch_arr = np.zeros((nTime, nx, ny))
-
-    B0_arr = np.zeros((nTime, nx, ny))
-    B1_arr = np.zeros((nTime, nx, ny))
-
-    with Pool(16) as p:
+    with Pool(32) as p:
         profiles = list(tqdm(p.imap(create_tstep, range(nTime)), total=nTime))
 
-    for tt in range(nTime):
-        (Stokes_profiles[:, tt, :, :, :], B0_arr[tt, :, :],
-         B1_arr[tt, :, :], t_arr[tt, :, :],
-         ch_arr[tt, :, :], Bf_arr[tt, :,:]) = profiles[tt]
+    Stokes_profiles = np.stack([p['Stokes_profiles'] for p in profiles], axis=1)
+    B0_arr = np.stack([p['B0'] for p in profiles], axis=0)
+    B1_arr = np.stack([p['B1'] for p in profiles], axis=0)
+    t_arr = np.stack([p['theta'] for p in profiles], axis=0)
+    ch_arr = np.stack([p['chi'] for p in profiles], axis=0)
+    Bf_arr = np.stack([p['BField'] for p in profiles], axis=0)
+
+    keys = profiles[0].keys()
+    parameters = {key: np.stack([p[key] for p in profiles], axis=2) for key in keys if key != 'Stokes_profiles'}
+
 
     # for tt in tqdm(range(nTime)):
     #     print(f"Convolving {tt} timestep out of {nTime}")
@@ -214,13 +218,12 @@ if __name__ == '__main__':
             f"/glade/work/rjarolim/data/inversion/test/ch_arr_{el:03d}.png")
         pl.close()
 
-    nameTestCase = "MEset_v3_nt"
+    nameTestCase = "MEset_v4_nt"
     np.savez(f"/glade/work/rjarolim/data/inversion/{nameTestCase}_{nTime}_spatial_{nx}_{ny}_withPSF_11x11_s_4.npz",
              Stokes_profiles=Stokes_profiles)
 
     np.savez(f"/glade/work/rjarolim/data/inversion/parameters_{nameTestCase}_{nTime}_spatial_{nx}_{ny}_withPSF_11x11_s_4.npz",
-             Bf_arr=Bf_arr, t_arr=t_arr, ch_arr=ch_arr,
-             B0_arr=B0_arr, B1_arr=B1_arr)
+             **parameters)
 
 
 
