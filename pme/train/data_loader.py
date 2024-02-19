@@ -125,7 +125,7 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
 
 class TestDataModule(LightningDataModule):
 
-    def __init__(self, file, batch_size=4096, num_workers=None, noise=None, psf=None, **kwargs):
+    def __init__(self, file, batch_size=4096, num_workers=None, noise=None, psf=None, slit=False, **kwargs):
         super().__init__()
 
         # train parameters
@@ -138,7 +138,6 @@ class TestDataModule(LightningDataModule):
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
 
-        stokes_list = []
         stokes_vector = np.load(file)['Stokes_profiles'] # (4, 100, 400, 400, 50)
         # reshape to (400, 400, 100, 4, 50)
         stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
@@ -177,15 +176,36 @@ class TestDataModule(LightningDataModule):
             wandb.log({'Ground-truth PSF': fig})
             plt.close('all')
 
+        normalized_stokes_vector = np.copy(stokes_vector)
+        normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
+
+        self.value_range = np.stack([normalized_stokes_vector.min((0, 1, 2, -1)),
+                                     normalized_stokes_vector.max((0, 1, 2, -1))], -1)
+
+        if slit:
+            time_spacing = slit
+            x_axis = stokes_vector.shape[0]
+            slit_width = x_axis // time_spacing
+
+            for t in range(0, stokes_vector.shape[2]):
+                i = int(t % time_spacing)
+                min_x = i * slit_width
+                max_x = (i + 1) * slit_width
+                stokes_vector[:min_x, :, t] = np.nan
+                stokes_vector[max_x:, :, t] = np.nan
+
         ref_time = stokes_vector.shape[2] // 2
         # plot coordinates
-        fig, axs = plt.subplots(2, 1, figsize=(8, 8), dpi=100)
-        im = axs[0].imshow(coordinates[:, :, ref_time, 0])
+        fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
+        im = axs[0].imshow(coordinates[:, :, ref_time, 0].T, origin='lower')
         fig.colorbar(im)
-        axs[0].set_title('y')
-        im = axs[1].imshow(coordinates[:, :, ref_time, 1])
+        axs[0].set_title('x')
+        im = axs[1].imshow(coordinates[:, :, ref_time, 1].T, origin='lower')
         fig.colorbar(im)
-        axs[1].set_title('x')
+        axs[1].set_title('y')
+        im = axs[2].imshow(coordinates[:, :, ref_time, 2].T, origin='lower')
+        fig.colorbar(im)
+        axs[2].set_title('t')
         fig.tight_layout()
         wandb.log({'Coordinates': fig})
         plt.close('all')
@@ -214,15 +234,10 @@ class TestDataModule(LightningDataModule):
         wandb.log({'Integrated Stokes vector': fig})
         plt.close('all')
 
-        normalized_stokes_vector = np.copy(stokes_vector)
-        normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
-
-        self.value_range = np.stack([normalized_stokes_vector.min((0, 1, 2, -1)),
-                                     normalized_stokes_vector.max((0, 1, 2, -1))], -1)
-
+        nan_mask = np.any(np.isnan(stokes_vector), (-2, -1))
         # flatten data
-        coords = coordinates.reshape(-1, 3).astype(np.float32)
-        stokes_profile = stokes_vector.reshape(-1, 4, nLambda).astype(np.float32)
+        coords = coordinates[~nan_mask].astype(np.float32)
+        stokes_profile = stokes_vector[~nan_mask].astype(np.float32)
 
         coords = torch.tensor(coords, dtype=torch.float32)
         stokes_profile = torch.tensor(stokes_profile, dtype=torch.float32)
