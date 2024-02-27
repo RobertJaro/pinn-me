@@ -140,12 +140,12 @@ class MEAtmosphere(nn.Module):
         self.psi_r_arr = torch.zeros(len(nu))
 
         for iUp in range(1, nUp):
-            MUp = self.Jup + 1 - iUp
+            MUp = self.JUp + 1 - iUp
 
             iLow = 1
-            MLow = Mup - 2 + iLow
+            MLow = MUp - 2 + iLow
             if torch.abs(MLow) < self.JLow:
-                strength = self.strength_zeeman(self.Jup, self.Jlow, MUp, MLow)
+                strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
                 splitting = self.gUp * MUp - self.gLow * MLow
 
                 mu = torch.ones_like(nu) * (self.lambdaDop - 1 * splitting*self.nu_m)  # [batch, n_lambda]
@@ -154,10 +154,10 @@ class MEAtmosphere(nn.Module):
                 self.psi_b_arr += strength * self.faraday_profiles(parameters)
 
             iLow = 2
-            Mlow = Mup - 2 + iLow
-            if torch.abs(Mlow) < self.JLow:
-                strength = self.strength_zeeman(self.Jup, self.Jlow, Mup, Mlow)
-                splitting = self.gUp * Mup - self.gLow * Mlow
+            MLow = MUp - 2 + iLow
+            if torch.abs(MLow) < self.JLow:
+                strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
+                splitting = self.gUp * MUp - self.gLow * MLow
 
                 mu = torch.ones_like(nu) * (self.lambdaDop - 1 * splitting * self.nu_m)  # [batch, n_lambda]
                 parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
@@ -165,40 +165,15 @@ class MEAtmosphere(nn.Module):
                 self.psi_p_arr += strength * self.faraday_profiles(parameters)
 
             iLow = 3
-            Mlow = Mup - 2 + iLow
-            if torch.abs(Mlow) < self.JLow:
-                strength = self.strength_zeeman(self.Jup, self.Jlow, Mup, Mlow)
-                splitting = self.gUp * Mup - self.gLow * Mlow
+            MLow = MUp - 2 + iLow
+            if torch.abs(MLow) < self.JLow:
+                strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
+                splitting = self.gUp * MUp - self.gLow * MLow
 
                 mu = torch.ones_like(nu) * (self.lambdaDop - 1 * splitting * self.nu_m)  # [batch, n_lambda]
                 parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
                 self.phi_p_arr += strength * self.Voigt(parameters)
                 self.psi_p_arr += strength * self.faraday_profiles(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop - 1 * self.nu_m) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-         = self.voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-        self.phi_r_arr = self.voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop + 1 * self.nu_m) # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1) # [batch, n_lambda, 3]
-        self.phi_p_arr = self.voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop - 1 * self.nu_m)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
-        self.psi_b_arr = self.faraday_voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)  # [batch, n_lambda, 3]
-        self.psi_p_arr = self.faraday_voigt(parameters)
-
-        mu = torch.ones_like(nu) * (self.lambdaDop + 1 * self.nu_m)  # [batch, n_lambda]
-        parameters = torch.stack([nu, gamma, mu], dim=-1)
-        self.psi_r_arr = self.faraday_voigt(parameters)
-
 
     # Defining the propagation matrix elements from L^2 book
     def eta_I(self):
