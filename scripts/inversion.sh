@@ -11,4 +11,4 @@ module load cuda/11.7.1
 conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
-python3 -i -m pme.inversion --config config/slit_psf.json
+python3 -i -m pme.inversion --config config/sharp.json

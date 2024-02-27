@@ -1,0 +1,29 @@
+{
+  "base_path": "/glade/work/rjarolim/pinn_me/train/sharp_v1",
+  "data": {
+    "type": "sharp",
+    "files": {
+      "I": "/glade/work/rjarolim/data/inversion/hmi/hmi.s_720s.20160205_000000_TAI.1.I*.fits",
+      "Q": "/glade/work/rjarolim/data/inversion/hmi/hmi.s_720s.20160205_000000_TAI.1.Q*.fits",
+      "U": "/glade/work/rjarolim/data/inversion/hmi/hmi.s_720s.20160205_000000_TAI.1.U*.fits",
+      "V": "/glade/work/rjarolim/data/inversion/hmi/hmi.s_720s.20160205_000000_TAI.1.V*.fits"
+    },
+    "num_workers": 8,
+    "batch_size": 16384
+  },
+  "logging": {
+    "wandb_entity": "robert_jarolim",
+    "wandb_project": "pinn-me SHARP",
+    "wandb_name": "1 timestep",
+    "wandb_id": null
+  },
+  "model": {
+    "dim": 256,
+    "encoding": "positional",
+    "psf_config": {"type": null}
+  },
+  "training": {
+    "epochs": 1e3,
+    "check_val_every_n_epoch": 1
+  }
+}
