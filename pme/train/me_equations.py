@@ -60,6 +60,16 @@ class MEAtmosphere(nn.Module):
     psi_r = lambda self: self.Faraday_Voigt(self.nuArray, 1, 
                                             self.a, self.lambdaDop + 1*self.nu_m)
     def fact(self, n):
+        ''' My simplistic way to compute factorial
+
+        Input:
+            -- n, int
+        Output
+            -- results, float
+                result == n!
+
+        '''
+
         result = 1
 
         for i in range(1, n+1):
@@ -67,7 +77,17 @@ class MEAtmosphere(nn.Module):
         return result
 
     def w3js(self, J1, J2, J3, M1, M2, M3):
-        """ Compute the 3J symbol following the routine in Landi Degl'innocenti & Landolfi"""
+        """ Compute the 3J symbol following the routine in
+        Landi Degl'innocenti & Landolfi
+
+        Inputs:
+        -- J1, J2, J3, M1, M2, M3, float
+            Twice the angular momenta to be studied
+        Output:
+        -- WJS, float
+            -- Wigner 3J symbol value
+
+        """
 
         WJS  = 0
 
@@ -120,7 +140,19 @@ class MEAtmosphere(nn.Module):
         WJS = CC
         return WJS
     def strength_zeeman(self, MUp, MLow):
+        ''' Compute the strength of the different Zeeman components
+        Input:
+            -- MUp, float
+                -- angular momentum projection along the B-field
+                of the upper sublevel
+            -- MLow, float
+                -- angular momentum projection along the B-field
+                of the lower sublevel
 
+        Output:
+            -- zeeman_strength, float
+                Relative strenght of the zeeman component
+        '''
         zeeman_strength = 3 * self.w3js(2*self.JUp, 2*self.JLow, 2,
                                         2*MUp, 2*MLow, -2 * (MLow - MUp))
 
