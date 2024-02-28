@@ -2,15 +2,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
+from astropy.io import fits
 from astropy.visualization import ImageNormalize, AsinhStretch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
-from pme.model import MEModel, NormalizationModule
-from pme.train.me_equations import MEAtmosphere
-
+from pme.model import MEModel, NormalizationModule, jacobian
+from pme.train.me_atmosphere import MEAtmosphere
+from astropy import units as u
 
 class MEModule(LightningModule):
 
@@ -56,8 +57,7 @@ class MEModule(LightningModule):
         else:
             raise ValueError(f"Invalid PSF type: {psf_config['type']}")
 
-        self.forward_model = MEAtmosphere(lambda0=6301.5080, jUp=2.0, jLow=2.0, gUp=1.5, gLow=1.83,
-                                          lambdaGrid=lambda_grid, )
+        self.forward_model = MEAtmosphere(lambda0=6301.5080 * u.AA, j_up=2.0, j_low=2.0, g_up=1.5, g_low=1.83, lambda_grid=lambda_grid)
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
@@ -155,6 +155,7 @@ class MEModule(LightningModule):
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
+    @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
         coords, stokes_true = batch
 
@@ -178,6 +179,15 @@ class MEModule(LightningModule):
             I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
 
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
+        # norm_stokes_true = self.normalization(stokes_true)
+        # norm_stokes_pred = self.normalization(stokes_pred)
+        #
+        # out_vec = torch.cat(list(output.values()), dim=-1)
+        # jac_matrix = jacobian(norm_stokes_true.reshape(), out_vec)
+        #
+        # diff = (norm_stokes_pred - norm_stokes_true) ** 2
+        # diff = diff.mean(dim=(1, 2))
+
 
         diff = torch.abs(stokes_true - stokes_pred)
 
@@ -305,16 +315,12 @@ class PSF(nn.Module):
         psf = torch.ones(*shape, dtype=torch.float32) * -1
         psf[shape[0] // 2, shape[1] // 2] = 1
         #
-        psf = np.load('/glade/work/rjarolim/data/inversion/PSF_5_x_5_sigma_1.5.npz')['PSF']
+        psf = np.load('/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits')['PSF']
         psf = torch.tensor(psf, dtype=torch.float32)
         self.psf = nn.Parameter(psf, requires_grad=False)
-        #
-        # self.psf = nn.Parameter(psf, requires_grad=True)
         self.activation = nn.Softplus()
 
     def forward(self):
-        # psf = self.activation(self.psf)
-        # psf = psf / psf.sum()
         return self.psf
 
 
@@ -323,7 +329,12 @@ class LoadPSF(nn.Module):
     def __init__(self, path):
         super().__init__()
         #
-        psf = np.load(path)['PSF']
+        if path.endswith('.npz'):
+            psf = np.load(path)['PSF']
+        elif path.endswith('.fits'):
+            psf = fits.getdata(path).astype(np.float32)
+        else:
+            raise ValueError(f"Invalid PSF file: {path}")
         psf = torch.tensor(psf, dtype=torch.float32)
         self.psf = nn.Parameter(psf, requires_grad=False)
         self.psf_shape = psf.shape

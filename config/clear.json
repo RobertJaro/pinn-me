@@ -1,5 +1,5 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/test_clear",
+  "base_path": "/glade/work/rjarolim/pinn_me/test_data/test_clear",
   "data": {
     "file": "/glade/work/rjarolim/data/inversion/MEset_v4_nt_100_spatial_400_400_withPSF_11x11_s_4.npz",
     "psf": null,

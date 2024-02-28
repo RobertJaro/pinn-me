@@ -6,6 +6,7 @@ from multiprocessing import Pool
 import numpy as np
 import torch
 import wandb
+from astropy.io import fits
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import convolve2d
@@ -13,6 +14,7 @@ from sunpy.map import Map, all_coordinates_from_map
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
+from astropy import units as u
 
 class BatchDataset(Dataset):
 
@@ -50,13 +52,14 @@ class TestDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
-        lambdaStart = 6300.8 * 1e-10
-        lambdaStep = 0.03 * 1e-10
+        lambdaStart = 6300.8 * u.AA
+        lambdaStep = 0.03 * u.AA
         nLambda = 50
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
 
-        stokes_vector = np.load(file)['Stokes_profiles']  # (4, 100, 400, 400, 50)
+        stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
+        stokes_vector = stokes_vector[:, ::20]
         # reshape to (400, 400, 100, 4, 50)
         stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
 
@@ -75,14 +78,20 @@ class TestDataModule(LightningDataModule):
 
         # convolve with psf
         if psf is not None:
-            psf = np.load(psf)['PSF']
+            if psf.endswith('.npy'):
+                psf = np.load(psf)['PSF']
+            elif psf.endswith('.fits'):
+                psf = fits.getdata(psf).astype(np.float32)
+            else:
+                raise ValueError('Invalid psf file format')
+
             psf /= psf.sum()  # assure valid psf
             print('CONVOLVING WITH PSF: ', psf.shape)
             # stokes vector (x, y, lambda); psf (x, y)
             flat_stokes_vector = stokes_vector.reshape(*stokes_vector.shape[:2], -1)
             flat_stokes_vector = np.moveaxis(flat_stokes_vector, -1, 0)
             conv = ParallelConvolution(psf)
-            with Pool(16) as p:
+            with Pool(32) as p:
                 convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
                                                            total=flat_stokes_vector.shape[0])], -1)
             stokes_vector = convolved_maps.reshape(stokes_vector.shape)

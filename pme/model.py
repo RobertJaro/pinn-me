@@ -61,7 +61,7 @@ class MEModel(nn.Module):
         self.linear_layers = nn.ModuleList(lin)
 
         # output layer
-        self.d_out = nn.Linear(dim, 10)
+        self.d_out = nn.Linear(dim, 8)
 
         # activation functions
         self.in_activation = Swish()
@@ -80,13 +80,13 @@ class MEModel(nn.Module):
         b_field = params[..., 0:1] * 1000
         theta = params[..., 1:2] * torch.pi #torch.sigmoid(params[..., 1:2]) * 180
         chi = params[..., 2:3] * torch.pi #torch.sigmoid(params[..., 2:3]) * 180
-        vmac = torch.sigmoid(params[..., 3:4]) * 20
+        vmac = torch.sigmoid(params[..., 3:4]) * 20e3
         damping = torch.sigmoid(params[..., 4:5]) * 10
         b0 = torch.sigmoid(params[..., 5:6])
         b1 = torch.sigmoid(params[..., 6:7])
-        mu = torch.sigmoid(params[..., 7:8])
-        vdop = torch.tanh(params[..., 8:9]) * 0
-        kl = self.softplus(params[..., 9:10])
+        vdop = torch.tanh(params[..., 7:8]) * 10e3
+        mu = torch.ones_like(b_field)
+        kl = torch.ones_like(b_field)
         #
         output = {
             "b_field": b_field,

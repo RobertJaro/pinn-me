@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from pme.train.me_atmosphere import MEAtmosphere
+
 
 class PINNMEOutput:
 

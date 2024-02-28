@@ -1,5 +1,5 @@
 {
-  "base_path": "/glade/work/rjarolim/pinn_me/train/sharp_v1",
+  "base_path": "/glade/work/rjarolim/pinn_me/test_data/sharp_v1",
   "data": {
     "type": "sharp",
     "files": {

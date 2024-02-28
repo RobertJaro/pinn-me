@@ -19,20 +19,20 @@ args = parser.parse_args()
 
 os.makedirs(args.output, exist_ok=True)
 
-pme_paths = {'1e-2': '/glade/work/rjarolim/pinn_me/train/test_psf_noise_1e-2/inversion.pme',
-         '1e-3': '/glade/work/rjarolim/pinn_me/train/test_psf_noise_1e-3/inversion.pme',
-         '1e-4': '/glade/work/rjarolim/pinn_me/train/test_psf_noise_1e-4/inversion.pme',
-         '1e-5': '/glade/work/rjarolim/pinn_me/train/test_psf_noise_1e-5/inversion.pme',
-         'PSF': '/glade/work/rjarolim/pinn_me/train/test_psf/inversion.pme',
+pme_paths = {'1e-2': '/glade/work/rjarolim/pinn_me/test_data/test_psf_noise_1e-2/inversion.pme',
+         '1e-3': '/glade/work/rjarolim/pinn_me/test_data/test_psf_noise_1e-3/inversion.pme',
+         '1e-4': '/glade/work/rjarolim/pinn_me/test_data/test_psf_noise_1e-4/inversion.pme',
+         '1e-5': '/glade/work/rjarolim/pinn_me/test_data/test_psf_noise_1e-5/inversion.pme',
+         'PSF': '/glade/work/rjarolim/pinn_me/test_data/test_psf/inversion.pme',
          'Clear': None
              }
 
-pmes_paths = {'1e-2': '/glade/work/rjarolim/pinn_me/train/test_simple_noise_1e-2/inversion.pme',
-            '1e-3': '/glade/work/rjarolim/pinn_me/train/test_simple_noise_1e-3/inversion.pme',
-            '1e-4': '/glade/work/rjarolim/pinn_me/train/test_simple_noise_1e-4/inversion.pme',
-            '1e-5': '/glade/work/rjarolim/pinn_me/train/test_simple_noise_1e-5/inversion.pme',
-            'PSF': '/glade/work/rjarolim/pinn_me/train/test_simple_psf/inversion.pme',
-            'Clear': '/glade/work/rjarolim/pinn_me/train/test_clear/inversion.pme'
+pmes_paths = {'1e-2': '/glade/work/rjarolim/pinn_me/test_data/test_simple_noise_1e-2/inversion.pme',
+            '1e-3': '/glade/work/rjarolim/pinn_me/test_data/test_simple_noise_1e-3/inversion.pme',
+            '1e-4': '/glade/work/rjarolim/pinn_me/test_data/test_simple_noise_1e-4/inversion.pme',
+            '1e-5': '/glade/work/rjarolim/pinn_me/test_data/test_simple_noise_1e-5/inversion.pme',
+            'PSF': '/glade/work/rjarolim/pinn_me/test_data/test_simple_psf/inversion.pme',
+            'Clear': '/glade/work/rjarolim/pinn_me/test_data/test_clear/inversion.pme'
                 }
 
 parameters_true = np.load(args.reference)
