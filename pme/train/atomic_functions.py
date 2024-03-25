@@ -1,12 +1,12 @@
 import numpy as np
-
+import torch
 
 def fact(n):
-    ''' My simplistic way to compute factorial
+    ''' My simplistic way to compute fact
 
     Input:
         -- n, int
-    Output
+    Output:
         -- results, float
             result == n!
 
@@ -20,151 +20,96 @@ def fact(n):
     return result
 
 
-    def _int_or_halfint(self, value):
-        """return Python int unless value is half-int (then return float)"""
-        if isinstance(value, int):
-            return value
-        elif type(value) is float:
-            if value.is_integer():
-                return int(value)  # an int
-            if (2 * value).is_integer():
-                return value  # a float
-        elif isinstance(value, Rational):
-            if value.q == 2:
-                return value.p / value.q  # a float
-            elif value.q == 1:
-                return value.p  # an int
-        elif isinstance(value, Float):
-            return _int_or_halfint(float(value))
-        raise ValueError("expecting integer or half-integer, got %s" % value)
+def threej(j1, j2, j3, m1, m2, m3):
+    """
+    3J function from Rebecca (from VFISV)
 
-    def w3js(self, j_1, j_2, j_3, m_1, m_2, m_3):
-        """
-        Calculate the Wigner 3j symbol `\operatorname{Wigner3j}(j_1,j_2,j_3,m_1,m_2,m_3)`.
+    """
+    j1 = torch.tensor(j1, dtype = torch.int)
+    j2 = torch.tensor(j2, dtype = torch.int)
+    j3 = torch.tensor(j3, dtype = torch.int)
+    m1 = torch.tensor(m1, dtype = torch.int)
+    m2 = torch.tensor(m2, dtype = torch.int)
+    m3 = torch.tensor(m3, dtype = torch.int)
 
-        Parameters
-        ==========
+    coef_aux = torch.tensor(1, dtype=torch.int)
+    coef = torch.tensor(0, dtype=torch.int)
 
-        j_1, j_2, j_3, m_1, m_2, m_3 :
-            Integer or half integer.
+    if ((torch.abs(m1) > torch.abs(j1)) or (np.abs(m2) > torch.abs(j2))
+            or (torch.abs(m3) > torch.abs(j3))):
+        return 0
+    if ((j1 + j2 - j3) < 0):
+        return 0
 
-        Returns
-        =======
+    if ((j2 + j3 - j1)) < 0:
+        coef_aux = 0
 
-        Rational number times the square root of a rational number.
+    if ((j3 + j1 - j2)) < 0:
+        return 0
 
-        Examples
-        ========
+    if ((m1 + m2 + m3)) != 0:
+        coef_aux = 0
 
-        It is an error to have arguments that are not integer or half
-        integer values::
+    if (coef_aux == 1):
+        kmin1 = j3 - j1 - m2
+        kmin2 = j3 - j2 + m1
+        kmin = -1 * torch.minimum(kmin1, kmin2)
+        if (kmin < 0):
+            kmin = 0
+        kmax1 = j1 + j2 - j3
+        kmax2 = j1 - m1
+        kmax3 = j2 + m2
+        kmax = torch.minimum(torch.minimum(kmax1, kmax2), kmax3)
 
-            sage: wigner_3j(2.1, 6, 4, 0, 0, 0)
-            Traceback (most recent call last):
-            ...
-            ValueError: j values must be integer or half integer
-            sage: wigner_3j(2, 6, 4, 1, 0, -1.1)
-            Traceback (most recent call last):
-            ...
-            ValueError: m values must be integer or half integer
+        if (kmin < kmax):
+            coef_aux = 0
 
-        Notes
-        =====
+    term1 = frontl(j1, j2, j3, m1, m2, m3)
+    msign = (-1) ** (j1 - j2 - m3)
 
-        The Wigner 3j symbol obeys the following symmetry rules:
+    coef = 0
 
-        - invariant under any permutation of the columns (with the
-          exception of a sign change where `J:=j_1+j_2+j_3`):
+    for j in range(kmin, kmax+1):
+        term2 = fact(j) * fact(kmin1 + j) * fact(kmin2 + j)
+        term2 = term2 * fact(kmax1 - j) * fact(kmax2 - j) * fact(kmax3 - j)
+        term = (-1) ** j * msign * term1 / term2
+        coef = coef + term
 
-          .. math::
 
-             \begin{aligned}
-             \operatorname{Wigner3j}(j_1,j_2,j_3,m_1,m_2,m_3)
-              &=\operatorname{Wigner3j}(j_3,j_1,j_2,m_3,m_1,m_2) \\
-              &=\operatorname{Wigner3j}(j_2,j_3,j_1,m_2,m_3,m_1) \\
-              &=(-1)^J \operatorname{Wigner3j}(j_3,j_2,j_1,m_3,m_2,m_1) \\
-              &=(-1)^J \operatorname{Wigner3j}(j_1,j_3,j_2,m_1,m_3,m_2) \\
-              &=(-1)^J \operatorname{Wigner3j}(j_2,j_1,j_3,m_2,m_1,m_3)
-             \end{aligned}
+    coef = coef * coef_aux
+    return coef
+def frontl(x1, x2, x3, y1, y2, y3):
+    """
+    Helper function from Rebecca
 
-        - invariant under space inflection, i.e.
+    """
+    x1 = torch.tensor(x1, dtype=torch.int)
+    x2 = torch.tensor(x2, dtype=torch.int)
+    x3 = torch.tensor(x3, dtype=torch.int)
+    y1 = torch.tensor(y1, dtype=torch.int)
+    y2 = torch.tensor(y2, dtype=torch.int)
+    y3 = torch.tensor(y3, dtype=torch.int)
 
-          .. math::
+    l1 = x1 + x2 - x3
+    l2 = x2 + x3 - x1
+    l3 = x3 + x1 - x2
+    l4 = x1 + x2 + x3 + 1
+    l5 = x1 + y1
+    l6 = x1 - y1
+    l7 = x2 + y2
+    l8 = x2 - y2
+    l9 = x3 + y3
+    l10 = x3 - y3
 
-             \operatorname{Wigner3j}(j_1,j_2,j_3,m_1,m_2,m_3)
-             =(-1)^J \operatorname{Wigner3j}(j_1,j_2,j_3,-m_1,-m_2,-m_3)
+    dum = 1
+    dum = dum * fact(l1) * fact(l2) * fact(l3) * fact(l5) / fact(l4)
+    dum = dum * fact(l6) * fact(l7) * fact(l8) * fact(l9) * fact(l10)
 
-        - symmetric with respect to the 72 additional symmetries based on
-          the work by [Regge58]_
+    dum = torch.tensor(dum, dtype=torch.float)
 
-        - zero for `j_1`, `j_2`, `j_3` not fulfilling triangle relation
+    dum = torch.sqrt(dum)
 
-        - zero for `m_1 + m_2 + m_3 \neq 0`
-
-        - zero for violating any one of the conditions
-          `j_1 \ge |m_1|`,  `j_2 \ge |m_2|`,  `j_3 \ge |m_3|`
-
-        Algorithm
-        =========
-
-        This function uses the algorithm of [Edmonds74]_ to calculate the
-        value of the 3j symbol exactly. Note that the formula contains
-        alternating sums over large factorials and is therefore unsuitable
-        for finite precision arithmetic and only useful for a computer
-        algebra system [Rasch03]_.
-
-        Authors
-        =======
-
-        - M Molnar 2024 --
-        - Jens Rasch (2009-03-24): initial version
-        """
-
-        j_1, j_2, j_3, m_1, m_2, m_3 = map(self._int_or_halfint,
-                                           [j_1, j_2, j_3, m_1, m_2, m_3])
-
-        if m_1 + m_2 + m_3 != 0:
-            return 0
-        a1 = j_1 + j_2 - j_3
-        if a1 < 0:
-            return 0
-        a2 = j_1 - j_2 + j_3
-        if a2 < 0:
-            return 0
-        a3 = -j_1 + j_2 + j_3
-        if a3 < 0:
-            return 0
-        if (abs(m_1) > j_1) or (abs(m_2) > j_2) or (abs(m_3) > j_3):
-            return 0
-
-        argsqrt = int(self.fact(int(j_1 + j_2 - j_3)) *
-                      self.fact(int(j_1 - j_2 + j_3)) *
-                      self.fact(int(-j_1 + j_2 + j_3)) *
-                      self.fact(int(j_1 - m_1)) *
-                      self.fact(int(j_1 + m_1)) *
-                      self.fact(int(j_2 - m_2)) *
-                      self.fact(int(j_2 + m_2)) *
-                      self.fact(int(j_3 - m_3)) *
-                      self.fact(int(j_3 + m_3)) / self.fact(int(j_1 + j_2 + j_3 + 1)))
-
-        ressqrt = torch.sqrt(argsqrt)
-        if torch.is_complex(ressqrt) or torch.isnan(ressqrt):
-            ressqrt = ressqrt.imag
-
-        imin = torch.max(-j_3 + j_1 + m_2, -j_3 + j_2 - m_1, 0)
-        imax = torch.min(j_2 + m_2, j_1 - m_1, j_1 + j_2 - j_3)
-        sumres = 0
-        for ii in range(int(imin), int(imax) + 1):
-            den = (self.fact(ii) * self.fact(int(ii + j_3 - j_1 - m_2))
-                   * self.fact(int(j_2 + m_2 - ii))
-                   * self.fact(int(j_1 - ii - m_1))
-                   * self.fact(int(ii + j_3 - j_2 + m_1))
-                   * self.fact(int(j_1 + j_2 - j_3 - ii)))
-            sumres = sumres + int((-1) ** ii) / den
-
-        prefid = int((-1) ** int(j_1 - j_2 - m_3))
-        res = ressqrt * sumres * prefid
-        return res
+    return dum
 
 def compute_zeeman_strength(JUp, JLow, MUp, MLow):
     ''' Compute the strength of the different Zeeman components
@@ -180,6 +125,7 @@ def compute_zeeman_strength(JUp, JLow, MUp, MLow):
         -- zeeman_strength, float
             Relative strenght of the zeeman component
     '''
-    zeeman_strength = 3 * w3js(2 * JUp, 2 * JLow, 2, 2 * MUp, 2 * MLow, -2 * (MLow - MUp))
+    zeeman_strength = 3 * threej(JUp, JLow, 1,
+                                 -1*MUp, MLow, (MUp - MLow))**2
 
     return zeeman_strength
