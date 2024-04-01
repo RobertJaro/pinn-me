@@ -348,3 +348,57 @@ class ParallelConvolution:
 
     def conv_f(self, img):
         return convolve2d(img, self.psf, mode='same', boundary='symm')
+
+
+def load_Hinode_files(data_dir):
+    ''' Load in Hinode Level 1 data files and return a
+        4D array with the Stokes parameters and properties
+        of the spectral scans
+
+        Input:
+            -- data_dir, str
+                Directory with level1 data product from the SOT/SP CSAC data
+
+        Output:
+            -- image_data, np.array [nx, ny, nLambda, 4]
+                Stokes array
+            -- dwavelength, float
+                Sampling in Angstroms
+            -- wavelength_center, float
+                Central wavelength
+    '''
+
+    file_list = []
+
+    for root, dirs, files in os.walk(data_dir):
+        for filename in sorted(files):
+            file_list = np.append(file_list, filename)
+
+    file_list = file_list[1:]  # omit the .DC_Store for a Mac
+    num_files = len(file_list)
+
+    with fits.open(data_dir + file_list[0]) as a:
+        print(data_dir + file_list[0])
+        hdr = a[0].header
+        # get everything we need from the header of the data partition
+        dwave = hdr["CDELT1"]
+        wave_cent = hdr["CRVAL1"]
+
+        N_Stokes = a[0].data.shape[0]
+        print(f"{N_Stokes} Stokes parameters")
+        N_y = a[0].data.shape[1]
+        N_lambda = a[0].data.shape[2]
+        spec_range = dwave * N_lambda / 2
+        wavescale = wave_cent + np.linspace(-1 * spec_range, spec_range, num=N_lambda)
+
+    wavelength_central = wave_cent
+    dwavelength = wavescale[1] - wavescale[0]
+
+    image_data = np.zeros((num_files, N_y, N_lambda, N_Stokes))
+
+    for el in range(0, int(num_files)):
+        # print(el)
+        with fits.open(data_dir + file_list[el]) as a:
+            image_data[el, :, :, :] = np.moveaxis(a[0].data, 0, -1)
+
+    return image_data, dwavelength, wavelength_central
