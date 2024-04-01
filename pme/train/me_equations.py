@@ -173,6 +173,7 @@ class MEAtmosphere(nn.Module):
         Authors
         =======
 
+        - M Molnar 2024 --
         - Jens Rasch (2009-03-24): initial version
         """
 
@@ -259,7 +260,8 @@ class MEAtmosphere(nn.Module):
 
             iLow = 1
             MLow = MUp - 2 + iLow
-            if torch.abs(MLow) < self.JLow:
+
+            if torch.abs(MLow) <= self.JLow:
                 strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
                 splitting = self.gUp * MUp - self.gLow * MLow
 
@@ -270,7 +272,7 @@ class MEAtmosphere(nn.Module):
 
             iLow = 2
             MLow = MUp - 2 + iLow
-            if torch.abs(MLow) < self.JLow:
+            if torch.abs(MLow) <= self.JLow:
                 strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
                 splitting = self.gUp * MUp - self.gLow * MLow
 
@@ -281,7 +283,7 @@ class MEAtmosphere(nn.Module):
 
             iLow = 3
             MLow = MUp - 2 + iLow
-            if torch.abs(MLow) < self.JLow:
+            if torch.abs(MLow) <= self.JLow:
                 strength = self.strength_zeeman(self.JUp, self.JLow, MUp, MLow)
                 splitting = self.gUp * MUp - self.gLow * MLow
 
