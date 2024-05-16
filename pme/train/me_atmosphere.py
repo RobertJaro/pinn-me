@@ -63,48 +63,36 @@ class MEAtmosphere(nn.Module):
             MLow = MUp - 2 + iLow
 
             if torch.abs(MLow) <= torch.abs(self.j_low):
-                # print(f"Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}")
 
                 strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
                 splitting = self.g_up * MUp - self.g_low * MLow
-                # print(f"For transition {self.j_up, MUp} to {self.j_low, MLow} is {strength}")
-                print(f"strength and Spliting is {strength, splitting} for {MLow, MUp}")
-                print(f"lambdadop, mu is {lambda_dop, - 1 * splitting * nu_m}")
 
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
                 phi_b += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma)
+                psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
 
             iLow = 2
             MLow = MUp - 2 + iLow
 
             if torch.abs(MLow) <= torch.abs(self.j_low):
-                # print(f"Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}")
                 strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                # print(f"For transition {self.j_up, MUp} to {self.j_low, MLow} is {strength}")
                 splitting = self.g_up * MUp - self.g_low * MLow
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                print(f"strength and Spliting is {strength, splitting} for {MLow, MUp}")
-                print(f"lambdadop, mu is {lambda_dop, - 1 * splitting * nu_m}")
 
                 phi_p += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_p += strength * self.faraday_voigt(nu - mu, sigma, gamma)
+                psi_p += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
 
             iLow = 3
             MLow = MUp - 2 + iLow
             if torch.abs(MLow) <= torch.abs(self.j_low):
-                # print(f"Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}")
 
                 strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                # print(f"For transition {self.j_up, MUp} to {self.j_low, MLow} is {strength}")
                 splitting = self.g_up * MUp - self.g_low * MLow
-                print(f"strength and Spliting is {strength, splitting} for {MLow, MUp}")
 
 
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                print(f"lambdadop, mu is {lambda_dop, - 1 * splitting * nu_m}")
                 phi_r += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma)
+                psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
         return {'phi_b': phi_b, 'psi_b': psi_b, 'phi_p': phi_p, 'psi_p': psi_p, 'phi_r': phi_r, 'psi_r': psi_r}
 
     def zeeman_strength(self, j_up, j_low, MUp, MLow):
@@ -119,7 +107,6 @@ class MEAtmosphere(nn.Module):
         lookup = {}
         assert (2 * self.j_up + 1) % 1 == 0, 'nUp must be integer'
         nUp = int(2 * self.j_up + 1)
-        print(f"nUP is {nUp}")
         for iUp in range(0, nUp):
             MUp = self.j_up - iUp
 
@@ -130,7 +117,6 @@ class MEAtmosphere(nn.Module):
 
                 z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
                 strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                print(f"Load fn2: Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}, str is {strength}")
 
                 lookup[z_id] = strength
 
@@ -139,7 +125,6 @@ class MEAtmosphere(nn.Module):
             if torch.abs(MLow) <= torch.abs(self.j_low):
                 z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
                 strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                print(f"Load fn2: Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}, str is {strength}")
 
                 lookup[z_id] = strength
 
@@ -149,7 +134,6 @@ class MEAtmosphere(nn.Module):
                 z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
                 strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
                 lookup[z_id] = strength
-                print(f"Load fn2: Doing For transition JuP, MUp: {self.j_up, MUp} to Jlow, MLow {self.j_low, MLow}, str is {strength}")
 
         return lookup
 
@@ -162,12 +146,6 @@ class MEAtmosphere(nn.Module):
     def eta_Q(self, phi_p, phi_r, phi_b, theta, chi, kl, **kwargs):
         eta_Q = ((phi_p - 0.5 * (phi_r + phi_b)) * torch.sin(theta) ** 2 * torch.cos(2 * chi)) * kl
 
-        # print(f"eta_q angles :{torch.sin(theta) ** 2, torch.cos(2 * chi)}")
-        # pl.plot(phi_p[0, 0, 0, :], label="phi_p")
-        # pl.plot(phi_b[0, 0, 0, :], label="phi_b")
-        # pl.plot(phi_r[0, 0, 0, :], label="phi_r")
-        # pl.legend()
-        # pl.savefig("/glade/u/home/mmolnar/PINNME_results/phis.png")
         return eta_Q
 
     def eta_U(self, phi_p, phi_r, phi_b, theta, chi, kl, **kwargs):
@@ -180,15 +158,10 @@ class MEAtmosphere(nn.Module):
 
     def rho_Q(self, psi_p, psi_r, psi_b, theta, chi, kl, **kwargs):
         rho_Q = ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.cos(2 * chi)) * kl
-        # pl.plot(psi_p[0, 0, 0, :], label="psi_p")
-        # pl.plot(psi_b[0, 0, 0, :], label="psi_b")
-        # pl.plot(psi_r[0, 0, 0, :], label="psi_r")
-        # pl.legend()
-        # pl.savefig("/glade/u/home/mmolnar/PINNME_results/psis.png")
         return rho_Q
 
     def rho_U(self, psi_p, psi_r, psi_b, theta, chi, kl, **kwargs):
-        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
+        rho_U =  ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
 
         return rho_U
 
@@ -209,17 +182,20 @@ class MEAtmosphere(nn.Module):
         return I
 
     def compute_Q(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
-        Q = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_Q + (1 + eta_I) * (eta_V * rho_U - eta_U * rho_V)
+        Q = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_Q
+                                 + (1 + eta_I) * (eta_V * rho_U - eta_U * rho_V)
                                  + rho_Q * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
         return Q
 
     def compute_U(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
-        U = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_U + (1 + eta_I) * (eta_Q * rho_V - eta_V * rho_Q)
+        U = -1 * mu * b1 / delta * ((1 + eta_I) ** 2 * eta_U
+                                 + (1 + eta_I) * (eta_Q * rho_V - eta_V * rho_Q)
                                  + rho_U * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
         return U
 
     def compute_V(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
-        V = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_V + rho_V * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
+        V = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_V
+                                 + rho_V * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
         return V
 
     def nu_m(self, b_field, d_lambda, **kwargs):
@@ -264,4 +240,4 @@ class MEAtmosphere(nn.Module):
         Q = self.compute_Q(**state)
         U = self.compute_U(**state)
         V = self.compute_V(**state)
-        return I, Q, U, V #, state
+        return I, Q, U, V
