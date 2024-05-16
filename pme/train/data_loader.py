@@ -45,23 +45,25 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
 
 class TestDataModule(LightningDataModule):
 
-    def __init__(self, file, batch_size=4096, num_workers=None, noise=None, psf=None, slit=False, **kwargs):
+    def __init__(self, file, batch_size=4096, num_workers=None,
+                 noise=None, psf=None, slit=False, **kwargs):
         super().__init__()
 
         # train parameters
         self.batch_size = batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
-        lambdaStart = 6300.8 * u.AA
-        lambdaStep = 0.03 * u.AA
-        nLambda = 50
+        lambdaStart = 6301.25 * u.AA
+        lambdaStep = 0.0025 * u.AA
+        nLambda = 201
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
 
         stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
-        stokes_vector = stokes_vector[:, ::20]
+
         # reshape to (400, 400, 100, 4, 50)
         stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
+        print(f"Loaded stokes vector {stokes_vector.shape}")
 
         print('LOADING STOKES VECTOR: ', stokes_vector.shape)
         coordinates = np.stack(np.meshgrid(np.linspace(-1, 1, stokes_vector.shape[0], dtype=np.float32),
@@ -378,14 +380,12 @@ def load_Hinode_files(data_dir):
     num_files = len(file_list)
 
     with fits.open(data_dir + file_list[0]) as a:
-        print(data_dir + file_list[0])
         hdr = a[0].header
         # get everything we need from the header of the data partition
         dwave = hdr["CDELT1"]
         wave_cent = hdr["CRVAL1"]
 
         N_Stokes = a[0].data.shape[0]
-        print(f"{N_Stokes} Stokes parameters")
         N_y = a[0].data.shape[1]
         N_lambda = a[0].data.shape[2]
         spec_range = dwave * N_lambda / 2
