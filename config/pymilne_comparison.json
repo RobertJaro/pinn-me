@@ -1,0 +1,25 @@
+{
+  "base_path": "/glade/work/mmolnar/PINN-ME/",
+  "data": {
+    "type": "test",
+    "file": "/glade/work/mmolnar/PINN-ME/test_pymilne.npz",
+    "psf": null,
+    "noise": null,
+    "num_workers": 9,
+    "batch_size": 4096
+  },
+  "logging": {
+    "wandb_entity": "mmolnar",
+    "wandb_project": "pinn-me",
+    "wandb_name": "pymilne_comparison",
+    "wandb_id": null
+  },
+  "model": {
+    "dim": 256,
+    "encoding": "positional",
+    "psf_config":  {"type": null}},
+  "training": {
+    "epochs": 100,
+    "check_val_every_n_epoch": 5
+  }
+}
