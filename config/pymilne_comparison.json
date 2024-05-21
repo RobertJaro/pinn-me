@@ -1,5 +1,5 @@
 {
-  "base_path": "/glade/work/mmolnar/PINN-ME/",
+  "base_path": "/glade/work/mmolnar/PINN-ME/pymilne_comparison_v1/",
   "data": {
     "type": "test",
     "file": "/glade/work/mmolnar/PINN-ME/test_pymilne.npz",
@@ -19,7 +19,7 @@
     "encoding": "positional",
     "psf_config":  {"type": null}},
   "training": {
-    "epochs": 100,
-    "check_val_every_n_epoch": 5
+    "epochs": 30,
+    "check_val_every_n_epoch": 10
   }
 }
