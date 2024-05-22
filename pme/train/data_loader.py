@@ -61,10 +61,8 @@ class TestDataModule(LightningDataModule):
         self.lambda_config = {'lambda0': 6301.5080 * u.AA, 'j_up': 2.0, 'j_low': 2.0, 'g_up': 1.5, 'g_low': 1.83,
                               'lambda_grid': self.lambda_grid}
 
-        stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
+        stokes_vector = load_test_stokes_profiles(file, psf_file=psf, noise=noise)
 
-        # reshape to (400, 400, 100, 4, 50)
-        stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
         print(f"Loaded stokes vector {stokes_vector.shape}")
 
         print('LOADING STOKES VECTOR: ', stokes_vector.shape)
@@ -75,37 +73,6 @@ class TestDataModule(LightningDataModule):
 
         self.cube_shape = coordinates.shape[:3]
         self.data_range = [[-1, 1], [-1, 1], [0, 1]]
-
-        # add noise
-        if noise is not None:
-            stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
-
-        # convolve with psf
-        if psf is not None:
-            if psf.endswith('.npy'):
-                psf = np.load(psf)['PSF']
-            elif psf.endswith('.fits'):
-                psf = fits.getdata(psf).astype(np.float32)
-            else:
-                raise ValueError('Invalid psf file format')
-
-            psf /= psf.sum()  # assure valid psf
-            print('CONVOLVING WITH PSF: ', psf.shape)
-            # stokes vector (x, y, lambda); psf (x, y)
-            flat_stokes_vector = stokes_vector.reshape(*stokes_vector.shape[:2], -1)
-            flat_stokes_vector = np.moveaxis(flat_stokes_vector, -1, 0)
-            conv = ParallelConvolution(psf)
-            with Pool(32) as p:
-                convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
-                                                           total=flat_stokes_vector.shape[0])], -1)
-            stokes_vector = convolved_maps.reshape(stokes_vector.shape)
-
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
-            im = ax.imshow(psf, vmin=0)
-            fig.colorbar(im)
-            fig.tight_layout()
-            wandb.log({'Ground-truth PSF': fig})
-            plt.close('all')
 
         normalized_stokes_vector = np.copy(stokes_vector)
         normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
@@ -201,6 +168,36 @@ class TestDataModule(LightningDataModule):
                                  pin_memory=True, shuffle=False)
         return data_loader
 
+
+def load_test_stokes_profiles(file, psf_file=None, noise=None):
+    stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
+    # reshape to (400, 400, 100, 4, 50)
+    stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
+
+    # add noise
+    if noise is not None:
+        stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
+
+    # convolve with psf
+    if psf_file is not None:
+        if psf_file.endswith('.npy'):
+            psf = np.load(psf_file)['PSF']
+        elif psf_file.endswith('.fits'):
+            psf = fits.getdata(psf_file).astype(np.float32)
+        else:
+            raise ValueError('Invalid psf file format')
+
+        psf /= psf.sum()  # assure valid psf
+        print('CONVOLVING WITH PSF: ', psf.shape)
+        # stokes vector (x, y, lambda); psf (x, y)
+        flat_stokes_vector = stokes_vector.reshape(*stokes_vector.shape[:2], -1)
+        flat_stokes_vector = np.moveaxis(flat_stokes_vector, -1, 0)
+        conv = ParallelConvolution(psf)
+        with Pool(32) as p:
+            convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
+                                                       total=flat_stokes_vector.shape[0])], -1)
+        stokes_vector = convolved_maps.reshape(stokes_vector.shape)
+    return stokes_vector
 
 class SHARPDataModule(LightningDataModule):
 
