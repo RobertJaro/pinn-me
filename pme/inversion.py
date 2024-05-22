@@ -52,7 +52,7 @@ elif type == 'sharp':
 else:
     raise ValueError(f'Unknown data type {type}')
 
-me_module = MEModule(data_module.cube_shape, data_module.lambda_grid, data_module.value_range, **args.model,
+me_module = MEModule(data_module.cube_shape, data_module.lambda_config, data_module.value_range, **args.model,
                      **args.training)
 
 config = {'data': args.data, 'model': args.model, 'training': args.training}
@@ -68,7 +68,7 @@ save_path = os.path.join(base_path, 'inversion.pme')
 def save(*args, **kwargs):
     torch.save({
         'parameter_model': me_module.parameter_model,
-        'cube_shape': data_module.cube_shape, 'lambda_grid': data_module.lambda_grid,
+        'cube_shape': data_module.cube_shape, 'lambda_config': data_module.lambda_config,
         'data_range': data_module.data_range}, save_path)
 
 

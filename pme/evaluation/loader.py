@@ -17,8 +17,12 @@ class PINNMEOutput:
         self.parameter_model.eval()
 
         self.cube_shape = state['cube_shape']
-        self.lambda_grid = state['lambda_grid']
+        self.lambda_config = state['lambda_config']
         self.data_range = state['data_range']
+
+        self.forward_model = MEAtmosphere(**self.lambda_config)
+        self.forward_model = nn.DataParallel(self.forward_model)
+        self.forward_model.eval()
 
     @torch.no_grad()
     def load(self, coords, batch_size=4096):
@@ -31,13 +35,16 @@ class PINNMEOutput:
         for i in range(n_batches):
             batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
             pred = self.parameter_model(batch)
+            I, Q, U, V = self.forward_model(**pred)
+            pred['I'] = I
+            pred['Q'] = Q
+            pred['U'] = U
+            pred['V'] = V
             for key, value in pred.items():
                 if key not in parameters:
                     parameters[key] = []
                 value = value.cpu().numpy()
                 parameters[key].append(value)
-
-
 
         parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], -1)
                       for key, value in parameters.items()}
@@ -52,6 +59,11 @@ class PINNMEOutput:
         parameters['chi'] = chi
 
         return parameters
+
+    def load_profiles(self, parameters):
+        tensors = {key: torch.tensor(value, dtype=torch.float32).to(self.device) for key, value in parameters.items()}
+        I, Q, U, V = self.forward_model(**tensors)
+        return {'I': I.cpu().numpy(), 'Q': Q.cpu().numpy(), 'U': U.cpu().numpy(), 'V': V.cpu().numpy()}
 
     def load_cube(self):
         coords = np.meshgrid(
@@ -79,6 +91,7 @@ def to_cartesian(b_field, theta, chi):
     b_y = b_field * np.sin(theta) * np.sin(chi)
     b_z = b_field * np.cos(theta)
     return np.stack([b_x, b_y, b_z], axis=-1)
+
 
 def to_spherical(b):
     b_field = np.linalg.norm(b, axis=-1)

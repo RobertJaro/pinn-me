@@ -15,7 +15,7 @@ from astropy import units as u
 
 class MEModule(LightningModule):
 
-    def __init__(self, cube_shape, lambda_grid, value_range, psf_config={'type': None}, dim=256,
+    def __init__(self, cube_shape, lambda_config, value_range, psf_config={'type': None}, dim=256,
                  lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5},
                  encoding="positional", plot_profiles=False, **kwargs):
         super().__init__()
@@ -57,7 +57,7 @@ class MEModule(LightningModule):
         else:
             raise ValueError(f"Invalid PSF type: {psf_config['type']}")
 
-        self.forward_model = MEAtmosphere(lambda0=6301.5080 * u.AA, j_up=2.0, j_low=2.0, g_up=1.5, g_low=1.83, lambda_grid=lambda_grid)
+        self.forward_model = MEAtmosphere(**lambda_config)
         self.lr_params = lr_params
         #
         self.validation_outputs = {}

@@ -58,6 +58,8 @@ class TestDataModule(LightningDataModule):
         nLambda = 201
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
+        self.lambda_config = {'lambda0': 6301.5080 * u.AA, 'j_up': 2.0, 'j_low': 2.0, 'g_up': 1.5, 'g_low': 1.83,
+                              'lambda_grid': self.lambda_grid}
 
         stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
 

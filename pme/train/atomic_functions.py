@@ -25,12 +25,6 @@ def threej(j1, j2, j3, m1, m2, m3):
     3J function from Rebecca (from VFISV)
 
     """
-    j1 = torch.tensor(j1, dtype = torch.int)
-    j2 = torch.tensor(j2, dtype = torch.int)
-    j3 = torch.tensor(j3, dtype = torch.int)
-    m1 = torch.tensor(m1, dtype = torch.int)
-    m2 = torch.tensor(m2, dtype = torch.int)
-    m3 = torch.tensor(m3, dtype = torch.int)
 
     coef_aux = torch.tensor(1, dtype=torch.int)
     coef = torch.tensor(0, dtype=torch.int)
@@ -83,12 +77,6 @@ def frontl(x1, x2, x3, y1, y2, y3):
     Helper function from Rebecca
 
     """
-    x1 = torch.tensor(x1, dtype=torch.int)
-    x2 = torch.tensor(x2, dtype=torch.int)
-    x3 = torch.tensor(x3, dtype=torch.int)
-    y1 = torch.tensor(y1, dtype=torch.int)
-    y2 = torch.tensor(y2, dtype=torch.int)
-    y3 = torch.tensor(y3, dtype=torch.int)
 
     l1 = x1 + x2 - x3
     l2 = x2 + x3 - x1
