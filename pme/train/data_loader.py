@@ -53,9 +53,9 @@ class TestDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
-        lambdaStart = 6301.25 * u.AA
-        lambdaStep = 0.0025 * u.AA
-        nLambda = 201
+        lambdaStart = 6300.793256 * u.AA
+        lambdaStep = 0.022 * u.AA
+        nLambda = 56
         lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
         self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
         self.lambda_config = {'lambda0': 6301.5080 * u.AA, 'j_up': 2.0, 'j_low': 2.0, 'g_up': 1.5, 'g_low': 1.83,

@@ -1,8 +1,8 @@
 {
-  "base_path": "/glade/work/mmolnar/PINN-ME/pymilne_comparison_v1/",
+  "base_path": "/glade/work/mmolnar/PINN-ME/pinnme_comparison/",
   "data": {
     "type": "test",
-    "file": "/glade/work/mmolnar/PINN-ME/test_pymilne.npz",
+    "file": "/glade/work/mmolnar/data/inversion/test_set_version_1_10_spatial_400_400.npz",
     "psf": null,
     "noise": null,
     "num_workers": 9,

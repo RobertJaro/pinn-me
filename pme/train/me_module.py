@@ -242,8 +242,8 @@ class MEModule(LightningModule):
             wandb.log({k: fig})
             plt.close('all')
 
-        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 50)
-        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 50)
+        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 56)
+        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape[:2], 4, 56)
 
         stokes_true[..., 1:, :] = stokes_true[..., 1:, :] / stokes_true[..., 0:1, :]
         stokes_pred[..., 1:, :] = stokes_pred[..., 1:, :] / stokes_pred[..., 0:1, :]
