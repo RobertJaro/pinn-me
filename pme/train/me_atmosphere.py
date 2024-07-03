@@ -134,7 +134,8 @@ class MEAtmosphere(nn.Module):
                 z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
                 strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
                 lookup[z_id] = strength
-
+            print("lookup table")
+            print(lookup)
         return lookup
 
     # Defining the propagation matrix elements from L^2 book

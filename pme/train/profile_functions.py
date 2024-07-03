@@ -82,7 +82,7 @@ class FaradayVoigt(nn.Module):
         gamma_i = 1j * gamma
         z_arr = (x + gamma_i) / (2 ** 0.5 * sigma)
         z11 = self.faddeeva(z_arr)
-        psi_profile = -1 * z11.imag / 1.772
+        psi_profile = z11.imag / sigma / ((2 * np.pi) ** 0.5)
 
         return psi_profile
 
@@ -98,7 +98,7 @@ class Voigt(nn.Module):
         from See Humlicek (1982) JQSRT 27, 437
         '''
         z = (x + 1j * gamma) / (2 ** 0.5 * sigma)
-        v = self.faddeeva(z).real / (sigma * (2 * np.pi) ** 0.5) * 1.414
+        v = self.faddeeva(z).real / (sigma *(2 * np.pi) ** 0.5 ) 
         return v
 
 
@@ -106,14 +106,9 @@ def faraday_voigt(nu, sigma, gamma, mu):
     ''' Compute the Faraday-Voigt and anomalous dispersion profiles
     from See Humlicek (1982) JQSRT 27, 437
     '''
-
-    def z(x, sigma, gamma, mu):
-        gamma_i = 1j * gamma
-        return (x - mu + gamma_i) / (2 ** 0.5 * sigma)
-
-    z_arr = z(nu, sigma, gamma, mu)
+    z_arr = (nu - mu + 1j * gamma) / (2 ** 0.5 * sigma)   
     z11 = wofz(z_arr)
-    psi_profile = -1 * z11.imag / 1.772
+    psi_profile = z11.imag / sigma / 1.41/1.71 
     return psi_profile
 
 
@@ -121,29 +116,30 @@ def voigt(nu, sigma, gamma, mu):
     ''' Compute the Voigt and anomalous dispersion profiles
     from See Humlicek (1982) JQSRT 27, 437
     '''
-    phi_profile = voigt_profile(nu - mu, sigma, gamma) * 1.414
+    phi_profile = voigt_profile(nu - mu, sigma, gamma) 
     return phi_profile
 
 
 if __name__ == '__main__':
-    base_path = '/glade/work/rjarolim/pinn_me/profile/'
+    base_path = '/glade/u/home/mmolnar/Projects/PINNME/'
     # # fit(voigt, base_path, 'voigt')
     # # fit(faraday_voigt, base_path, 'faraday_voigt')
     # model = Voigt()
     # fit(voigt, model, base_path, 'voigt')
 
-    t_gamma, t_mu = 10, 10
+    t_sigma, t_gamma, t_mu = 1e-6, 0.05, 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    test_nu = np.linspace(-50, 50, 100)
+    test_nu = np.linspace(-2, 2, 10000)
     test_gamma = np.ones_like(test_nu) * t_gamma
     test_mu = np.ones_like(test_nu) * t_mu
-    test_sigma = np.ones_like(test_nu)
+    test_sigma = np.ones_like(test_nu) * t_sigma
 
-    test_profile = voigt(test_nu, test_sigma, test_gamma, test_mu)
+    test_profile = faraday_voigt(test_nu, test_sigma, test_gamma, test_mu)
+    test_profile1 = faraday_voigt(test_nu, test_sigma, test_gamma, test_mu)
 
-    f = Voigt()
+    f = FaradayVoigt()
 
     test_nu_t = torch.tensor(test_nu, dtype=torch.float32)[:, None].to(device)
     test_gamma_t = torch.tensor(test_gamma, dtype=torch.float32)[:, None].to(device)
@@ -156,5 +152,6 @@ if __name__ == '__main__':
     ax.plot(test_nu, test_profile, label='ref')
     ax.plot(test_nu, pred_profile, label='pred', linestyle='--')
     ax.legend()
-    plt.savefig(os.path.join(base_path, f'test_faraday_voigt_{t_gamma:02d}_{t_mu:02d}.jpg'), dpi=150)
+    ax.grid(alpha=0.4)
+    plt.savefig(os.path.join(base_path, f'test_faraday_voigt_{t_gamma:02f}_{t_mu:02f}.jpg'), dpi=150)
     plt.close()
