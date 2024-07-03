@@ -354,19 +354,21 @@ class ParallelConvolution:
 def load_Hinode_files(data_dir):
     ''' Load in Hinode Level 1 data files and return a
         4D array with the Stokes parameters and properties
-        of the spectral scans
+        of the spectral scans. Point to the original 
+        directory where the files were extracted. 
 
         Input:
             -- data_dir, str
-                Directory with level1 data product from the SOT/SP CSAC data
+                Directory with level1 data product from 
+                the SOT/SP CSAC data. 
 
         Output:
-            -- image_data, np.array [nx, ny, nLambda, 4]
+            -- sp_raster, np.array [nx, ny, nLambda, 4]
                 Stokes array
             -- dwavelength, float
-                Sampling in Angstroms
+                Sampling wavelength grid resolution, Angstroms
             -- wavelength_center, float
-                Central wavelength
+                Central wavelength of wavelength range, Angstroms. 
     '''
 
     file_list = []
@@ -393,11 +395,11 @@ def load_Hinode_files(data_dir):
     wavelength_central = wave_cent
     dwavelength = wavescale[1] - wavescale[0]
 
-    image_data = np.zeros((num_files, N_y, N_lambda, N_Stokes))
+    sp_raster = np.zeros((num_files, N_y, N_lambda, N_Stokes))
 
     for el in range(0, int(num_files)):
         # print(el)
         with fits.open(data_dir + file_list[el]) as a:
-            image_data[el, :, :, :] = np.moveaxis(a[0].data, 0, -1)
+            sp_raster[el, :, :, :] = np.moveaxis(a[0].data, 0, -1)
 
-    return image_data, dwavelength, wavelength_central
+    return sp_raster, dwavelength, wavelength_central
