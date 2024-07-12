@@ -58,7 +58,7 @@ class MEAtmosphere(nn.Module):
 
         for iUp in range(0, nUp):
             MUp = self.j_up - iUp
-
+            
             iLow = 1
             MLow = MUp - 2 + iLow
 
@@ -68,8 +68,8 @@ class MEAtmosphere(nn.Module):
                 splitting = self.g_up * MUp - self.g_low * MLow
 
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_b += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
+                phi_b += strength * self.voigt(nu - mu, sigma, gamma) 
+                psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma)
 
             iLow = 2
             MLow = MUp - 2 + iLow
@@ -80,7 +80,7 @@ class MEAtmosphere(nn.Module):
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
 
                 phi_p += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_p += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
+                psi_p += strength * self.faraday_voigt(nu - mu, sigma, gamma)
 
             iLow = 3
             MLow = MUp - 2 + iLow
@@ -91,8 +91,8 @@ class MEAtmosphere(nn.Module):
 
 
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_r += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma) * -1
+                phi_r += strength * self.voigt(nu - mu, sigma, gamma) 
+                psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma)
         return {'phi_b': phi_b, 'psi_b': psi_b, 'phi_p': phi_p, 'psi_p': psi_p, 'phi_r': phi_r, 'psi_r': psi_r}
 
     def zeeman_strength(self, j_up, j_low, MUp, MLow):
