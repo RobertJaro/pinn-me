@@ -80,9 +80,9 @@ class FaradayVoigt(nn.Module):
         '''
 
         gamma_i = 1j * gamma
-        z_arr = (x + gamma_i) / (2 ** 0.5 * sigma)
+        z_arr = (x + gamma_i) / (sigma)
         z11 = self.faddeeva(z_arr)
-        psi_profile = z11.imag / sigma / ((2 * np.pi) ** 0.5)
+        psi_profile = z11.imag / sigma / ((np.pi) ** 0.5)
 
         return psi_profile
 
@@ -97,8 +97,8 @@ class Voigt(nn.Module):
         ''' Compute the Voigt and anomalous dispersion profiles
         from See Humlicek (1982) JQSRT 27, 437
         '''
-        z = (x + 1j * gamma) / (2 ** 0.5 * sigma)
-        v = self.faddeeva(z).real / (sigma *(2 * np.pi) ** 0.5 ) 
+        z = (x + 1j * gamma) / (sigma)
+        v = self.faddeeva(z).real / (sigma * (np.pi) ** 0.5)
         return v
 
 
@@ -106,9 +106,9 @@ def faraday_voigt(nu, sigma, gamma, mu):
     ''' Compute the Faraday-Voigt and anomalous dispersion profiles
     from See Humlicek (1982) JQSRT 27, 437
     '''
-    z_arr = (nu - mu + 1j * gamma) / (2 ** 0.5 * sigma)   
+    z_arr = (nu - mu + 1j * gamma) / (sigma)
     z11 = wofz(z_arr)
-    psi_profile = z11.imag / sigma / 1.41/1.71 
+    psi_profile = z11.imag / (sigma * (np.pi) ** 0.5)
     return psi_profile
 
 
@@ -116,7 +116,7 @@ def voigt(nu, sigma, gamma, mu):
     ''' Compute the Voigt and anomalous dispersion profiles
     from See Humlicek (1982) JQSRT 27, 437
     '''
-    phi_profile = voigt_profile(nu - mu, sigma, gamma) 
+    phi_profile = voigt_profile(nu - mu, sigma, gamma)
     return phi_profile
 
 
