@@ -203,8 +203,9 @@ class MEAtmosphere(nn.Module):
         dlambda_B = 1e-13 * 4.6686e10 * (self.lambda0 ** 2) * b_field
         return dlambda_B / d_lambda
 
-    def lambda_dop(self, vdop, **kwargs):
-        return self.lambda0 * vdop / self.c
+    def lambda_dop(self, vdop, d_lambda, **kwargs):
+        # print(f"Doppler shift is : {self.lambda0 * vdop / self.c * 1e10}")
+        return self.lambda0 * vdop / self.c / d_lambda
 
     def d_lambda(self, vmac, **kwargs):
         return self.lambda0 * vmac / self.c
@@ -241,4 +242,4 @@ class MEAtmosphere(nn.Module):
         Q = self.compute_Q(**state)
         U = self.compute_U(**state)
         V = self.compute_V(**state)
-        return I, Q, U, V
+        return I, Q, U, V, state
