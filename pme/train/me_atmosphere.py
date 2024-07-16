@@ -242,4 +242,4 @@ class MEAtmosphere(nn.Module):
         Q = self.compute_Q(**state)
         U = self.compute_U(**state)
         V = self.compute_V(**state)
-        return I, Q, U, V, state
+        return I, Q, U, V
