@@ -1,12 +1,16 @@
 import glob
 import itertools
 import os
+from datetime import datetime, timedelta
 from multiprocessing import Pool
 
 import numpy as np
 import torch
 import wandb
+from astropy import units as u
 from astropy.io import fits
+from astropy.io.fits import getheader
+from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import convolve2d
@@ -14,7 +18,6 @@ from sunpy.map import Map, all_coordinates_from_map
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
-from astropy import units as u
 
 class BatchDataset(Dataset):
 
@@ -43,77 +46,86 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
     return np_array
 
 
-class TestDataModule(LightningDataModule):
+class GenericDataModule(LightningDataModule):
 
-    def __init__(self, file, batch_size=4096, num_workers=None,
-                 noise=None, psf=None, slit=False, **kwargs):
+    def __init__(self, stokes_vector, mu, times, lambda_config,
+                 seconds_per_dt=3600, pixel_per_ds=1e-2,
+                 batch_size=4096, num_workers=None):
         super().__init__()
+
+        assert stokes_vector.shape[0] == len(times), \
+            f'Times need to match Stokes vector: {stokes_vector.shape[0]} != {len(times)}'
 
         # train parameters
         self.batch_size = batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
-        lambdaStart = 6300.793256 * u.AA
-        lambdaStep = 0.022 * u.AA
-        nLambda = 56
-        lambdaEnd = (lambdaStart + lambdaStep * (-1 + nLambda))
-        self.lambda_grid = np.linspace(-.5 * (lambdaEnd - lambdaStart), .5 * (lambdaEnd - lambdaStart), num=nLambda)
-        self.lambda_config = {'lambda0': 6301.5080 * u.AA, 'j_up': 2.0, 'j_low': 2.0, 'g_up': 1.5, 'g_low': 1.83,
+        #
+        times = np.array(times)
+        self.ref_time = np.min(times)
+        self.times = times
+        self.seconds_per_dt = seconds_per_dt
+        self.pixel_per_ds = pixel_per_ds
+
+        # lambda grid
+        lambda_start = lambda_config['start'] * u.AA
+        lambda_step = lambda_config['step'] * u.AA
+        lambda_end = (lambda_start + lambda_step * (lambda_config['n'] - 1))
+        # centered at lambda0
+        self.lambda_grid = np.linspace(-.5 * (lambda_end - lambda_start), .5 * (lambda_end - lambda_start),
+                                       num=lambda_config['n'])
+        self.lambda_config = {'lambda0': lambda_config['0'] * u.AA,
+                              'j_up': lambda_config['j_up'], 'j_low': lambda_config['j_low'],
+                              'g_up': lambda_config['g_up'], 'g_low': lambda_config['g_low'],
                               'lambda_grid': self.lambda_grid}
 
-        stokes_vector = load_test_stokes_profiles(file, psf_file=psf, noise=noise)
+        normalized_times = [(t - self.ref_time).total_seconds() / seconds_per_dt for t in times]
+        normalized_times = np.array(normalized_times, dtype=np.float32)
 
-        print(f"Loaded stokes vector {stokes_vector.shape}")
+        coordinates = np.stack(np.meshgrid(
+            normalized_times,
+            np.linspace(-stokes_vector.shape[1] / 2, stokes_vector.shape[1] / 2, stokes_vector.shape[1],
+                        dtype=np.float32),
+            np.linspace(-stokes_vector.shape[2] / 2, stokes_vector.shape[2] / 2, stokes_vector.shape[2],
+                        dtype=np.float32),
+            indexing='ij'), -1, dtype=np.float32)
 
-        print('LOADING STOKES VECTOR: ', stokes_vector.shape)
-        coordinates = np.stack(np.meshgrid(np.linspace(-1, 1, stokes_vector.shape[0], dtype=np.float32),
-                                           np.linspace(-1, 1, stokes_vector.shape[1], dtype=np.float32),
-                                           np.linspace(0, 1, stokes_vector.shape[2], dtype=np.float32),
-                                           indexing='ij'), -1)
+        coordinates[..., 1] /= self.pixel_per_ds  # x
+        coordinates[..., 2] /= self.pixel_per_ds  # y
 
         self.cube_shape = coordinates.shape[:3]
-        self.data_range = [[-1, 1], [-1, 1], [0, 1]]
+        self.data_range = [[coordinates[..., 0].min(), coordinates[..., 0].max()],
+                           [coordinates[..., 1].min(), coordinates[..., 1].max()],
+                           [coordinates[..., 2].min(), coordinates[..., 2].max()]]
 
         normalized_stokes_vector = np.copy(stokes_vector)
         normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
-
         self.value_range = np.stack([normalized_stokes_vector.min((0, 1, 2, -1)),
                                      normalized_stokes_vector.max((0, 1, 2, -1))], -1)
+        print('VALUE RANGE: ', self.value_range)
 
-        if slit:
-            time_spacing = slit
-            x_axis = stokes_vector.shape[0]
-            slit_width = x_axis // time_spacing
-
-            for t in range(0, stokes_vector.shape[2]):
-                i = int(t % time_spacing)
-                min_x = i * slit_width
-                max_x = (i + 1) * slit_width
-                stokes_vector[:min_x, :, t] = np.nan
-                stokes_vector[max_x:, :, t] = np.nan
-
-        ref_time = stokes_vector.shape[2] // 2
         # plot coordinates
+        ref_time = stokes_vector.shape[0] // 2
         fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
-        im = axs[0].imshow(coordinates[:, :, ref_time, 0].T, origin='lower')
+        im = axs[0].imshow(coordinates[ref_time, :, :, 0].T, origin='lower')
         fig.colorbar(im)
-        axs[0].set_title('x')
-        im = axs[1].imshow(coordinates[:, :, ref_time, 1].T, origin='lower')
+        axs[0].set_title('t')
+        im = axs[1].imshow(coordinates[ref_time, :, :, 1].T, origin='lower')
         fig.colorbar(im)
-        axs[1].set_title('y')
-        im = axs[2].imshow(coordinates[:, :, ref_time, 2].T, origin='lower')
+        axs[1].set_title('x')
+        im = axs[2].imshow(coordinates[ref_time, :, :, 2].T, origin='lower')
         fig.colorbar(im)
-        axs[2].set_title('t')
+        axs[2].set_title('y')
         fig.tight_layout()
         wandb.log({'Coordinates': fig})
         plt.close('all')
 
         # plot stokes vector
         stokes_min_max = np.abs(stokes_vector).max((0, 1, 2, -1))
-        for l in range(nLambda):
+        for l in range(0, stokes_vector.shape[-1], stokes_vector.shape[-1] // 10):
             fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
             for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                im = axs[i].imshow(stokes_vector[:, :, ref_time, i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
+                im = axs[i].imshow(stokes_vector[ref_time, :, :, i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
             fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
@@ -122,42 +134,49 @@ class TestDataModule(LightningDataModule):
             plt.close('all')
 
         # plot integrated stokes vector
-        integerated_stokes_vector = np.abs(stokes_vector).sum(-1)
+        integrated_stokes_vector = np.abs(stokes_vector).sum(-1)
         fig, ax = plt.subplots(1, 4, figsize=(16, 8), dpi=100)
         for i, label in enumerate(['I', 'Q', 'U', 'V']):
-            im = ax[i].imshow(integerated_stokes_vector[:, :, ref_time, i])
+            im = ax[i].imshow(integrated_stokes_vector[ref_time, :, :, i])
             ax[i].set_title(label)
             fig.colorbar(im, ax=ax[i])
         fig.tight_layout()
         wandb.log({'Integrated Stokes vector': fig})
         plt.close('all')
 
+        # prepare for data loader
         nan_mask = np.any(np.isnan(stokes_vector), (-2, -1))
         # flatten data
-        coords = coordinates[~nan_mask].astype(np.float32)
-        stokes_profile = stokes_vector[~nan_mask].astype(np.float32)
+        train_coords = coordinates[~nan_mask].astype(np.float32)
+        train_stokes = stokes_vector[~nan_mask].astype(np.float32)
+        train_mu = mu[~nan_mask].astype(np.float32)
 
-        coords = torch.tensor(coords, dtype=torch.float32)
-        stokes_profile = torch.tensor(stokes_profile, dtype=torch.float32)
+        train_coords = torch.tensor(train_coords, dtype=torch.float32)
+        train_stokes = torch.tensor(train_stokes, dtype=torch.float32)
+        train_mu = torch.tensor(train_mu, dtype=torch.float32)
 
-        valid_coords = coordinates[:, :, ref_time:ref_time + 1]
-        valid_stokes_profile = stokes_vector[:, :, ref_time:ref_time + 1]
+        valid_coords = coordinates[ref_time:ref_time + 1]
+        valid_stokes = stokes_vector[ref_time:ref_time + 1]
+        valid_mu = mu[ref_time:ref_time + 1]
 
         valid_coords = torch.tensor(valid_coords, dtype=torch.float32).reshape(-1, 3)
-        valid_stokes_profile = torch.tensor(valid_stokes_profile, dtype=torch.float32).reshape(-1, 4, nLambda)
+        valid_stokes = torch.tensor(valid_stokes, dtype=torch.float32).reshape(-1, 4, valid_stokes.shape[-1])
+        valid_mu = torch.tensor(valid_mu, dtype=torch.float32).reshape(-1, 1)
 
-        self.valid_dataset = BatchDataset(valid_coords, valid_stokes_profile, batch_size=batch_size)
+        self.valid_dataset = BatchDataset(valid_coords, valid_mu, valid_stokes, batch_size=batch_size)
 
-        self.coords = coords
-        self.stokes_profile = stokes_profile
+        self.coords = train_coords
+        self.stokes_profile = train_stokes
+        self.mu = train_mu
 
     def train_dataloader(self):
         # shuffle data
         r = np.random.permutation(self.coords.shape[0])
         coords = self.coords[r]
         stokes_profile = self.stokes_profile[r]
+        mu = self.mu[r]
 
-        train_dataset = BatchDataset(coords, stokes_profile, batch_size=self.batch_size)
+        train_dataset = BatchDataset(coords, mu, stokes_profile, batch_size=self.batch_size)
 
         data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
                                  sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
@@ -169,15 +188,58 @@ class TestDataModule(LightningDataModule):
         return data_loader
 
 
+class TestDataModule(GenericDataModule):
+
+    def __init__(self, files, psf=None, noise=None, **kwargs):
+        lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': 56,
+                         'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
+        files = [files] if not isinstance(files, list) else files
+        files = [sorted(glob.glob(f)) for f in files]  # load wildcards
+        files = [f for fl in files for f in fl]  # flatten list
+
+        stokes_vector = []
+        for f in files:
+            stokes_vector.append(load_test_stokes_profiles(f, psf_file=psf, noise=noise))
+
+        stokes_vector = np.stack(stokes_vector, 0)
+
+        ref_time = datetime(2024, 1, 1)
+        times = [ref_time + timedelta(minutes=12 * i) for i in range(stokes_vector.shape[0])]
+
+        mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
+
+        super().__init__(stokes_vector, mu, times, lambda_config)
+
+
+class HinodeDataModule(GenericDataModule):
+
+    def __init__(self, files, lambda_config=None, **kwargs):
+        files = [files] if not isinstance(files, list) else files
+        files = [sorted(glob.glob(f)) for f in files]  # load wildcards
+
+        stokes_vector = [np.stack([fits.getdata(f) for f in file_list], 1) for file_list in files]
+
+        stokes_vector = np.stack(stokes_vector, 0, dtype=np.float32)
+        stokes_vector = np.moveaxis(stokes_vector, [1, 2, 3], [3, 1, 2])
+
+        times = [parse(getheader(f[0])['DATE_OBS']) for f in files]
+
+        n_lambda = stokes_vector.shape[-1]
+
+        if lambda_config is None:
+            # lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': 56,
+            #                  'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
+            lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': n_lambda,
+                             'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
+
+
+        mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
+
+        super().__init__(stokes_vector, mu, times, lambda_config)
+
+
 def load_test_stokes_profiles(file, psf_file=None, noise=None):
-    stokes_vector = np.load(file)['stokes_profiles']  # (4, 100, 400, 400, 50)
-    # reshape to (400, 400, 100, 4, 50)
-    stokes_vector = np.moveaxis(stokes_vector, [0, 1, 2, 3, 4], [3, 2, 0, 1, 4])
-
-    # add noise
-    if noise is not None:
-        stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
-
+    stokes_vector = np.load(file)['stokes_profiles']  # (400, 400, 50, 4)
     # convolve with psf
     if psf_file is not None:
         if psf_file.endswith('.npy'):
@@ -197,7 +259,13 @@ def load_test_stokes_profiles(file, psf_file=None, noise=None):
             convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
                                                        total=flat_stokes_vector.shape[0])], -1)
         stokes_vector = convolved_maps.reshape(stokes_vector.shape)
+
+    # add noise
+    if noise is not None:
+        stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
+
     return stokes_vector
+
 
 class SHARPDataModule(LightningDataModule):
 
@@ -247,13 +315,13 @@ class SHARPDataModule(LightningDataModule):
         fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
         im = axs[0].imshow(coordinates[:, :, ref_time, 0].T, origin='lower')
         fig.colorbar(im)
-        axs[0].set_title('x')
+        axs[0].set_title('t')
         im = axs[1].imshow(coordinates[:, :, ref_time, 1].T, origin='lower')
         fig.colorbar(im)
-        axs[1].set_title('y')
+        axs[1].set_title('x')
         im = axs[2].imshow(coordinates[:, :, ref_time, 2].T, origin='lower')
         fig.colorbar(im)
-        axs[2].set_title('t')
+        axs[2].set_title('y')
         fig.tight_layout()
         wandb.log({'Coordinates': fig})
         plt.close('all')

@@ -11,4 +11,4 @@ module load cuda/11.7.1
 conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
-python3 -i -m pme.data.create_test_set
+python3 -i -m pme.data.test_set --base_path "/glade/work/rjarolim/data/pinnme/test_set_400"

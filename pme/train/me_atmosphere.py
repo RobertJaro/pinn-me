@@ -11,9 +11,7 @@ from astropy import constants as const
 from astropy import units as u
 from torch import nn
 
-import matplotlib.pyplot as pl
-
-from pme.train.atomic_functions import compute_zeeman_strength
+from pme.train.atomic_functions import load_zeeman_lookup, get_zeeman_lookup_id
 from pme.train.profile_functions import Voigt, FaradayVoigt
 
 
@@ -34,10 +32,9 @@ class MEAtmosphere(nn.Module):
         self.register_buffer('g_low', torch.tensor(g_low, dtype=torch.float32))
 
         lambda_grid = torch.tensor(lambda_grid.to_value(u.m), dtype=torch.float32)
-        lambda_grid = lambda_grid[None, None, :]
         self.lambda_grid = nn.Parameter(lambda_grid, requires_grad=False)
 
-        zeeman_strength_lookup = self.load_zeeman_lookup()
+        zeeman_strength_lookup = load_zeeman_lookup(j_up, j_low)
         zeeman_strength_lookup = {k: nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
                                   for k, v in zeeman_strength_lookup.items()}
         self.zeeman_strength_lookup = nn.ParameterDict(zeeman_strength_lookup)
@@ -58,17 +55,16 @@ class MEAtmosphere(nn.Module):
 
         for iUp in range(0, nUp):
             MUp = self.j_up - iUp
-            
+
             iLow = 1
             MLow = MUp - 2 + iLow
 
             if torch.abs(MLow) <= torch.abs(self.j_low):
-
                 strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
                 splitting = self.g_up * MUp - self.g_low * MLow
 
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_b += strength * self.voigt(nu - mu, sigma, gamma) 
+                phi_b += strength * self.voigt(nu - mu, sigma, gamma)
                 psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma)
 
             iLow = 2
@@ -85,58 +81,18 @@ class MEAtmosphere(nn.Module):
             iLow = 3
             MLow = MUp - 2 + iLow
             if torch.abs(MLow) <= torch.abs(self.j_low):
-
                 strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
                 splitting = self.g_up * MUp - self.g_low * MLow
 
-
                 mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_r += strength * self.voigt(nu - mu, sigma, gamma) 
+                phi_r += strength * self.voigt(nu - mu, sigma, gamma)
                 psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma)
         return {'phi_b': phi_b, 'psi_b': psi_b, 'phi_p': phi_p, 'psi_p': psi_p, 'phi_r': phi_r, 'psi_r': psi_r}
 
     def zeeman_strength(self, j_up, j_low, MUp, MLow):
         # avoid recomputing the same strength
-        z_id = self.get_zeeman_lookup_id(j_up, j_low, MUp, MLow)
+        z_id = get_zeeman_lookup_id(j_up, j_low, MUp, MLow)
         return self.zeeman_strength_lookup[z_id]
-
-    def get_zeeman_lookup_id(self, j_up, j_low, MUp, MLow):
-        return f'{j_up}_{j_low}_{MUp}_{MLow}'.replace('.', '_')
-
-    def load_zeeman_lookup(self):
-        lookup = {}
-        assert (2 * self.j_up + 1) % 1 == 0, 'nUp must be integer'
-        nUp = int(2 * self.j_up + 1)
-        for iUp in range(0, nUp):
-            MUp = self.j_up - iUp
-
-            iLow = 1
-            MLow = MUp - 2 + iLow
-
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-
-                z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
-                strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-
-                lookup[z_id] = strength
-
-            iLow = 2
-            MLow = MUp - 2 + iLow
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-                z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
-                strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-
-                lookup[z_id] = strength
-
-            iLow = 3
-            MLow = MUp - 2 + iLow
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-                z_id = self.get_zeeman_lookup_id(self.j_up, self.j_low, MUp, MLow)
-                strength = compute_zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                lookup[z_id] = strength
-            print("lookup table")
-            print(lookup)
-        return lookup
 
     # Defining the propagation matrix elements from L^2 book
     def eta_I(self, phi_p, phi_r, phi_b, theta, kl, **kwargs):
@@ -162,7 +118,7 @@ class MEAtmosphere(nn.Module):
         return rho_Q
 
     def rho_U(self, psi_p, psi_r, psi_b, theta, chi, kl, **kwargs):
-        rho_U =  ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
+        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
 
         return rho_U
 
@@ -190,8 +146,8 @@ class MEAtmosphere(nn.Module):
 
     def compute_U(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
         U = -1 * mu * b1 / delta * ((1 + eta_I) ** 2 * eta_U
-                                 + (1 + eta_I) * (eta_Q * rho_V - eta_V * rho_Q)
-                                 + rho_U * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
+                                    + (1 + eta_I) * (eta_Q * rho_V - eta_V * rho_Q)
+                                    + rho_U * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
         return U
 
     def compute_V(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
@@ -204,7 +160,6 @@ class MEAtmosphere(nn.Module):
         return dlambda_B / d_lambda
 
     def lambda_dop(self, vdop, d_lambda, **kwargs):
-        # print(f"Doppler shift is : {self.lambda0 * vdop / self.c * 1e10}")
         return self.lambda0 * vdop / self.c / d_lambda
 
     def d_lambda(self, vmac, **kwargs):
