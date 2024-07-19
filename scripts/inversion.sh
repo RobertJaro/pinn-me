@@ -11,5 +11,5 @@ module load cuda/11.7.1
 conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
-#python3 -i -m pme.inversion --config config/test_set.yaml
+#python3 -i -m pme.inversion --config config/psf_noise_0.yaml
 python3 -i -m pme.inversion --config config/hinode.yaml

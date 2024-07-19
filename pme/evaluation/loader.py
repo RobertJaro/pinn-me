@@ -53,7 +53,9 @@ class PINNMEOutput:
         b = parameters['b_field']
         theta = parameters['theta']
         chi = parameters['chi']
-        b, theta, chi = to_spherical(to_cartesian(b, theta, chi))
+        b_xyz = to_cartesian(b, theta, chi)
+        parameters['b_xyz'] = b_xyz
+        b, theta, chi = to_spherical(b_xyz)
         parameters['b_field'] = b
         parameters['theta'] = theta
         parameters['chi'] = chi

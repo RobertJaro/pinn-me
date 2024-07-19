@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/test_set/test_v02"
+base_path: "/glade/work/rjarolim/pinn_me/test_set/test_v05"
 data:
   type: "test"
   files: "/glade/work/rjarolim/data/pinnme/test_set_400/profile_000.npz"
@@ -17,5 +17,5 @@ model:
 #    type: load
 #    file: "/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits"
 training:
-  epochs: 1000
+  epochs: 100
   check_val_every_n_epoch: 5

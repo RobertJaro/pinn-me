@@ -156,7 +156,7 @@ class MEAtmosphere(nn.Module):
         return V
 
     def nu_m(self, b_field, d_lambda, **kwargs):
-        dlambda_B = 1e-13 * 4.6686e10 * (self.lambda0 ** 2) * b_field
+        dlambda_B = 4.6686e-3 * (self.lambda0 ** 2) * b_field
         return dlambda_B / d_lambda
 
     def lambda_dop(self, vdop, d_lambda, **kwargs):

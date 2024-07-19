@@ -7,6 +7,7 @@ import matplotlib.pyplot as pl
 import numpy as np
 import torch
 from astropy import units as u
+from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from pme.train.me_atmosphere import MEAtmosphere
@@ -19,23 +20,37 @@ def plot_stokes(profile, save_path):
     Input:
         -- atmos, ndarray [4, num_Intensity]
     """
+    profile = np.abs(profile)
+
     fig, axs = pl.subplots(1, 4, figsize=(16, 4))
 
     ax = axs[0]
-    ax.imshow(profile[..., 0, :].sum(axis=-1))
+    im = ax.imshow(profile[..., 0, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("I")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    pl.colorbar(im, cax=cax)
 
     ax = axs[1]
-    ax.imshow(profile[..., 1, :].sum(axis=-1))
+    im = ax.imshow(profile[..., 1, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("Q")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    pl.colorbar(im, cax=cax)
 
     ax = axs[2]
-    ax.imshow(profile[..., 2, :].sum(axis=-1))
+    im = ax.imshow(profile[..., 2, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("U")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    pl.colorbar(im, cax=cax)
 
     ax = axs[3]
-    ax.imshow(profile[..., 3, :].sum(axis=-1))
+    im = ax.imshow(profile[..., 3, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("V")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    pl.colorbar(im, cax=cax)
 
     pl.tight_layout()
     pl.savefig(save_path, dpi=150)
@@ -53,70 +68,70 @@ def plot_parameters(parameters, save_path):
     fig, axs = pl.subplots(2, 5, figsize=(16, 4))
 
     ax = axs[0, 0]
-    im = ax.imshow(parameters['b_field'], cmap='RdBu_r')
+    im = ax.imshow(parameters['b_field'].T, cmap='jet', vmin=0)
     ax.set_title("B")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[0, 1]
-    im = ax.imshow(parameters['theta'], cmap='RdBu_r')
+    im = ax.imshow(parameters['theta'].T, cmap='RdBu_r')
     ax.set_title("Theta")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[0, 2]
-    im = ax.imshow(parameters['chi'], cmap='twilight')
+    im = ax.imshow(parameters['chi'].T, cmap='twilight')
     ax.set_title("Chi")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[0, 3]
-    im = ax.imshow(parameters['b0'])
+    im = ax.imshow(parameters['b0'].T)
     ax.set_title("B0")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[0, 4]
-    im = ax.imshow(parameters['b1'])
+    im = ax.imshow(parameters['b1'].T)
     ax.set_title("B1")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[1, 0]
-    im = ax.imshow(parameters['vmac'])
+    im = ax.imshow(parameters['vmac'].T)
     ax.set_title("Vmac")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[1, 1]
-    im = ax.imshow(parameters['damping'])
+    im = ax.imshow(parameters['damping'].T)
     ax.set_title("Damping")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[1, 2]
-    im = ax.imshow(parameters['mu'])
+    im = ax.imshow(parameters['mu'].T)
     ax.set_title("Mu")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[1, 3]
-    im = ax.imshow(parameters['vdop'])
+    im = ax.imshow(parameters['vdop'].T)
     ax.set_title("Vdop")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     pl.colorbar(im, cax=cax)
 
     ax = axs[1, 4]
-    im = ax.imshow(parameters['kl'])
+    im = ax.imshow(parameters['kl'].T)
     ax.set_title("Kl")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -147,17 +162,15 @@ class TestSetGenerator():
                  j_up=1.0, j_low=0.0, g_up=2.49, g_low=0,
                  lambda_start=6301.989128432432 * u.AA, lambda_step=0.021743135134784097 * u.AA, n_lambda=56,
                  nx=400, ny=400,
-                 b_field_0=1000.0, vmac=2.0 * 1e3, damping=0.2, b0=0.8, b1=0.2, mu=1.0, vdop=2.0 * 1e3, kl=1.0):
+                 b_field_0=2000.0, vmac=2.0 * 1e3, damping=0.2, b0=0.8, b1=0.2, mu=1.0, vdop=2.0 * 1e3, kl=25.0):
         self.lambda0 = lambda0
         self.jUp = j_up
         self.jLow = j_low
         self.gUp = g_up
         self.gLow = g_low
 
-        lambda_end = (lambda_start + lambda_step * (-1 + n_lambda))
-        self.lambda_grid = np.linspace(-.5 * (lambda_end - lambda_start),
-                                       .5 * (lambda_end - lambda_start),
-                                       num=n_lambda)
+        lambda_range = (n_lambda - 1) * lambda_step
+        self.lambda_grid = np.linspace(-0.5 * lambda_range, 0.5 * lambda_range, n_lambda)
 
         # Inputs for the inversion
         self.b_field_0 = b_field_0

@@ -28,8 +28,8 @@ class PeriodicBoundary(nn.Module):
         super().__init__()
 
     def forward(self, coord):
-        scaled_x = coord[..., 0:1] * torch.pi # - pi to pi
-        scaled_y = coord[..., 1:2] * torch.pi # - pi to pi
+        scaled_x = coord[..., 0:1] * torch.pi  # - pi to pi
+        scaled_y = coord[..., 1:2] * torch.pi  # - pi to pi
         encoded_coord = torch.cat([
             torch.sin(scaled_x), torch.cos(scaled_x),
             torch.sin(scaled_y), torch.cos(scaled_y),
@@ -41,18 +41,21 @@ class MEModel(nn.Module):
 
     def __init__(self, in_coords, dim, encoding='positional', num_layers=8):
         super().__init__()
-
         # encoding layer
         if encoding == "periodic":
             posenc = PeriodicBoundary()
             d_in = nn.Linear(in_coords + 2, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "positional":
-            posenc = PositionalEncoding(n_freqs=20, d_input=in_coords)
+            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "learned_positional":
-            posenc = LearnedPositionalEncoding(num_freqs=20, in_features=in_coords)
+            posenc = LearnedPositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "gaussian_positional":
+            posenc = GaussianPositionalEncoding(num_freqs=20, d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "linear":
@@ -82,6 +85,83 @@ class MEModel(nn.Module):
         params = self.d_out(x)
         #
         b_field = params[..., 0:1] * 1000
+        theta = params[..., 1:2]# * torch.pi
+        chi = params[..., 2:3]# * torch.pi
+        vmac = torch.sigmoid(params[..., 3:4]) * 20e3
+        damping = torch.sigmoid(params[..., 4:5]) * 1
+        b0 = torch.sigmoid(params[..., 5:6])
+        b1 = torch.sigmoid(params[..., 6:7])
+        vdop = params[..., 7:8] * 1e4
+        kl = torch.sigmoid(params[..., 8:9]) * 100
+        #
+        output = {
+            "b_field": b_field,
+            "theta": theta,
+            "chi": chi,
+            "vmac": vmac,
+            "damping": damping,
+            "b0": b0,
+            "b1": b1,
+            "vdop": vdop,
+            "kl": kl,
+        }
+
+        return output
+
+
+class ParameterModel(nn.Module):
+
+    def __init__(self, in_coords, dim, num_layers=8, encoding='positional'):
+        super().__init__()
+        # encoding layer
+        if encoding == "periodic":
+            posenc = PeriodicBoundary()
+            d_in = nn.Linear(in_coords + 2, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "positional":
+            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "learned_positional":
+            posenc = LearnedPositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "gaussian_positional":
+            posenc = GaussianPositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "linear":
+            self.d_in = nn.Linear(in_coords, dim)
+        else:
+            raise ValueError(f"Unknown encoding: {encoding}")
+
+        # hidden layers
+        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
+        self.linear_layers = nn.ModuleList(lin)
+        # output layer
+        self.d_out = nn.Linear(dim, 1)
+        # activation functions
+        self.in_activation = Swish()
+        self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+
+    def forward(self, x):
+        x = self.in_activation(self.d_in(x))
+        for l, a in zip(self.linear_layers, self.activations):
+            x = a(l(x))
+        return self.d_out(x)
+
+
+class ParametersModel(nn.Module):
+
+    def __init__(self, in_coords, dim, encoding='positional', num_layers=8):
+        super().__init__()
+        parameter_models = [ParameterModel(in_coords, dim, encoding=encoding, num_layers=num_layers) for _ in range(9)]
+        self.parameter_models = nn.ModuleList(parameter_models)
+
+    def forward(self, x):
+        params = torch.cat([m(x) for m in self.parameter_models], -1)
+        #
+        b_field = params[..., 0:1] * 1e3
         theta = params[..., 1:2] * torch.pi
         chi = params[..., 2:3] * torch.pi
         vmac = torch.sigmoid(params[..., 3:4]) * 20e3
@@ -109,11 +189,11 @@ class MEModel(nn.Module):
 # revert this
 class LearnedPositionalEncoding(nn.Module):
 
-    def __init__(self, num_freqs, in_features):
+    def __init__(self, num_freqs, d_input):
         super().__init__()
-        frequencies = torch.randn(num_freqs, in_features)
+        frequencies = torch.randn(num_freqs, d_input)
         self.frequencies = nn.Parameter(frequencies[None], requires_grad=True)
-        self.d_output = in_features * (num_freqs * 2 + 1)
+        self.d_output = d_input * (num_freqs * 2 + 1)
 
     def forward(self, x):
         encoded = x[:, None, :] * torch.pi * 2 ** self.frequencies
@@ -122,25 +202,39 @@ class LearnedPositionalEncoding(nn.Module):
         return encoded
 
 
+class GaussianPositionalEncoding(nn.Module):
+
+    def __init__(self, num_freqs, d_input):
+        super().__init__()
+        frequencies = torch.randn(num_freqs, d_input)
+        self.frequencies = nn.Parameter(frequencies[None], requires_grad=False)
+        self.d_output = d_input * (num_freqs * 2 + 1)
+
+    def forward(self, x):
+        encoded = x[:, None, :] * self.frequencies
+        encoded = encoded.reshape(x.shape[0], -1)
+        encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
+        return encoded
+
 
 class PositionalEncoding(nn.Module):
     r"""
     Sine-cosine positional encoder for input points.
     """
 
-    def __init__(self, d_input: int, n_freqs: int, scale_factor: float = 2., log_space: bool = True):
+    def __init__(self, d_input: int, num_freqs: int, scale_factor: float = 2., log_space: bool = True):
         """
 
         Parameters
         ----------
         d_input: number of input dimensions
-        n_freqs: number of frequencies used for encoding
+        num_freqs: number of frequencies used for encoding
         scale_factor: factor to adjust box size limit of 2pi (default 2; 4pi)
         log_space: use frequencies in powers of 2
         """
         super().__init__()
         self.d_input = d_input
-        self.n_freqs = n_freqs
+        self.n_freqs = num_freqs
         self.log_space = log_space
         self.d_output = d_input * (1 + 2 * self.n_freqs)
 
@@ -180,13 +274,9 @@ class NormalizationModule(nn.Module):
     def __init__(self, value_range):
         super().__init__()
         self.register_buffer("value_range", torch.tensor(value_range, dtype=torch.float32)[None, :, None, :])
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
 
     def forward(self, stokes):
-        I = stokes[..., 0:1, :]
-        normalized_QUV = stokes[..., 1:, :] / (I + 1e-8)
-        stokes = torch.cat([I, normalized_QUV], dim=-2)
-
-        stokes = (stokes - self.value_range[..., 0]) / (self.value_range[..., 1] - self.value_range[..., 0])
-        stokes = torch.asinh(stokes * 1e1) / self.stretch
+        stokes = stokes / self.value_range[..., 1] # normalize by max value (I = [0, 1]; QUV = [-1, 1])
+        stokes = torch.asinh(stokes * 1e2) / self.stretch
         return stokes

@@ -49,15 +49,15 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
 class GenericDataModule(LightningDataModule):
 
     def __init__(self, stokes_vector, mu, times, lambda_config,
-                 seconds_per_dt=3600, pixel_per_ds=1e-2,
+                 seconds_per_dt=3600, pixel_per_ds=1e2,
                  batch_size=4096, num_workers=None):
         super().__init__()
-
         assert stokes_vector.shape[0] == len(times), \
             f'Times need to match Stokes vector: {stokes_vector.shape[0]} != {len(times)}'
 
         # train parameters
-        self.batch_size = batch_size
+        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        self.batch_size = batch_size * n_gpus
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
         #
@@ -67,14 +67,9 @@ class GenericDataModule(LightningDataModule):
         self.seconds_per_dt = seconds_per_dt
         self.pixel_per_ds = pixel_per_ds
 
-        # lambda grid
-        lambda_start = lambda_config['start'] * u.AA
-        lambda_step = lambda_config['step'] * u.AA
-        lambda_end = (lambda_start + lambda_step * (lambda_config['n'] - 1))
         # centered at lambda0
-        self.lambda_grid = np.linspace(-.5 * (lambda_end - lambda_start), .5 * (lambda_end - lambda_start),
-                                       num=lambda_config['n'])
-        self.lambda_config = {'lambda0': lambda_config['0'] * u.AA,
+        self.lambda_grid = lambda_config['lambda_grid']
+        self.lambda_config = {'lambda0': lambda_config['0'],
                               'j_up': lambda_config['j_up'], 'j_low': lambda_config['j_low'],
                               'g_up': lambda_config['g_up'], 'g_low': lambda_config['g_low'],
                               'lambda_grid': self.lambda_grid}
@@ -98,11 +93,9 @@ class GenericDataModule(LightningDataModule):
                            [coordinates[..., 1].min(), coordinates[..., 1].max()],
                            [coordinates[..., 2].min(), coordinates[..., 2].max()]]
 
-        normalized_stokes_vector = np.copy(stokes_vector)
-        normalized_stokes_vector[:, :, :, 1:] /= normalized_stokes_vector[:, :, :, 0:1]
-        self.value_range = np.stack([normalized_stokes_vector.min((0, 1, 2, -1)),
-                                     normalized_stokes_vector.max((0, 1, 2, -1))], -1)
-        print('VALUE RANGE: ', self.value_range)
+        self.value_range = np.stack([stokes_vector.min((0, 1, 2, -1)),
+                                        stokes_vector.max((0, 1, 2, -1))], -1)
+        print('VALUE RANGE', self.value_range)
 
         # plot coordinates
         ref_time = stokes_vector.shape[0] // 2
@@ -125,7 +118,8 @@ class GenericDataModule(LightningDataModule):
         for l in range(0, stokes_vector.shape[-1], stokes_vector.shape[-1] // 10):
             fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
             for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                im = axs[i].imshow(stokes_vector[ref_time, :, :, i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
+                im = axs[i].imshow(stokes_vector[ref_time, :, :, i, l].T, vmin=-stokes_min_max[i],
+                                   vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
             fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
@@ -137,7 +131,7 @@ class GenericDataModule(LightningDataModule):
         integrated_stokes_vector = np.abs(stokes_vector).sum(-1)
         fig, ax = plt.subplots(1, 4, figsize=(16, 8), dpi=100)
         for i, label in enumerate(['I', 'Q', 'U', 'V']):
-            im = ax[i].imshow(integrated_stokes_vector[ref_time, :, :, i])
+            im = ax[i].imshow(integrated_stokes_vector[ref_time, :, :, i].T)
             ax[i].set_title(label)
             fig.colorbar(im, ax=ax[i])
         fig.tight_layout()
@@ -191,7 +185,15 @@ class GenericDataModule(LightningDataModule):
 class TestDataModule(GenericDataModule):
 
     def __init__(self, files, psf=None, noise=None, **kwargs):
-        lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': 56,
+        lambda_center = 6302.4931
+        lambda_step = 0.021743135134784097
+        n_lambda = 56
+
+        # lambda_grid = np.array([lambda_start + i * lambda_step for i in range(n_lambda)])
+        lambda_range = (n_lambda - 1) * lambda_step
+        lambda_grid = np.linspace(-0.5 * lambda_range, 0.5 * lambda_range, n_lambda)
+
+        lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_grid * u.AA,
                          'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
         files = [files] if not isinstance(files, list) else files
         files = [sorted(glob.glob(f)) for f in files]  # load wildcards
@@ -208,7 +210,7 @@ class TestDataModule(GenericDataModule):
 
         mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
 
-        super().__init__(stokes_vector, mu, times, lambda_config)
+        super().__init__(stokes_vector, mu, times, lambda_config, **kwargs)
 
 
 class HinodeDataModule(GenericDataModule):
@@ -217,25 +219,39 @@ class HinodeDataModule(GenericDataModule):
         files = [files] if not isinstance(files, list) else files
         files = [sorted(glob.glob(f)) for f in files]  # load wildcards
 
-        stokes_vector = [np.stack([fits.getdata(f) for f in file_list], 1) for file_list in files]
+        stokes_vector = [np.stack([fits.getdata(f) for f in file_list], 0) for file_list in files]
 
         stokes_vector = np.stack(stokes_vector, 0, dtype=np.float32)
-        stokes_vector = np.moveaxis(stokes_vector, [1, 2, 3], [3, 1, 2])
+
+        stokes_vector = np.moveaxis(stokes_vector, [1, 2, 3], [1, 3, 2])
 
         times = [parse(getheader(f[0])['DATE_OBS']) for f in files]
 
-        n_lambda = stokes_vector.shape[-1]
-
         if lambda_config is None:
-            # lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': 56,
-            #                  'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
-            lambda_config = {'0': 6302.4931, 'start': 6301.989128432432, 'step': 0.021743135134784097, 'n': n_lambda,
-                             'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
+            header = getheader(files[0][0])
+            lambda_step = -header["CDELT1"]
+            lambda_center = header["CRVAL1"]
+            pixel_center = header["CRPIX1"]
+            offset = 6302.4931 - lambda_center
+            n_lambda = stokes_vector.shape[-1]
 
+            pixel_range = np.arange(n_lambda)
+            pixel_range = pixel_range - pixel_center
+            lambda_range = pixel_range * lambda_step
+            lambda_grid = lambda_range - offset
+
+            stokes_vector = stokes_vector[..., -56:]
+            lambda_grid = lambda_grid[-56:]
+
+            max_I = stokes_vector[..., 0, :].max()
+            stokes_vector /= max_I * 1.1
+
+            lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_grid * u.AA,
+                             'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
 
         mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
 
-        super().__init__(stokes_vector, mu, times, lambda_config)
+        super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
 
 
 def load_test_stokes_profiles(file, psf_file=None, noise=None):

@@ -9,32 +9,32 @@ from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
-from pme.model import MEModel, NormalizationModule
+from pme.evaluation.loader import to_spherical, to_cartesian
+from pme.model import MEModel, NormalizationModule, ParametersModel
 from pme.train.me_atmosphere import MEAtmosphere
 
 
 class MEModule(LightningModule):
 
     def __init__(self, cube_shape, lambda_config, value_range, pixel_per_ds, psf_config={'type': None},
-                 dim=256, lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5}, lambda_stokes=[0.1, 1, 1, 1],
-                 encoding="positional", plot_profiles=False, **kwargs):
+                 dim=256, lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5}, lambda_stokes=[1, 1, 1, 1],
+                 encoding="positional", **kwargs):
         super().__init__()
-
-        self.plot_profiles = plot_profiles
 
         self.cube_shape = cube_shape
 
         # init model
         self.parameter_model = MEModel(3, dim, encoding=encoding)
 
-        if psf_config['type'] is None:
+        psf_type = psf_config.pop('type')
+        if psf_type is None:
             self.psf = NoPSF()
-        elif psf_config['type'] == 'load':
-            self.psf = LoadPSF(psf_config['file'])
-        elif psf_config['type'] == 'learn':
-            self.psf = PSF(*psf_config['shape'])
+        elif psf_type == 'load':
+            self.psf = LoadPSF(**psf_config)
+        elif psf_type == 'learn':
+            self.psf = PSF(**psf_config)
         else:
-            raise ValueError(f"Invalid PSF type: {psf_config['type']}")
+            raise ValueError(f"Invalid PSF type: {psf_type}")
 
         # initialize PSF coordinates
         psf_shape = self.psf.psf_shape
@@ -83,6 +83,9 @@ class MEModule(LightningModule):
         coords_shape = coords.shape
         output = self.parameter_model(coords.reshape(-1, 3))
 
+        # expand mu for PSF (TODO adapt mu for PSF sampling)
+        mu = mu[:, None, None, :].repeat(1, *self.coords_psf.shape[1:3], 1).reshape(-1, 1)
+
         I, Q, U, V = self.forward_model(**output, mu=mu)
         I = I.reshape(*coords_shape[:-1], -1)
         Q = Q.reshape(*coords_shape[:-1], -1)
@@ -129,7 +132,6 @@ class MEModule(LightningModule):
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
-    @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
         coords, mu, stokes_true = batch
 
@@ -137,6 +139,9 @@ class MEModule(LightningModule):
 
         coords_shape = coords.shape
         output = self.parameter_model(coords.reshape(-1, 3))
+
+        # expand mu for PSF (TODO adapt mu for PSF sampling)
+        mu = mu[:, None, None, :].repeat(1, *self.coords_psf.shape[1:3], 1).reshape(-1, 1)
 
         I, Q, U, V = self.forward_model(**output, mu=mu)
 
@@ -175,26 +180,73 @@ class MEModule(LightningModule):
         self.log("valid", {"diff": outputs['diff'].mean(),
                            'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff})
 
-        parameters = self.plot_parameters(outputs)
+        parameters = {}
+        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl']:
+            field = outputs[k].reshape(*self.cube_shape[1:3]).cpu().numpy()
+            parameters[k] = field
+
         self.plot_parameter_overview(parameters)
+        self.plot_B_cartesian(parameters)
 
         stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.cube_shape[1:3], 4, -1)
         stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.cube_shape[1:3], 4, -1)
 
+        self.plot_stokes(stokes_pred, stokes_true)
+
+        self.plot_profile(stokes_pred, stokes_true)
+
+        # plot PSF
+        if not isinstance(self.psf, NoPSF):
+            self.plot_psf()
+
+    def plot_profile(self, stokes_pred, stokes_true):
+        y_range = stokes_true.shape[0]
+        x_range = stokes_true.shape[1]
+        pos = np.stack(np.meshgrid(np.linspace(x_range * 0.1, x_range * 0.9, 3, dtype=int),
+                                   np.linspace(y_range * 0.1, y_range * 0.9, 3, dtype=int)), -1)
+        pos = pos.reshape(-1, 2)
+        for x, y in pos:
+            fig, axs = plt.subplots(4, 1, figsize=(8, 8))
+            for i, label in enumerate(['I', 'Q', 'U', 'V']):
+                axs[i].plot(stokes_true[y, x, i], label=f'true - {label}')
+                axs[i].plot(stokes_pred[y, x, i], label=f'pred - {label}')
+                if i == 0:
+                    continue
+                # v_min_max = np.abs(stokes_true[20, 20, i]).max()
+                # v_min_max = max(1e-4, v_min_max)
+                # axs[i].set_ylim([-v_min_max, v_min_max])
+
+            [ax.legend(loc='upper right') for ax in axs]
+            # log figure
+            fig.tight_layout()
+            wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
+            plt.close('all')
+
+    def plot_psf(self):
+        psf = self.psf()
+        psf = psf.detach().cpu().numpy()
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        im = ax.imshow(psf.T, vmin=0)
+        fig.colorbar(im)
+        fig.tight_layout()
+        wandb.log({"PSF": fig})
+        plt.close('all')
+
+    def plot_stokes(self, stokes_pred, stokes_true):
         # plot comparison of integrated stokes vectors
         integerated_stokes_true = np.abs(stokes_true).sum(-1)
         integerated_stokes_pred = np.abs(stokes_pred).sum(-1)
         fig, ax = plt.subplots(2, 4, figsize=(16, 8), dpi=100)
-        for i, label in enumerate(['I', 'Q/I', 'U/I', 'V/I']):
+        for i, label in enumerate(['I', 'Q', 'U', 'V']):
             v_min = integerated_stokes_true[:, :, i].min()
             v_max = integerated_stokes_true[:, :, i].max()
             norm = ImageNormalize(vmin=v_min, vmax=v_max)
-            im = ax[0, i].imshow(integerated_stokes_true[:, :, i], norm=norm)
+            im = ax[0, i].imshow(integerated_stokes_true[:, :, i].T, norm=norm)
             ax[0, i].set_title(f"true - {label}")
             divider = make_axes_locatable(ax[0, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
             fig.colorbar(im, cax=cax)
-            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i], norm=norm)
+            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i].T, norm=norm)
             ax[1, i].set_title(f"pred - {label}")
             divider = make_axes_locatable(ax[1, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -203,115 +255,54 @@ class MEModule(LightningModule):
         wandb.log({"Integrated Stokes vector - Comparison": fig})
         plt.close('all')
 
-        if self.plot_profiles:
-            y_range = stokes_true.shape[0]
-            x_range = stokes_true.shape[1]
-            pos = np.stack(np.meshgrid(np.linspace(x_range * 0.1, x_range * 0.9, 3, dtype=int),
-                                       np.linspace(y_range * 0.1, y_range * 0.9, 3, dtype=int)), -1)
-            pos = pos.reshape(-1, 2)
-            for x, y in pos:
-                fig, axs = plt.subplots(4, 1, figsize=(8, 8))
-                for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                    axs[i].plot(stokes_true[y, x, i], label=f'true - {label}')
-                    axs[i].plot(stokes_pred[y, x, i], label=f'pred - {label}')
-                    if i == 0:
-                        continue
-                    # v_min_max = np.abs(stokes_true[20, 20, i]).max()
-                    # v_min_max = max(1e-4, v_min_max)
-                    # axs[i].set_ylim([-v_min_max, v_min_max])
-
-                [ax.legend(loc='upper right') for ax in axs]
-                # log figure
-                fig.tight_layout()
-                wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
-                plt.close('all')
-
-        # plot PSF
-        if not isinstance(self.psf, NoPSF):
-            psf = self.psf()
-            psf = psf.detach().cpu().numpy()
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-            im = ax.imshow(psf, vmin=0)
-            fig.colorbar(im)
-            fig.tight_layout()
-            wandb.log({"PSF": fig})
-            plt.close('all')
-
-    def plot_parameters(self, outputs):
-        parameters = {}
-        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl']:
-            field = outputs[k].reshape(*self.cube_shape[1:3]).cpu().numpy()
-            parameters[k] = field
-            plot_settings = {}
-            if k == 'theta':
-                field = field % np.pi
-                plot_settings['vmin'] = 0
-                plot_settings['vmax'] = np.pi
-                plot_settings['cmap'] = 'RdBu_r'
-            if k == 'chi':
-                field = field % np.pi
-                plot_settings['vmin'] = 0
-                plot_settings['vmax'] = np.pi
-                plot_settings['cmap'] = 'twilight'
-            if k == 'b_field':
-                b_norm = np.abs(field).max()
-                plot_settings['vmin'] = -b_norm
-                plot_settings['vmax'] = b_norm
-                plot_settings['cmap'] = 'RdBu_r'
-            if k == "b0" or k == "b1" or k == "mu":
-                pass
-            if k == "vmac" or k == "damping" or k == "kl":
-                plot_settings['vmin'] = 0.
-
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
-            im = ax.imshow(field, **plot_settings)
-            fig.colorbar(im)
-
-            fig.tight_layout()
-            wandb.log({k: fig})
-            plt.close('all')
-        return parameters
-
     def plot_parameter_overview(self, parameters):
+        b = np.abs(parameters['b_field'])
+        theta = parameters['theta']
+        chi = parameters['chi']
+        # reproject vectors (theta flip with negative B)
+        b, theta, chi = to_spherical(to_cartesian(b, theta, chi))
+        chi = chi % np.pi
+        theta = theta % np.pi
+
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(parameters['b_field'], cmap='RdBu_r')
+        im = ax.imshow(b.T, cmap='jet', vmin=0)
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(parameters['theta'], cmap='RdBu_r')
+        im = ax.imshow(theta.T, cmap='RdBu_r')
         ax.set_title("Theta")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 2]
-        im = ax.imshow(parameters['chi'], cmap='twilight')
+        im = ax.imshow(chi.T, cmap='twilight')
         ax.set_title("Chi")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 3]
-        im = ax.imshow(parameters['b0'])
+        im = ax.imshow(parameters['b0'].T)
         ax.set_title("B0")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 4]
-        im = ax.imshow(parameters['b1'])
+        im = ax.imshow(parameters['b1'].T)
         ax.set_title("B1")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 0]
-        im = ax.imshow(parameters['vmac'])
+        im = ax.imshow(parameters['vmac'].T)
         ax.set_title("Vmac")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 1]
-        im = ax.imshow(parameters['damping'])
+        im = ax.imshow(parameters['damping'].T)
         ax.set_title("Damping")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -320,13 +311,14 @@ class MEModule(LightningModule):
         ax.set_axis_off()
 
         ax = axs[1, 3]
-        im = ax.imshow(parameters['vdop'])
+        vdop_max = np.abs(parameters['vdop']).max()
+        im = ax.imshow(parameters['vdop'].T, cmap='RdBu_r', vmin=-vdop_max, vmax=vdop_max)
         ax.set_title("Vdop")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 4]
-        im = ax.imshow(parameters['kl'])
+        im = ax.imshow(parameters['kl'].T)
         ax.set_title("Kl")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -336,15 +328,53 @@ class MEModule(LightningModule):
         plt.close('all')
 
 
+    def plot_B_cartesian(self, parameters):
+        b = np.abs(parameters['b_field'])
+        theta = parameters['theta']
+        chi = parameters['chi']
+        # reproject vectors (theta flip with negative B)
+        b_xyz = to_cartesian(b, theta, chi)
+
+        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
+        ax = axs[0]
+        bx_max = np.abs(b_xyz[..., 0]).max()
+        im = ax.imshow(b_xyz[..., 0].T, cmap='RdBu_r', vmin=-bx_max, vmax=bx_max)
+        ax.set_title("Bx")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+
+        ax = axs[1]
+        by_max = np.abs(b_xyz[..., 1]).max()
+        im = ax.imshow(b_xyz[..., 1].T, cmap='RdBu_r', vmin=-by_max, vmax=by_max)
+        ax.set_title("By")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[2]
+        bz_max = np.abs(b_xyz[..., 2]).max()
+        im = ax.imshow(b_xyz[..., 2].T, cmap='RdBu_r', vmin=-bz_max, vmax=bz_max)
+        ax.set_title("Bz")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        plt.tight_layout()
+        wandb.log({"B": fig})
+        plt.close('all')
+
+
 class PSF(nn.Module):
 
-    def __init__(self, *shape):
+    def __init__(self, shape, file):
         super().__init__()
         assert len(shape) == 2 and shape[0] % 2 == 1 and shape[1] % 2 == 1, "Invalid PSF shape"
         psf = torch.ones(*shape, dtype=torch.float32) * -1
         psf[shape[0] // 2, shape[1] // 2] = 1
         #
-        psf = np.load('/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits')['PSF']
+        psf = np.load(file)['PSF']
         psf = torch.tensor(psf, dtype=torch.float32)
         self.psf = nn.Parameter(psf, requires_grad=False)
         self.activation = nn.Softplus()
@@ -355,15 +385,17 @@ class PSF(nn.Module):
 
 class LoadPSF(nn.Module):
 
-    def __init__(self, path):
+    def __init__(self, file, crop=None):
         super().__init__()
         #
-        if path.endswith('.npz'):
-            psf = np.load(path)['PSF']
-        elif path.endswith('.fits'):
-            psf = fits.getdata(path).astype(np.float32)
+        if file.endswith('.npz'):
+            psf = np.load(file)['PSF']
+        elif file.endswith('.fits'):
+            psf = fits.getdata(file).astype(np.float32)
         else:
-            raise ValueError(f"Invalid PSF file: {path}")
+            raise ValueError(f"Invalid PSF file: {file}")
+        if crop is not None:
+            psf = psf[crop[0]:crop[1], crop[2]:crop[3]]
         psf = torch.tensor(psf, dtype=torch.float32)
         self.psf = nn.Parameter(psf, requires_grad=False)
         self.psf_shape = psf.shape

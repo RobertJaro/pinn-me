@@ -1,8 +1,8 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/test_set/hinode_v01"
+base_path: "/glade/work/rjarolim/pinn_me/hinode/hinode_v01"
 data:
   type: "hinode"
-  files: "/glade/work/rjarolim/data/pinnme/20110122_093128/*.fits"
+  files: "/glade/work/mmolnar/PINN-ME/Hinode/data/level1/2007/01/05/SP3D/20070105_235907/*.fits"
   num_workers: 8
   batch_size: 4096
 logging:
