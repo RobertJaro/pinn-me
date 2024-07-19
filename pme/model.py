@@ -85,8 +85,8 @@ class MEModel(nn.Module):
         params = self.d_out(x)
         #
         b_field = params[..., 0:1] * 1000
-        theta = params[..., 1:2]# * torch.pi
-        chi = params[..., 2:3]# * torch.pi
+        theta = params[..., 1:2] * torch.pi
+        chi = params[..., 2:3] * torch.pi
         vmac = torch.sigmoid(params[..., 3:4]) * 20e3
         damping = torch.sigmoid(params[..., 4:5]) * 1
         b0 = torch.sigmoid(params[..., 5:6])
