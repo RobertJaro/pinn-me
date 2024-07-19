@@ -260,13 +260,13 @@ class MEModule(LightningModule):
         theta = parameters['theta']
         chi = parameters['chi']
         # reproject vectors (theta flip with negative B)
-        b, theta, chi = to_spherical(to_cartesian(b, theta, chi))
         chi = chi % np.pi
         theta = theta % np.pi
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b.T, cmap='jet', vmin=0)
+        b_max = np.abs(b).max()
+        im = ax.imshow(b.T, cmap='RdBu_r', vmin=-b_max, vmax=b_max)
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -338,7 +338,7 @@ class MEModule(LightningModule):
         fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
         ax = axs[0]
         bx_max = np.abs(b_xyz[..., 0]).max()
-        im = ax.imshow(b_xyz[..., 0].T, cmap='RdBu_r', vmin=-bx_max, vmax=bx_max)
+        im = ax.imshow(b_xyz[..., 0].T, cmap='gray', vmin=-bx_max, vmax=bx_max)
         ax.set_title("Bx")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -347,7 +347,7 @@ class MEModule(LightningModule):
 
         ax = axs[1]
         by_max = np.abs(b_xyz[..., 1]).max()
-        im = ax.imshow(b_xyz[..., 1].T, cmap='RdBu_r', vmin=-by_max, vmax=by_max)
+        im = ax.imshow(b_xyz[..., 1].T, cmap='gray', vmin=-by_max, vmax=by_max)
         ax.set_title("By")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -355,7 +355,7 @@ class MEModule(LightningModule):
 
         ax = axs[2]
         bz_max = np.abs(b_xyz[..., 2]).max()
-        im = ax.imshow(b_xyz[..., 2].T, cmap='RdBu_r', vmin=-bz_max, vmax=bz_max)
+        im = ax.imshow(b_xyz[..., 2].T, cmap='gray', vmin=-bz_max, vmax=bz_max)
         ax.set_title("Bz")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
