@@ -1,22 +1,23 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/test_set/psf_noise_0"
+base_path: "/glade/work/rjarolim/pinn_me/test_set/psf_noise_{noise}"
 data:
   type: "test"
-  files: "/glade/work/rjarolim/data/pinnme/test_set_400/profile_000.npz"
+  files: "/glade/work/rjarolim/data/pinnme/test_set_400/profile_*.npz"
   psf: "/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits"
-#  noise: 1.0e-05
+  noise: {noise}
   num_workers: 8
   batch_size: 512
 logging:
   project: pinn-me
-  name: "psf_noise_0"
+  group: "test_set"
+  name: "psf_noise_{noise}"
 model:
   dim: 256
   encoding: "positional"
 
 training:
   epochs: 100
-  check_val_every_n_epoch: 5
+  check_val_every_n_epoch: 1
   psf_config:
     type: load
     file: "/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits"

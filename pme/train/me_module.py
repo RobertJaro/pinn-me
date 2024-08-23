@@ -10,7 +10,7 @@ from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import MEModel, NormalizationModule, ParametersModel
+from pme.model import MEModel, NormalizationModule
 from pme.train.me_atmosphere import MEAtmosphere
 
 
@@ -39,11 +39,11 @@ class MEModule(LightningModule):
         # initialize PSF coordinates
         psf_shape = self.psf.psf_shape
         coords_psf = np.stack(
-            np.meshgrid(np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
+            np.meshgrid(np.zeros(1, dtype=np.float32),
+                        np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
                         np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1], dtype=np.float32),
-                        np.zeros(1, dtype=np.float32),
                         indexing='ij'), -1)
-        coords_psf = coords_psf[:, :, 0]  # remove time axis
+        coords_psf = coords_psf[0, :, :]  # remove time axis
         coords_psf /= pixel_per_ds
         coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
         self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
@@ -256,29 +256,29 @@ class MEModule(LightningModule):
         plt.close('all')
 
     def plot_parameter_overview(self, parameters):
-        b = np.abs(parameters['b_field'])
+        b = parameters['b_field']
         theta = parameters['theta']
         chi = parameters['chi']
         # reproject vectors (theta flip with negative B)
-        chi = chi % np.pi
-        theta = theta % np.pi
+        b_xyz = to_cartesian(b, theta, chi)
+        b, theta, chi = to_spherical(b_xyz)
+        chi = np.mod(chi, np.pi)
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        b_max = np.abs(b).max()
-        im = ax.imshow(b.T, cmap='RdBu_r', vmin=-b_max, vmax=b_max)
+        im = ax.imshow(b.T, cmap='jet', vmin=0)
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(theta.T, cmap='RdBu_r')
+        im = ax.imshow(theta.T, cmap='RdBu_r', vmin=0, vmax=np.pi)
         ax.set_title("Theta")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 2]
-        im = ax.imshow(chi.T, cmap='twilight')
+        im = ax.imshow(chi.T, cmap='twilight', vmin=0, vmax=np.pi)
         ax.set_title("Chi")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -327,7 +327,6 @@ class MEModule(LightningModule):
         wandb.log({"Parameter Overview": fig})
         plt.close('all')
 
-
     def plot_B_cartesian(self, parameters):
         b = np.abs(parameters['b_field'])
         theta = parameters['theta']
@@ -343,7 +342,6 @@ class MEModule(LightningModule):
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
-
 
         ax = axs[1]
         by_max = np.abs(b_xyz[..., 1]).max()

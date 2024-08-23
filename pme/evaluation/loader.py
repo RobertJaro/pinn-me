@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from pme.model import jacobian
 from pme.train.me_atmosphere import MEAtmosphere
 
 
@@ -25,21 +26,29 @@ class PINNMEOutput:
         self.forward_model.eval()
 
     @torch.no_grad()
-    def load(self, coords, batch_size=4096):
+    def load(self, coords, batch_size=4096, mu=None):
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
 
+        mu = torch.ones(*coords_tensor.shape[:-1], 1, dtype=torch.float32) if mu is None else torch.tensor(mu, dtype=torch.float32).reshape(-1, 1)
         parameters = {}
 
         n_batches = int(np.ceil(coords_tensor.shape[0] / batch_size))
         for i in range(n_batches):
             batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
+            mu_batch = mu[i * batch_size:(i + 1) * batch_size].to(self.device)
+
             pred = self.parameter_model(batch)
-            I, Q, U, V = self.forward_model(**pred)
+            I, Q, U, V = self.forward_model(**pred, mu=mu_batch)
             pred['I'] = I
             pred['Q'] = Q
             pred['U'] = U
             pred['V'] = V
+
+            stokes = torch.stack([I, Q, U, V], dim=-1)
+            jac = jacobian(stokes, pred)
+
+
             for key, value in pred.items():
                 if key not in parameters:
                     parameters[key] = []
@@ -88,15 +97,17 @@ class PINNMEOutput:
         return self.load(coords)
 
 
-def to_cartesian(b_field, theta, chi):
-    b_x = b_field * np.sin(theta) * np.cos(chi)
-    b_y = b_field * np.sin(theta) * np.sin(chi)
-    b_z = b_field * np.cos(theta)
+def to_cartesian(b, inc, azi):
+    b_x = b * np.sin(inc) * np.sin(azi)
+    b_y = b * np.sin(inc) * np.cos(azi)
+    b_z = b * np.cos(inc)
     return np.stack([b_x, b_y, b_z], axis=-1)
 
 
 def to_spherical(b):
+    bx, by, bz = b[..., 0], b[..., 1], b[..., 2]
+    #
     b_field = np.linalg.norm(b, axis=-1)
-    theta = np.arccos(b[..., 2] / b_field)
-    chi = np.arctan2(b[..., 1], b[..., 0])
-    return b_field, theta, chi
+    inc = np.arccos(bz / (b_field + 1e-10))
+    azi = np.arctan2(bx, by)
+    return b_field, inc, azi

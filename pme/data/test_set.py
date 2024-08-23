@@ -3,7 +3,7 @@ import glob
 import os.path
 from multiprocessing import Pool
 
-import matplotlib.pyplot as pl
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from astropy import units as u
@@ -22,39 +22,39 @@ def plot_stokes(profile, save_path):
     """
     profile = np.abs(profile)
 
-    fig, axs = pl.subplots(1, 4, figsize=(16, 4))
+    fig, axs = plt.subplots(1, 4, figsize=(16, 4))
 
     ax = axs[0]
     im = ax.imshow(profile[..., 0, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("I")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1]
     im = ax.imshow(profile[..., 1, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("Q")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[2]
     im = ax.imshow(profile[..., 2, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("U")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[3]
     im = ax.imshow(profile[..., 3, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("V")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
-    pl.tight_layout()
-    pl.savefig(save_path, dpi=150)
-    pl.show()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close('all')
 
 
 def plot_parameters(parameters, save_path):
@@ -65,81 +65,81 @@ def plot_parameters(parameters, save_path):
         -- atmos, ndarray [4, num_Intensity]
     """
 
-    fig, axs = pl.subplots(2, 5, figsize=(16, 4))
+    fig, axs = plt.subplots(2, 5, figsize=(16, 4))
 
     ax = axs[0, 0]
     im = ax.imshow(parameters['b_field'].T, cmap='jet', vmin=0)
     ax.set_title("B")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[0, 1]
     im = ax.imshow(parameters['theta'].T, cmap='RdBu_r')
     ax.set_title("Theta")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[0, 2]
     im = ax.imshow(parameters['chi'].T, cmap='twilight')
     ax.set_title("Chi")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[0, 3]
     im = ax.imshow(parameters['b0'].T)
     ax.set_title("B0")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[0, 4]
     im = ax.imshow(parameters['b1'].T)
     ax.set_title("B1")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1, 0]
     im = ax.imshow(parameters['vmac'].T)
     ax.set_title("Vmac")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1, 1]
     im = ax.imshow(parameters['damping'].T)
     ax.set_title("Damping")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1, 2]
     im = ax.imshow(parameters['mu'].T)
     ax.set_title("Mu")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1, 3]
     im = ax.imshow(parameters['vdop'].T)
     ax.set_title("Vdop")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
     ax = axs[1, 4]
     im = ax.imshow(parameters['kl'].T)
     ax.set_title("Kl")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
-    pl.colorbar(im, cax=cax)
+    plt.colorbar(im, cax=cax)
 
-    pl.tight_layout()
-    pl.savefig(save_path, dpi=150)
-    pl.show()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close('all')
 
 
 def convert_xy_to_rt(x, y):
@@ -265,15 +265,16 @@ if __name__ == '__main__':
 
     data_generator = TestSetGenerator()
 
-    with Pool(8) as p:
+    with Pool(16) as p:
         p.starmap(data_generator.create_time_step_file, [(t, base_path) for t in range(10)])
 
     profiles = load_profiles(os.path.join(base_path, 'profile_*.npz'))
     parameters = load_parameters(os.path.join(base_path, 'parameters_*.npz'))
 
+    os.makedirs(os.path.join(base_path, 'images'), exist_ok=True)
     for i in range(profiles.shape[0]):
-        plot_stokes(profiles[i], os.path.join(base_path, f'stokes_{i:03d}.jpg'))
+        plot_stokes(profiles[i], os.path.join(base_path, 'images', f'stokes_{i:03d}.jpg'))
 
     for i in range(profiles.shape[0]):
         t_step_parameters = {k: v[i] for k, v in parameters.items()}
-        plot_parameters(t_step_parameters, os.path.join(base_path, f'parameters_{i:03d}.jpg'))
+        plot_parameters(t_step_parameters, os.path.join(base_path, 'images', f'parameters_{i:03d}.jpg'))
