@@ -14,5 +14,5 @@ model:
   encoding: "positional"
 
 training:
-  epochs: 100
-  check_val_every_n_epoch: 1
+  epochs: 50
+  check_val_every_n_epoch: 5

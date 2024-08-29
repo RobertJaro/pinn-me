@@ -16,15 +16,18 @@ from pme.train.me_atmosphere import MEAtmosphere
 
 class MEModule(LightningModule):
 
-    def __init__(self, cube_shape, lambda_config, value_range, pixel_per_ds, psf_config={'type': None},
-                 dim=256, lr_params={"start": 5e-4, "end": 5e-5, "iterations": 1e5}, lambda_stokes=[1, 1, 1, 1],
-                 encoding="positional", **kwargs):
+    def __init__(self, cube_shape, lambda_config, value_range, pixel_per_ds, psf_config=None,
+                 lr_params=None, lambda_stokes=None, model_config=None, **kwargs):
         super().__init__()
+        lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
+        lambda_stokes = lambda_stokes if lambda_stokes is not None else [1, 1, 1, 1]
+        psf_config = psf_config if psf_config is not None else {"type": None}
 
         self.cube_shape = cube_shape
 
         # init model
-        self.parameter_model = MEModel(3, dim, encoding=encoding)
+        model_config = model_config if model_config is not None else {}
+        self.parameter_model = MEModel(3, **model_config)
 
         psf_type = psf_config.pop('type')
         if psf_type is None:
@@ -45,6 +48,12 @@ class MEModule(LightningModule):
                         indexing='ij'), -1)
         coords_psf = coords_psf[0, :, :]  # remove time axis
         coords_psf /= pixel_per_ds
+
+        print(f'PSF: {psf_shape}')
+        print(f't: {coords_psf[..., 0].min()} - {coords_psf[..., 0].max()}')
+        print(f'X: {coords_psf[..., 1].min()} - {coords_psf[..., 1].max()}')
+        print(f'Y: {coords_psf[..., 2].min()} - {coords_psf[..., 2].max()}')
+
         coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
         self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
 
@@ -266,7 +275,7 @@ class MEModule(LightningModule):
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b.T, cmap='jet', vmin=0)
+        im = ax.imshow(b.T, cmap='viridis', vmin=0)
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -328,7 +337,7 @@ class MEModule(LightningModule):
         plt.close('all')
 
     def plot_B_cartesian(self, parameters):
-        b = np.abs(parameters['b_field'])
+        b = parameters['b_field']
         theta = parameters['theta']
         chi = parameters['chi']
         # reproject vectors (theta flip with negative B)

@@ -7,13 +7,10 @@ data:
   batch_size: 4096
 logging:
   project: pinn-me
+  group: "hinode"
   name: hinode
 model:
-  dim: 256
   encoding: "positional"
-#  psf_config:
-#    type: load
-#    file: "/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits"
 training:
   epochs: 1000
   check_val_every_n_epoch: 5

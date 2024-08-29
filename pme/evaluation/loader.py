@@ -47,7 +47,7 @@ class PINNMEOutput:
 
             stokes = torch.stack([I, Q, U, V], dim=-1)
             jac = jacobian(stokes, pred)
-
+            pred['jacobian'] = jac
 
             for key, value in pred.items():
                 if key not in parameters:
@@ -55,7 +55,7 @@ class PINNMEOutput:
                 value = value.cpu().numpy()
                 parameters[key].append(value)
 
-        parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], -1)
+        parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], *value[0].shape[1:])
                       for key, value in parameters.items()}
 
         # reproject magnetic field vector
@@ -98,8 +98,8 @@ class PINNMEOutput:
 
 
 def to_cartesian(b, inc, azi):
-    b_x = b * np.sin(inc) * np.sin(azi)
-    b_y = b * np.sin(inc) * np.cos(azi)
+    b_x = b * np.sin(inc) * np.cos(azi)
+    b_y = b * np.sin(inc) * np.sin(azi)
     b_z = b * np.cos(inc)
     return np.stack([b_x, b_y, b_z], axis=-1)
 
@@ -109,5 +109,5 @@ def to_spherical(b):
     #
     b_field = np.linalg.norm(b, axis=-1)
     inc = np.arccos(bz / (b_field + 1e-10))
-    azi = np.arctan2(bx, by)
+    azi = np.arctan2(by, bx)
     return b_field, inc, azi

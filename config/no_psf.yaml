@@ -10,11 +10,11 @@ data:
 logging:
   project: pinn-me
   group: "test_set"
-  name: "psf_noise_{noise}"
+  name: "no_psf_noise_{noise}"
 model:
   dim: 256
   encoding: "positional"
 
 training:
-  epochs: 100
+  epochs: 1000
   check_val_every_n_epoch: 5

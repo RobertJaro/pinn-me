@@ -68,7 +68,7 @@ def plot_parameters(parameters, save_path):
     fig, axs = plt.subplots(2, 5, figsize=(16, 4))
 
     ax = axs[0, 0]
-    im = ax.imshow(parameters['b_field'].T, cmap='jet', vmin=0)
+    im = ax.imshow(parameters['b_field'].T, cmap='viridis', vmin=0)
     ax.set_title("B")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)

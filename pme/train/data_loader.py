@@ -89,13 +89,23 @@ class GenericDataModule(LightningDataModule):
         coordinates[..., 2] /= self.pixel_per_ds  # y
 
         self.cube_shape = coordinates.shape[:3]
-        self.data_range = [[coordinates[..., 0].min(), coordinates[..., 0].max()],
-                           [coordinates[..., 1].min(), coordinates[..., 1].max()],
-                           [coordinates[..., 2].min(), coordinates[..., 2].max()]]
+        self.data_range = np.array(
+            [[coordinates[..., 0].min(), coordinates[..., 0].max()],
+             [coordinates[..., 1].min(), coordinates[..., 1].max()],
+             [coordinates[..., 2].min(), coordinates[..., 2].max()]])
 
         self.value_range = np.stack([stokes_vector.min((0, 1, 2, -1)),
-                                        stokes_vector.max((0, 1, 2, -1))], -1)
-        print('VALUE RANGE', self.value_range)
+                                     stokes_vector.max((0, 1, 2, -1))], -1)
+        print('VALUE RANGE')
+        print(f'Stokes-I: {self.value_range[0, 0]:.2f} - {self.value_range[0, 1]:.2f}')
+        print(f'Stokes-Q: {self.value_range[1, 0]:.2f} - {self.value_range[1, 1]:.2f}')
+        print(f'Stokes-U: {self.value_range[2, 0]:.2f} - {self.value_range[2, 1]:.2f}')
+        print(f'Stokes-V: {self.value_range[3, 0]:.2f} - {self.value_range[3, 1]:.2f}')
+
+        print('Coordinate Range')
+        print(f'Time: {self.data_range[0, 0]:.2f} - {self.data_range[0, 1]:.2f} ({coordinates.shape[0]})')
+        print(f'X: {self.data_range[1, 0]:.2f} - {self.data_range[1, 1]:.2f} ({coordinates.shape[1]})')
+        print(f'Y: {self.data_range[2, 0]:.2f} - {self.data_range[2, 1]:.2f} ({coordinates.shape[2]})')
 
         # plot coordinates
         ref_time = stokes_vector.shape[0] // 2
