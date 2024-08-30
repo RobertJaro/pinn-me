@@ -101,7 +101,7 @@ class MEModule(LightningModule):
         U = U.reshape(*coords_shape[:-1], -1)
         V = V.reshape(*coords_shape[:-1], -1)
 
-        I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
+        I, Q, U, V = self.convolve_psf(I, Q, U, V)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
         stokes_true = self.normalization(stokes_true)
@@ -116,7 +116,7 @@ class MEModule(LightningModule):
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss}
 
-    def convolve_psf(self, I, Q, U, V, coords):
+    def convolve_psf(self, I, Q, U, V):
         # filter_outside = (coords[..., 0] < 0) | (coords[..., 0] > 1) | (coords[..., 1] < 0) | (coords[..., 1] > 1)
         # mask = torch.ones_like(I)
         # mask[filter_outside] = torch.nan
@@ -162,7 +162,7 @@ class MEModule(LightningModule):
 
         output = {k: v.reshape(*coords_shape[:-1], -1) for k, v in output.items()}
 
-        I, Q, U, V = self.convolve_psf(I, Q, U, V, coords)
+        I, Q, U, V = self.convolve_psf(I, Q, U, V)
 
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 

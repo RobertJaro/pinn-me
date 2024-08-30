@@ -1,0 +1,19 @@
+---
+base_path: "/glade/work/rjarolim/pinn_me/muram/muram_psf_v01"
+data:
+  type: "fits"
+  file: "/glade/work/rjarolim/data/pinnme/muram/SIRprofiles_plage.fits"
+  num_workers: 8
+  batch_size: 2048
+logging:
+  project: pinn-me
+  name: muram psf
+model:
+  encoding: "gaussian_positional"
+training:
+  epochs: 1000
+  check_val_every_n_epoch: 5
+  psf_config:
+    type: load
+    file: "/glade/work/rjarolim/data/inversion/hinode_psf_0.16.fits"
+    crop: [ 18, -18, 18, -18 ]

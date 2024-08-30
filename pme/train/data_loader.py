@@ -10,10 +10,11 @@ import wandb
 from astropy import units as u
 from astropy.io import fits
 from astropy.io.fits import getheader
+from astropy.nddata import block_reduce, block_replicate
 from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
-from scipy.signal import convolve2d
+from scipy.signal import fftconvolve
 from sunpy.map import Map, all_coordinates_from_map
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
@@ -79,10 +80,8 @@ class GenericDataModule(LightningDataModule):
 
         coordinates = np.stack(np.meshgrid(
             normalized_times,
-            np.linspace(-stokes_vector.shape[1] / 2, stokes_vector.shape[1] / 2, stokes_vector.shape[1],
-                        dtype=np.float32),
-            np.linspace(-stokes_vector.shape[2] / 2, stokes_vector.shape[2] / 2, stokes_vector.shape[2],
-                        dtype=np.float32),
+            np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - stokes_vector.shape[1] / 2,
+            np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - stokes_vector.shape[2] / 2,
             indexing='ij'), -1, dtype=np.float32)
 
         coordinates[..., 1] /= self.pixel_per_ds  # x
@@ -264,8 +263,40 @@ class HinodeDataModule(GenericDataModule):
         super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
 
 
+class FitsDataModule(GenericDataModule):
+
+    def __init__(self, file, atomic_parameters=None, **kwargs):
+        atomic_parameters = {'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0} if atomic_parameters is None \
+            else atomic_parameters
+
+        stokes_vector = fits.getdata(file).astype(np.float32)
+        stokes_vector = stokes_vector[None]  # add time dimension (t, x, y, stokes, lambda)
+
+        header = getheader(file)
+        times = [parse(header['DATE_OBS'])]
+        lambda_step = header["CDELT1"]
+        lambda_center = header["CRVAL1"]
+        pixel_center = header["CRPIX1"]
+        n_lambda = stokes_vector.shape[-1]
+
+        pixel_range = np.arange(n_lambda)
+        pixel_range = pixel_range - pixel_center
+        lambda_range = pixel_range * lambda_step
+
+        lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_range * u.AA, **atomic_parameters}
+
+        mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
+
+        super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
+
+
 def load_test_stokes_profiles(file, psf_file=None, noise=None):
     stokes_vector = np.load(file)['stokes_profiles']  # (400, 400, 50, 4)
+    stokes_vector = add_synthetic_noise(stokes_vector, noise, psf_file)
+    return stokes_vector
+
+
+def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
     # convolve with psf
     if psf_file is not None:
         if psf_file.endswith('.npy'):
@@ -274,7 +305,7 @@ def load_test_stokes_profiles(file, psf_file=None, noise=None):
             psf = fits.getdata(psf_file).astype(np.float32)
         else:
             raise ValueError('Invalid psf file format')
-
+        psf = block_replicate(psf, (bin, bin))
         psf /= psf.sum()  # assure valid psf
         print('CONVOLVING WITH PSF: ', psf.shape)
         # stokes vector (x, y, lambda); psf (x, y)
@@ -285,11 +316,11 @@ def load_test_stokes_profiles(file, psf_file=None, noise=None):
             convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
                                                        total=flat_stokes_vector.shape[0])], -1)
         stokes_vector = convolved_maps.reshape(stokes_vector.shape)
-
+    if bin > 1:
+        stokes_vector = block_reduce(stokes_vector, (bin, bin, 1, 1), func=np.mean)
     # add noise
     if noise is not None:
         stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
-
     return stokes_vector
 
 
@@ -442,7 +473,7 @@ class ParallelConvolution:
         self.psf = psf
 
     def conv_f(self, img):
-        return convolve2d(img, self.psf, mode='same', boundary='symm')
+        return fftconvolve(img, self.psf, mode='same')
 
 
 def load_Hinode_files(data_dir):

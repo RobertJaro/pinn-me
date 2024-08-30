@@ -6,7 +6,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, LambdaCallback
 from pytorch_lightning.loggers import WandbLogger
 
-from pme.train.data_loader import TestDataModule, SHARPDataModule, HinodeDataModule
+from pme.train.data_loader import TestDataModule, SHARPDataModule, HinodeDataModule, FitsDataModule
 from pme.train.me_module import MEModule
 from pme.train.util import load_yaml_config
 
@@ -36,6 +36,8 @@ elif type == 'sharp':
     data_module = SHARPDataModule(**data_config)
 elif type == 'hinode':
     data_module = HinodeDataModule(**data_config)
+elif type == 'fits':
+    data_module = FitsDataModule(**data_config)
 else:
     raise ValueError(f'Unknown data type {type}')
 

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch import nn
+from tqdm import tqdm
 
 from pme.model import jacobian
 from pme.train.me_atmosphere import MEAtmosphere
@@ -25,34 +26,38 @@ class PINNMEOutput:
         self.forward_model = nn.DataParallel(self.forward_model)
         self.forward_model.eval()
 
-    @torch.no_grad()
-    def load(self, coords, batch_size=4096, mu=None):
+    def load(self, coords, batch_size=int(2**13), mu=None, progress=True):
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
 
-        mu = torch.ones(*coords_tensor.shape[:-1], 1, dtype=torch.float32) if mu is None else torch.tensor(mu, dtype=torch.float32).reshape(-1, 1)
+        mu = torch.ones(*coords_tensor.shape[:-1], 1, dtype=torch.float32) if mu is None \
+            else torch.tensor(mu, dtype=torch.float32).reshape(-1, 1)
         parameters = {}
 
         n_batches = int(np.ceil(coords_tensor.shape[0] / batch_size))
-        for i in range(n_batches):
+        iter_ = tqdm(range(n_batches)) if progress else range(n_batches)
+        for i in iter_:
             batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
             mu_batch = mu[i * batch_size:(i + 1) * batch_size].to(self.device)
 
             pred = self.parameter_model(batch)
             I, Q, U, V = self.forward_model(**pred, mu=mu_batch)
+
+            stokes = torch.stack([I, Q, U, V], dim=-1)
+            stokes_integrated = stokes.sum(dim=-2)
+            jac_params = {k: jacobian(stokes_integrated, pred[k]) for k in pred.keys()}
+
+            for k in jac_params.keys():
+                pred[f'jacobian_{k}'] = jac_params[k]
             pred['I'] = I
             pred['Q'] = Q
             pred['U'] = U
             pred['V'] = V
 
-            stokes = torch.stack([I, Q, U, V], dim=-1)
-            jac = jacobian(stokes, pred)
-            pred['jacobian'] = jac
-
             for key, value in pred.items():
                 if key not in parameters:
                     parameters[key] = []
-                value = value.cpu().numpy()
+                value = value.detach().cpu().numpy()
                 parameters[key].append(value)
 
         parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], *value[0].shape[1:])
@@ -76,7 +81,7 @@ class PINNMEOutput:
         I, Q, U, V = self.forward_model(**tensors)
         return {'I': I.cpu().numpy(), 'Q': Q.cpu().numpy(), 'U': U.cpu().numpy(), 'V': V.cpu().numpy()}
 
-    def load_cube(self):
+    def load_cube(self, **kwargs):
         coords = np.meshgrid(
             np.linspace(self.data_range[0][0], self.data_range[0][1], self.cube_shape[0], dtype=np.float32),
             np.linspace(self.data_range[1][0], self.data_range[1][1], self.cube_shape[1], dtype=np.float32),
@@ -84,9 +89,9 @@ class PINNMEOutput:
             indexing='ij')
         coords = np.stack(coords, axis=-1)
 
-        return self.load(coords)
+        return self.load(coords, **kwargs)
 
-    def load_time(self, time):
+    def load_time(self, time, **kwargs):
         coords = np.meshgrid(
             np.linspace(self.data_range[0][0], self.data_range[0][1], self.cube_shape[0], dtype=np.float32),
             np.linspace(self.data_range[1][0], self.data_range[1][1], self.cube_shape[1], dtype=np.float32),
@@ -94,10 +99,12 @@ class PINNMEOutput:
             indexing='ij')
         coords = np.stack(coords, axis=-1)
 
-        return self.load(coords)
+        return self.load(coords, **kwargs)
 
 
-def to_cartesian(b, inc, azi):
+def to_cartesian(b, inc, azi, disamb=None):
+    if disamb is not None:
+        azi[disamb] += np.pi
     b_x = b * np.sin(inc) * np.cos(azi)
     b_y = b * np.sin(inc) * np.sin(azi)
     b_z = b * np.cos(inc)
