@@ -80,8 +80,8 @@ class GenericDataModule(LightningDataModule):
 
         coordinates = np.stack(np.meshgrid(
             normalized_times,
-            np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - stokes_vector.shape[1] / 2,
-            np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - stokes_vector.shape[2] / 2,
+            np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - (stokes_vector.shape[1] - 1) / 2,
+            np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - (stokes_vector.shape[2] - 1) / 2,
             indexing='ij'), -1, dtype=np.float32)
 
         coordinates[..., 1] /= self.pixel_per_ds  # x

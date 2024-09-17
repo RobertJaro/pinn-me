@@ -10,8 +10,8 @@ from skimage.measure import block_reduce
 from pme.evaluation.loader import PINNMEOutput, to_cartesian
 
 file = "/glade/work/rce/for_momo/modelador_final_plage.fits"
-pme_file_positional = '/glade/work/rjarolim/pinn_me/muram/muram_positional_v01/inversion.pme'
-pme_file_gaussian = '/glade/work/rjarolim/pinn_me/muram/muram_gaussian_v01/inversion.pme'
+pme_file_positional = '/glade/work/rjarolim/pinn_me/muram/muram_psf_v02/inversion.pme'
+pme_file_gaussian = '/glade/work/rjarolim/pinn_me/muram/muram_positional_v01/inversion.pme'
 
 result_dir = '/glade/work/rjarolim/pinn_me/muram/evaluation'
 os.makedirs(result_dir, exist_ok=True)
@@ -149,3 +149,13 @@ plt.close(fig)
 print('=============== Difference ===============')
 print(f'Positional: {np.linalg.norm(b_positional - b_gt, axis=-1).mean()}')
 print(f'Gaussian: {np.linalg.norm(b_gaussian - b_gt, axis=-1).mean()}')
+
+print('=============== Cross Correlation ===============')
+print(f'Positional - Bx: {np.corrcoef(bx_gt, b_positional[..., 0].ravel())[0, 1]}')
+print(f'Gaussian - Bx: {np.corrcoef(bx_gt, b_gaussian[..., 0].ravel())[0, 1]}')
+print('-')
+print(f'Positional - By: {np.corrcoef(by_gt, b_positional[..., 1].ravel())[0, 1]}')
+print(f'Gaussian - By: {np.corrcoef(by_gt, b_gaussian[..., 1].ravel())[0, 1]}')
+print('-')
+print(f'Positional - Bz: {np.corrcoef(bz_gt, b_positional[..., 2].ravel())[0, 1]}')
+print(f'Gaussian - Bz: {np.corrcoef(bz_gt, b_gaussian[..., 2].ravel())[0, 1]}')
