@@ -6,15 +6,16 @@ from astropy.io import fits
 from astropy.visualization import ImageNormalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
-from torch import nn, dtype
+from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model.network import MEModel, NormalizationModule
-from pme.train.me_atmosphere import MEAtmosphere
+from pme.model.lte_atmosphere import LTEAtmosphere
+from pme.model.network import NormalizationModule, PopulationalModel, MHDModel
+from pme.train.tracing import cumsum_exclusive
 
 
-class MEModule(LightningModule):
+class LTEModule(LightningModule):
 
     def __init__(self, cube_shape, lambda_config, value_range, pixel_per_ds, psf_config=None,
                  lr_params=None, lambda_stokes=None, model_config=None, **kwargs):
@@ -27,13 +28,14 @@ class MEModule(LightningModule):
 
         # init model
         model_config = model_config if model_config is not None else {}
-        self.parameter_model = MEModel(3, **model_config)
+        self.population_model = PopulationalModel(4, out_dim=4, **model_config)
+        self.mhd_model = MHDModel(**model_config)
 
-        tau_range = np.linspace(-4, 1, 64, dtype=np.float32)
+        tau_range = np.zeros((64, 3), dtype=np.float32)
+        tau_range[:, 2] = np.linspace(-4, 1, 64, dtype=np.float32)
         self.tau_range = nn.Parameter(torch.tensor(tau_range), requires_grad=False)
 
-
-        self.forward_model = MEAtmosphere(**lambda_config)
+        self.forward_model = LTEAtmosphere(**lambda_config)
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
@@ -42,7 +44,11 @@ class MEModule(LightningModule):
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
 
     def configure_optimizers(self):
-        parameters = list(self.parameter_model.parameters()) + list(self.psf.parameters())
+        parameters = (
+                list(self.population_model.parameters()) +
+                list(self.forward_model.parameters()) +
+                list(self.mhd_model.parameters())
+        )
         if isinstance(self.lr_params, dict):
             lr_start = self.lr_params['start']
             lr_end = self.lr_params['end']
@@ -62,16 +68,35 @@ class MEModule(LightningModule):
     def training_step(self, batch, batch_nb):
         coords, mu, stokes_true = batch
 
-        coords = coords[:, None, None, :] + self.coords_psf
+        # coords = x, y, tau, t
+        coords = coords[:, None, :] + self.tau_range[None, :, None]
 
         # forward step
         coords_shape = coords.shape
-        output = self.parameter_model(coords.reshape(-1, 3))
+        population_out = self.population_model(coords.reshape(-1, 3))
+        td_out = self.mhd_model(coords.reshape(-1, 3))
+        n = population_out['n']
+        temperature = td_out['T']
+        pressure = td_out['p']
 
-        # expand mu for PSF (TODO adapt mu for PSF sampling)
-        mu = mu[:, None, None, :].repeat(1, *self.coords_psf.shape[1:3], 1).reshape(-1, 1)
 
-        I, Q, U, V = self.forward_model(**output, mu=mu)
+        population_loss = self.calculate_population_loss(n)
+
+        state_eq = n.sum(-1) * temperature - pressure
+        state_loss = state_eq.pow(2).mean()
+
+        emissivity_coeff = self.calculate_emissivity(n, temperature)
+        absorption_coeff = self.calculate_absorption(n, temperature)
+
+        tau = coords[..., 2]
+        dtau = tau[..., 1:] - tau[..., :-1]
+        dtau = torch.cat([dtau[..., :1], dtau], dim=-1)
+
+        cumulative_absorption = cumsum_exclusive(torch.exp(-absorption_coeff), dtau)
+        total_absorption = torch.exp((absorption_coeff * dtau).sum(-1))
+        intensity = total_absorption * -1 * (emissivity_coeff * cumulative_absorption * dtau).sum(-1)
+
+        I, Q, U, V = self.forward_model(**population_out, **td_out, mu=mu)
         I = I.reshape(*coords_shape[:-1], -1)
         Q = Q.reshape(*coords_shape[:-1], -1)
         U = U.reshape(*coords_shape[:-1], -1)
@@ -91,6 +116,9 @@ class MEModule(LightningModule):
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss}
+
+    def calculate_population_loss(self, n):
+        number_pop = n.shape[1]
 
     def convolve_psf(self, I, Q, U, V):
         # filter_outside = (coords[..., 0] < 0) | (coords[..., 0] > 1) | (coords[..., 1] < 0) | (coords[..., 1] > 1)

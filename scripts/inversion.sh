@@ -2,7 +2,7 @@
 
 #PBS -N inversion
 #PBS -A P22100000
-#PBS -q preempt
+#PBS -q main
 #PBS -l select=1:ncpus=8:ngpus=2:mem=64gb
 #PBS -l walltime=12:00:00
 

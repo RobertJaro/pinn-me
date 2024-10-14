@@ -37,6 +37,58 @@ class PeriodicBoundary(nn.Module):
         return encoded_coord
 
 
+class GenericModel(nn.Module):
+
+    def __init__(self, in_dim, out_dim, dim=256, n_layers=8, encoding=None, activation='sine'):
+        super().__init__()
+        if encoding is None or encoding == 'none':
+            self.d_in = nn.Linear(in_dim, dim)
+        elif encoding == 'positional':
+            posenc = PositionalEncoding(20, in_dim)
+            d_in = nn.Linear(in_dim * 40, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == 'gaussian':
+            posenc = GaussianPositionalEncoding(20, in_dim)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        else:
+            raise NotImplementedError(f'Unknown encoding {encoding}')
+        lin = [nn.Linear(dim, dim) for _ in range(n_layers)]
+        self.linear_layers = nn.ModuleList(lin)
+        self.d_out = nn.Linear(dim, out_dim)
+        activation_mapping = {'relu': nn.ReLU, 'swish': Swish, 'tanh': nn.Tanh, 'sine': Sine}
+        activation_f = activation_mapping[activation]
+        self.in_activation = activation_f()
+        self.activations = nn.ModuleList([activation_f() for _ in range(n_layers)])
+
+    def forward(self, x):
+        x = self.in_activation(self.d_in(x))
+        for l, a in zip(self.linear_layers, self.activations):
+            x = a(l(x))
+        x = self.d_out(x)
+        return x
+
+class PopulationalModel(GenericModel):
+
+    def forward(self, x):
+        x = super().forward(x)
+        return {'log_n': x, 'n': torch.exp(x)}
+
+class MHDModel(GenericModel):
+
+    def __init__(self, **kwargs):
+        super().__init__(out_dim=5, **kwargs)
+
+    def forward(self, x):
+        x = super().forward(x)
+        log_T = x[..., 0:1]
+        log_p = x[..., 1:2]
+        B = x[..., 2:5]
+        return {'log_T': log_T, 'T': torch.exp(log_T),
+                'log_p': log_p, 'p': torch.exp(log_p),
+                'B': B}
+
+
 class MEModel(nn.Module):
 
     def __init__(self, in_coords, dim=256, encoding='positional', num_layers=8):
@@ -108,6 +160,7 @@ class MEModel(nn.Module):
 
         return output
 
+
 class LearnedPositionalEncoding(nn.Module):
 
     def __init__(self, num_freqs, d_input):
@@ -170,6 +223,6 @@ class NormalizationModule(nn.Module):
         self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
 
     def forward(self, stokes):
-        stokes = stokes / self.value_range[..., 1] # normalize by max value (I = [0, 1]; QUV = [-1, 1])
+        stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
         stokes = torch.asinh(stokes * 1e2) / self.stretch
         return stokes
