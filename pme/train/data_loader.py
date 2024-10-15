@@ -15,6 +15,7 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
+from scipy.import ndimage
 from sunpy.map import Map, all_coordinates_from_map
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
@@ -471,6 +472,22 @@ class ParallelConvolution:
 
     def __init__(self, psf):
         self.psf = psf
+
+    def upsample_PSF(self, resOriginal, resTarget):
+        """ 
+        Upsample the PSF on a new resolution
+        Input:
+            -- resOriginal: float
+                Spatial resolution of the original PSF; 116 km for Hinode
+            -- resTarget: float
+                Spatial resolution for the target
+        """
+        
+        # Calculate the ratio between the resolutions
+        ratio = resOriginal / resTarget
+        # Upscale the PSF
+        PSF_upscaled = ndimage.zoom(self.psf, ratio, order=3)
+        self.psf = PSF_upscaled
 
     def conv_f(self, img):
         return fftconvolve(img, self.psf, mode='same')
