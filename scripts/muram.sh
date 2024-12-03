@@ -26,6 +26,12 @@ python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/
 python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_psf_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_psf_v01.npz
 
 #################################################################################
+# plot examples
+
+#python3 -i -m pme.evaluation.muram.compare_muram --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram' --output '/glade/work/rjarolim/pinn_me/muram/evaluation'
+
+
+#################################################################################
 # evaluate uncertainty
 
 #python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01/inversion.pme" --output "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot.fits"
