@@ -168,7 +168,7 @@ class MEAtmosphere(nn.Module):
     def nu(self, d_lambda, **kwargs):
         return self.lambda_grid[None, :] / d_lambda
 
-    def forward(self, b_field, theta, chi, vmac, damping, b0, b1, mu, vdop, kl):
+    def forward(self, b_field, theta, chi, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
         # init state
         state = {'b_field': b_field, 'theta': theta, 'chi': chi, 'vmac': vmac, 'damping': damping,
                  'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl}

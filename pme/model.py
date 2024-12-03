@@ -39,14 +39,14 @@ class PeriodicBoundary(nn.Module):
 
 class MEModel(nn.Module):
 
-    def __init__(self, in_coords, dim=256, encoding='positional', num_layers=8):
+    def __init__(self, in_coords, dim=256, encoding='gaussian_positional', activation='sine', num_layers=8):
         super().__init__()
         # encoding layer
         if encoding == "periodic":
             posenc = PeriodicBoundary()
             d_in = nn.Linear(in_coords + 2, dim)
             self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "positional":
+        if encoding == "positional":
             posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
@@ -71,8 +71,14 @@ class MEModel(nn.Module):
         self.d_out = nn.Linear(dim, 9)
 
         # activation functions
-        self.in_activation = Swish()
-        self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+        if activation == "swish":
+            self.in_activation = Swish()
+            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+        elif activation == "sine":
+            self.in_activation = Sine()
+            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
 
         # output activations
         self.softplus = nn.Softplus()

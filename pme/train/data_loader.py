@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import wandb
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.io.fits import getheader
 from astropy.nddata import block_reduce, block_replicate
@@ -15,8 +16,8 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
-from scipy.import ndimage
-from sunpy.map import Map, all_coordinates_from_map
+from sunpy.coordinates import frames
+from sunpy.map import Map, all_coordinates_from_map, make_fitswcs_header
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
@@ -110,13 +111,13 @@ class GenericDataModule(LightningDataModule):
         # plot coordinates
         ref_time = stokes_vector.shape[0] // 2
         fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
-        im = axs[0].imshow(coordinates[ref_time, :, :, 0].T, origin='lower')
+        im = axs[0].imshow(coordinates[ref_time, :, :, 0], origin='lower')
         fig.colorbar(im)
         axs[0].set_title('t')
-        im = axs[1].imshow(coordinates[ref_time, :, :, 1].T, origin='lower')
+        im = axs[1].imshow(coordinates[ref_time, :, :, 1], origin='lower')
         fig.colorbar(im)
         axs[1].set_title('x')
-        im = axs[2].imshow(coordinates[ref_time, :, :, 2].T, origin='lower')
+        im = axs[2].imshow(coordinates[ref_time, :, :, 2], origin='lower')
         fig.colorbar(im)
         axs[2].set_title('y')
         fig.tight_layout()
@@ -128,7 +129,7 @@ class GenericDataModule(LightningDataModule):
         for l in range(0, stokes_vector.shape[-1], stokes_vector.shape[-1] // 10):
             fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
             for i, label in enumerate(['I', 'Q', 'U', 'V']):
-                im = axs[i].imshow(stokes_vector[ref_time, :, :, i, l].T, vmin=-stokes_min_max[i],
+                im = axs[i].imshow(stokes_vector[ref_time, :, :, i, l], vmin=-stokes_min_max[i],
                                    vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
@@ -141,7 +142,7 @@ class GenericDataModule(LightningDataModule):
         integrated_stokes_vector = np.abs(stokes_vector).sum(-1)
         fig, ax = plt.subplots(1, 4, figsize=(16, 8), dpi=100)
         for i, label in enumerate(['I', 'Q', 'U', 'V']):
-            im = ax[i].imshow(integrated_stokes_vector[ref_time, :, :, i].T)
+            im = ax[i].imshow(integrated_stokes_vector[ref_time, :, :, i], origin='lower')
             ax[i].set_title(label)
             fig.colorbar(im, ax=ax[i])
         fig.tight_layout()
@@ -211,12 +212,12 @@ class TestDataModule(GenericDataModule):
 
         stokes_vector = []
         for f in files:
-            stokes_vector.append(load_test_stokes_profiles(f, psf_file=psf, noise=noise))
-
+            stokes_vector.append(np.load(f)['stokes_profiles'])
         stokes_vector = np.stack(stokes_vector, 0)
+        stokes_vector = add_synthetic_noise(stokes_vector, noise=noise, psf_file=psf)
 
         ref_time = datetime(2024, 1, 1)
-        times = [ref_time + timedelta(minutes=12 * i) for i in range(stokes_vector.shape[0])]
+        times = [ref_time + timedelta(minutes=1 * i) for i in range(stokes_vector.shape[0])]
 
         mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
 
@@ -229,13 +230,17 @@ class HinodeDataModule(GenericDataModule):
         files = [files] if not isinstance(files, list) else files
         files = [sorted(glob.glob(f)) for f in files]  # load wildcards
 
-        stokes_vector = [np.stack([fits.getdata(f) for f in file_list], 0) for file_list in files]
+        stokes_vector = []
+        times = []
+        mu = []
+        for fl in files:
+            stokes_f, time_f, mu_f = self._load_fits(fl)
+            stokes_vector.append(stokes_f)
+            times.append(time_f)
+            mu.append(mu_f)
 
-        stokes_vector = np.stack(stokes_vector, 0, dtype=np.float32)
-
-        stokes_vector = np.moveaxis(stokes_vector, [1, 2, 3], [1, 3, 2])
-
-        times = [parse(getheader(f[0])['DATE_OBS']) for f in files]
+        stokes_vector = np.stack(stokes_vector, 0)
+        mu = np.stack(mu, 0)[..., None]
 
         if lambda_config is None:
             header = getheader(files[0][0])
@@ -259,9 +264,55 @@ class HinodeDataModule(GenericDataModule):
             lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_grid * u.AA,
                              'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
 
-        mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
-
         super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
+
+    def _load_fits(self, files):
+        stokes_vector = np.stack([fits.getdata(f) for f in files], 0, dtype=np.float32)
+
+        # x, Stokes, y, wl --> y, x, Stokes, wl
+        stokes_vector = np.moveaxis(stokes_vector, (0, 1, 2, 3), (1, 2, 0, 3))
+
+        center_idx = len(files) // 2
+        ref_file = files[center_idx]
+        ref_header = getheader(ref_file)
+
+        # construct reference coordinates
+        time = parse(ref_header['DATE_OBS'])
+        scale = (ref_header['XSCALE'], ref_header['YSCALE']) * u.arcsec / u.pixel
+        center_coord = SkyCoord(Tx=ref_header['XCEN'] * u.arcsec, Ty=ref_header['YCEN'] * u.arcsec,
+                                obstime=time, frame=frames.Helioprojective)
+        center_pix = (center_idx, ref_header['CRPIX2']) * u.pix
+
+        # create reference map
+        ref_data = stokes_vector[:, :, 0, 0]
+        map_header = make_fitswcs_header(ref_data, center_coord,
+                                         reference_pixel=center_pix, scale=scale,
+                                         rotation_angle=ref_header['CROTA2'] * u.rad)
+        ref_map = Map(ref_data, map_header)
+
+        # compute mu
+        coords = all_coordinates_from_map(ref_map)
+        radial_distance = np.sqrt(coords.Tx ** 2 + coords.Ty ** 2) / ref_map.rsun_obs
+        mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
+        mu = mu.astype(np.float32)
+
+        # NAXIS1 = 112
+        # NAXIS2 = 512
+        # CDELT1 = 0.0215490000000
+        # CDELT2 = 0.317000000000
+        # XSCALE = 0.297140002251
+        # YSCALE = 0.319979995489
+        # data shape = (4, 512, 112) = Stokes, y, wl
+
+        # plot mu
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=100)
+        im = ax.imshow(mu, origin='lower')
+        fig.colorbar(im)
+        ax.set_title('mu')
+        fig.tight_layout()
+        wandb.log({'mu': fig})
+
+        return stokes_vector, time, mu
 
 
 class FitsDataModule(GenericDataModule):
@@ -291,12 +342,6 @@ class FitsDataModule(GenericDataModule):
         super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
 
 
-def load_test_stokes_profiles(file, psf_file=None, noise=None):
-    stokes_vector = np.load(file)['stokes_profiles']  # (400, 400, 50, 4)
-    stokes_vector = add_synthetic_noise(stokes_vector, noise, psf_file)
-    return stokes_vector
-
-
 def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
     # convolve with psf
     if psf_file is not None:
@@ -318,9 +363,11 @@ def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
                                                        total=flat_stokes_vector.shape[0])], -1)
         stokes_vector = convolved_maps.reshape(stokes_vector.shape)
     if bin > 1:
-        stokes_vector = block_reduce(stokes_vector, (bin, bin, 1, 1), func=np.mean)
+        block_size = (1, bin, bin, 1, 1) if stokes_vector.ndim == 5 else (bin, bin, 1, 1)
+        stokes_vector = block_reduce(stokes_vector, block_size, func=np.mean)
     # add noise
     if noise is not None:
+        np.random.seed(42) # assure reproducibility
         stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
     return stokes_vector
 
@@ -472,22 +519,6 @@ class ParallelConvolution:
 
     def __init__(self, psf):
         self.psf = psf
-
-    def upsample_PSF(self, resOriginal, resTarget):
-        """ 
-        Upsample the PSF on a new resolution
-        Input:
-            -- resOriginal: float
-                Spatial resolution of the original PSF; 116 km for Hinode
-            -- resTarget: float
-                Spatial resolution for the target
-        """
-        
-        # Calculate the ratio between the resolutions
-        ratio = resOriginal / resTarget
-        # Upscale the PSF
-        PSF_upscaled = ndimage.zoom(self.psf, ratio, order=3)
-        self.psf = PSF_upscaled
 
     def conv_f(self, img):
         return fftconvolve(img, self.psf, mode='same')

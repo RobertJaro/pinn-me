@@ -1,0 +1,15 @@
+---
+base_path: "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01"
+data:
+  type: "fits"
+  file: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot.fits"
+  num_workers: 8
+  batch_size: 4096
+logging:
+  project: pinn-me
+  name: muram sunspot
+model:
+  encoding: "gaussian_positional"
+training:
+  epochs: 200
+  check_val_every_n_epoch: 5

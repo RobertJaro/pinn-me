@@ -2,8 +2,9 @@
 
 #PBS -N inversion
 #PBS -A P22100000
-#PBS -q preempt
-#PBS -l select=1:ncpus=8:ngpus=2:mem=64gb
+#PBS -q main
+#PBS -l job_priority=economy
+#PBS -l select=1:ncpus=16:ngpus=4:mem=64gb
 #PBS -l walltime=12:00:00
 
 module load conda/latest
@@ -29,4 +30,8 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #python3 -m pme.inversion --config config/hinode_psf.yaml
 
 
-python3 -m pme.inversion --config config/muram_psf.yaml
+#python3 -m pme.inversion --config config/muram_psf.yaml
+
+#
+python3 -m pme.inversion --config config/muram_sunspot.yaml
+#python3 -m pme.inversion --config config/muram_sunspot_psf.yaml

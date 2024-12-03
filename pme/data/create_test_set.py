@@ -1,6 +1,7 @@
 import argparse
 import glob
 import os.path
+from distutils.command.install_data import install_data
 from multiprocessing import Pool
 
 import matplotlib.pyplot as plt
@@ -257,24 +258,27 @@ def load_parameters(file_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--base_path', type=str, required=True, help='base path for the output data')
+    parser.add_argument('--out_path', type=str, required=True, help='base path for the output data')
+    parser.add_argument('--resolution', type=int, nargs=2, default=[400, 400], help='resolution of the images')
+    parser.add_argument('--n_time_steps', type=int, default=20, help='number of time steps to generate')
     args = parser.parse_args()
 
-    base_path = args.base_path
-    os.makedirs(base_path, exist_ok=True)
+    out_path = args.out_path
+    os.makedirs(out_path, exist_ok=True)
 
-    data_generator = TestSetGenerator()
+    data_generator = TestSetGenerator(nx=args.resolution[0], ny=args.resolution[1])
 
     with Pool(16) as p:
-        p.starmap(data_generator.create_time_step_file, [(t, base_path) for t in range(10)])
+        in_data = [(t, out_path) for t in range(args.n_time_steps)]
+        p.starmap(data_generator.create_time_step_file, in_data)
 
-    profiles = load_profiles(os.path.join(base_path, 'profile_*.npz'))
-    parameters = load_parameters(os.path.join(base_path, 'parameters_*.npz'))
+    profiles = load_profiles(os.path.join(out_path, 'profile_*.npz'))
+    parameters = load_parameters(os.path.join(out_path, 'parameters_*.npz'))
 
-    os.makedirs(os.path.join(base_path, 'images'), exist_ok=True)
+    os.makedirs(os.path.join(out_path, 'images'), exist_ok=True)
     for i in range(profiles.shape[0]):
-        plot_stokes(profiles[i], os.path.join(base_path, 'images', f'stokes_{i:03d}.jpg'))
+        plot_stokes(profiles[i], os.path.join(out_path, 'images', f'stokes_{i:03d}.jpg'))
 
     for i in range(profiles.shape[0]):
         t_step_parameters = {k: v[i] for k, v in parameters.items()}
-        plot_parameters(t_step_parameters, os.path.join(base_path, 'images', f'parameters_{i:03d}.jpg'))
+        plot_parameters(t_step_parameters, os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))

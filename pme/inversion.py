@@ -81,7 +81,7 @@ trainer = Trainer(max_epochs=epochs,
                   num_sanity_val_steps=0,
                   check_val_every_n_epoch=check_val_every_n_epoch,
                   gradient_clip_val=0.1,
-                  reload_dataloaders_every_n_epochs=1,  # reload dataloaders every epoch to avoid oscillating loss
+                  reload_dataloaders_every_n_epochs=5,  # reload dataloaders every 5 epochs to avoid oscillating loss
                   callbacks=[checkpoint_callback, save_callback], )
 
 trainer.fit(me_module, data_module, ckpt_path='last')

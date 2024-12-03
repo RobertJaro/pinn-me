@@ -2,7 +2,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
-from astropy.io import fits
 from astropy.visualization import ImageNormalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
@@ -12,6 +11,7 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.evaluation.loader import to_spherical, to_cartesian
 from pme.model import MEModel, NormalizationModule
 from pme.train.me_atmosphere import MEAtmosphere
+from pme.train.psf import PSF, LoadPSF, NoPSF
 
 
 class MEModule(LightningModule):
@@ -108,19 +108,22 @@ class MEModule(LightningModule):
         stokes_pred = self.normalization(stokes_pred)
 
         loss = self.loss_function(stokes_pred, stokes_true)
-        loss = loss.sum(dim=-1) * self.lambda_stokes[None, :]
-        total_loss = loss.mean()
+        loss = loss.sum(-1)  # sum over wavelength axis
+
+        # logging losses
         I_loss, Q_loss, U_loss, V_loss = loss.mean(dim=0)
+
+        # weighted loss - apply lambda weights for each stokes parameter
+        total_loss = loss * self.lambda_stokes[None, :]
+        total_loss = total_loss.mean()
+
+        assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss}
 
     def convolve_psf(self, I, Q, U, V):
-        # filter_outside = (coords[..., 0] < 0) | (coords[..., 0] > 1) | (coords[..., 1] < 0) | (coords[..., 1] > 1)
-        # mask = torch.ones_like(I)
-        # mask[filter_outside] = torch.nan
-
         psf = self.psf()
         psf = psf[None, :, :, None]
         I = (I * psf).sum(dim=(1, 2))
@@ -250,12 +253,12 @@ class MEModule(LightningModule):
             v_min = integerated_stokes_true[:, :, i].min()
             v_max = integerated_stokes_true[:, :, i].max()
             norm = ImageNormalize(vmin=v_min, vmax=v_max)
-            im = ax[0, i].imshow(integerated_stokes_true[:, :, i].T, norm=norm)
+            im = ax[0, i].imshow(integerated_stokes_true[:, :, i], norm=norm, origin='lower')
             ax[0, i].set_title(f"true - {label}")
             divider = make_axes_locatable(ax[0, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
             fig.colorbar(im, cax=cax)
-            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i].T, norm=norm)
+            im = ax[1, i].imshow(integerated_stokes_pred[:, :, i], norm=norm, origin='lower')
             ax[1, i].set_title(f"pred - {label}")
             divider = make_axes_locatable(ax[1, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -275,43 +278,43 @@ class MEModule(LightningModule):
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b.T, cmap='viridis', vmin=0)
+        im = ax.imshow(b, cmap='viridis', vmin=0, origin='lower')
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(theta.T, cmap='RdBu_r', vmin=0, vmax=np.pi)
+        im = ax.imshow(theta, cmap='RdBu_r', vmin=0, vmax=np.pi, origin='lower')
         ax.set_title("Theta")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 2]
-        im = ax.imshow(chi.T, cmap='twilight', vmin=0, vmax=np.pi)
+        im = ax.imshow(chi, cmap='twilight', vmin=0, vmax=np.pi, origin='lower')
         ax.set_title("Chi")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 3]
-        im = ax.imshow(parameters['b0'].T)
+        im = ax.imshow(parameters['b0'], origin='lower')
         ax.set_title("B0")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 4]
-        im = ax.imshow(parameters['b1'].T)
+        im = ax.imshow(parameters['b1'], origin='lower')
         ax.set_title("B1")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 0]
-        im = ax.imshow(parameters['vmac'].T)
+        im = ax.imshow(parameters['vmac'], origin='lower')
         ax.set_title("Vmac")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 1]
-        im = ax.imshow(parameters['damping'].T)
+        im = ax.imshow(parameters['damping'], origin='lower')
         ax.set_title("Damping")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -321,13 +324,13 @@ class MEModule(LightningModule):
 
         ax = axs[1, 3]
         vdop_max = np.abs(parameters['vdop']).max()
-        im = ax.imshow(parameters['vdop'].T, cmap='RdBu_r', vmin=-vdop_max, vmax=vdop_max)
+        im = ax.imshow(parameters['vdop'], cmap='RdBu_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')
         ax.set_title("Vdop")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 4]
-        im = ax.imshow(parameters['kl'].T)
+        im = ax.imshow(parameters['kl'], origin='lower')
         ax.set_title("Kl")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -346,7 +349,7 @@ class MEModule(LightningModule):
         fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
         ax = axs[0]
         bx_max = np.abs(b_xyz[..., 0]).max()
-        im = ax.imshow(b_xyz[..., 0].T, cmap='gray', vmin=-bx_max, vmax=bx_max)
+        im = ax.imshow(b_xyz[..., 0], cmap='gray', vmin=-bx_max, vmax=bx_max, origin='lower')
         ax.set_title("Bx")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -354,7 +357,7 @@ class MEModule(LightningModule):
 
         ax = axs[1]
         by_max = np.abs(b_xyz[..., 1]).max()
-        im = ax.imshow(b_xyz[..., 1].T, cmap='gray', vmin=-by_max, vmax=by_max)
+        im = ax.imshow(b_xyz[..., 1], cmap='gray', vmin=-by_max, vmax=by_max, origin='lower')
         ax.set_title("By")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -362,7 +365,7 @@ class MEModule(LightningModule):
 
         ax = axs[2]
         bz_max = np.abs(b_xyz[..., 2]).max()
-        im = ax.imshow(b_xyz[..., 2].T, cmap='gray', vmin=-bz_max, vmax=bz_max)
+        im = ax.imshow(b_xyz[..., 2], cmap='gray', vmin=-bz_max, vmax=bz_max, origin='lower')
         ax.set_title("Bz")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -371,54 +374,3 @@ class MEModule(LightningModule):
         plt.tight_layout()
         wandb.log({"B": fig})
         plt.close('all')
-
-
-class PSF(nn.Module):
-
-    def __init__(self, shape, file):
-        super().__init__()
-        assert len(shape) == 2 and shape[0] % 2 == 1 and shape[1] % 2 == 1, "Invalid PSF shape"
-        psf = torch.ones(*shape, dtype=torch.float32) * -1
-        psf[shape[0] // 2, shape[1] // 2] = 1
-        #
-        psf = np.load(file)['PSF']
-        psf = torch.tensor(psf, dtype=torch.float32)
-        self.psf = nn.Parameter(psf, requires_grad=False)
-        self.activation = nn.Softplus()
-
-    def forward(self):
-        return self.psf
-
-
-class LoadPSF(nn.Module):
-
-    def __init__(self, file, crop=None):
-        super().__init__()
-        #
-        if file.endswith('.npz'):
-            psf = np.load(file)['PSF']
-        elif file.endswith('.fits'):
-            psf = fits.getdata(file).astype(np.float32)
-        else:
-            raise ValueError(f"Invalid PSF file: {file}")
-        if crop is not None:
-            psf = psf[crop[0]:crop[1], crop[2]:crop[3]]
-        psf = torch.tensor(psf, dtype=torch.float32)
-        self.psf = nn.Parameter(psf, requires_grad=False)
-        self.psf_shape = psf.shape
-
-    def forward(self):
-        return self.psf
-
-
-class NoPSF(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        psf = torch.ones(1, 1, dtype=torch.float32)
-        self.psf = nn.Parameter(psf, requires_grad=False)
-        self.psf_shape = psf.shape
-
-    def forward(self):
-        return self.psf

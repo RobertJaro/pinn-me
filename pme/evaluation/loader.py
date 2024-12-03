@@ -22,11 +22,11 @@ class PINNMEOutput:
         self.lambda_config = state['lambda_config']
         self.data_range = state['data_range']
 
-        self.forward_model = MEAtmosphere(**self.lambda_config)
+        self.forward_model = MEAtmosphere(**self.lambda_config).to(self.device)
         self.forward_model = nn.DataParallel(self.forward_model)
         self.forward_model.eval()
 
-    def load(self, coords, batch_size=int(2**13), mu=None, progress=True):
+    def load(self, coords, batch_size=int(2**13), mu=None, progress=True, compute_jacobian=False):
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
 
@@ -41,14 +41,20 @@ class PINNMEOutput:
             mu_batch = mu[i * batch_size:(i + 1) * batch_size].to(self.device)
 
             pred = self.parameter_model(batch)
-            I, Q, U, V = self.forward_model(**pred, mu=mu_batch)
+            # workaround to compute jacobian for all parameters
+            profile_keys = ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl']
+            input_tensor = torch.cat([pred[key] for key in profile_keys], dim=-1)
+            I, Q, U, V = self.forward_model(**{k: input_tensor[..., i:i+1] for i, k in enumerate(profile_keys)}, mu=mu_batch)
 
-            stokes = torch.stack([I, Q, U, V], dim=-1)
-            stokes_integrated = stokes.sum(dim=-2)
-            jac_params = {k: jacobian(stokes_integrated, pred[k]) for k in pred.keys()}
+            stokes = torch.stack([I, Q, U, V], dim=-2)
 
-            for k in jac_params.keys():
-                pred[f'jacobian_{k}'] = jac_params[k]
+            if compute_jacobian:
+                flat_stokes = stokes.reshape((*stokes.shape[:-2], -1))
+                jac_params = [jacobian(flat_stokes[..., i:i+1], input_tensor).detach().cpu() for i in range(flat_stokes.shape[-1])]
+                jac_params = torch.cat(jac_params, -2).reshape(*stokes.shape, jac_params[0].shape[-1])
+                for i, key in enumerate(profile_keys):
+                    pred[f'jacobian_{key}'] = jac_params[..., i]
+
             pred['I'] = I
             pred['Q'] = Q
             pred['U'] = U

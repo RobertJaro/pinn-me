@@ -1,0 +1,21 @@
+---
+base_path: "/glade/work/rjarolim/pinn_me/hinode/20240509_v03"
+data:
+  type: "hinode"
+  files:
+    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_132027/*.fits"
+    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_140506/*.fits"
+    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_172852/*.fits"
+    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240510_112323/*.fits"
+    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240510_140508/*.fits"
+  num_workers: 8
+  batch_size: 4096
+logging:
+  project: pinn-me
+  group: "hinode"
+  name: "2024-05-09"
+model:
+  encoding: "gaussian_positional"
+training:
+  epochs: 500
+  check_val_every_n_epoch: 5

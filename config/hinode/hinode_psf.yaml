@@ -1,0 +1,20 @@
+---
+base_path: "/glade/work/rjarolim/pinn_me/hinode/hinode_psf_v01"
+data:
+  type: "hinode"
+  files: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode/20070105_235907/*.fits"
+  num_workers: 8
+  batch_size: 2048
+logging:
+  project: pinn-me
+  tags: ["hinode"]
+  name: Hinode PSF
+model:
+  encoding: "gaussian_positional"
+training:
+  epochs: 500
+  check_val_every_n_epoch: 5
+  psf_config:
+    type: load
+    file: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode_psf_0.16.fits"
+    crop: [18, -18, 18, -18]
