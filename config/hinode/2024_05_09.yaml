@@ -1,13 +1,12 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/hinode/20240509_v03"
+base_path: "/glade/work/rjarolim/pinn_me/hinode/20240509_v04"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hinode/20240509_v04"
 data:
   type: "hinode"
   files:
     - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_132027/*.fits"
-    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_140506/*.fits"
-    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_172852/*.fits"
-    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240510_112323/*.fits"
-    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240510_140508/*.fits"
+#    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_140506/*.fits"
+#    - "/glade/work/rjarolim/data/inversion/hinode_2024_05/20240509_172852/*.fits"
   num_workers: 8
   batch_size: 4096
 logging:
@@ -17,5 +16,5 @@ logging:
 model:
   encoding: "gaussian_positional"
 training:
-  epochs: 500
+  epochs: 200
   check_val_every_n_epoch: 5

@@ -1,5 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/hinode/hinode_v01"
+base_path: "/glade/work/rjarolim/pinn_me/hinode/20070105_v01"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hinode/20070105_v01"
 data:
   type: "hinode"
   files: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode/20070105_235907/*.fits"
@@ -8,7 +9,7 @@ data:
 logging:
   project: pinn-me
   tags: ["hinode"]
-  name: Hinode
+  name: "2007-01-05"
 model:
   encoding: "gaussian_positional"
 training:

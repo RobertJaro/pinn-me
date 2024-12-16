@@ -40,30 +40,30 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #python3 -m pme.inversion --config config/test_set/static_psf.yaml --noise 0.0
 #python3 -m pme.inversion --config config/test_set/static_psf.yaml --noise 1.0e-4
 #python3 -m pme.inversion --config config/test_set/static_psf.yaml --noise 1.0e-3
-#python3 -m pme.inversion --config config/test_set/static_psf.yaml --noise 1.0e-2
+python3 -m pme.inversion --config config/test_set/static_psf.yaml --noise 1.0e-2
 
 #################################################################################
 # convert to npz files
 
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/clear_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/clear_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_clear_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_clear_v01.npz
+#python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/clear_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/clear_v01.npz
+#python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_clear_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_clear_v01.npz
+#
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_0.0_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-4_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-4_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-3_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-3_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-2_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-2_v01.npz
 
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_0.0_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-4_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-4_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-3_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-3_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-2_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/no_psf_1.0e-2_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_0.0_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_0.0_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-4_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-4_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-3_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-3_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-2_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-2_v01.npz
 
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_0.0_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_0.0_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-4_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-4_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-3_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-3_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/psf_1.0e-2_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/psf_1.0e-2_v01.npz
-
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_0.0_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_0.0_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-4_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-4_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-3_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-3_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-2_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-2_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_0.0_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_0.0_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-4_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-4_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-3_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-3_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/static_psf_1.0e-2_v02/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/static_psf_1.0e-2_v01.npz
 
 #################################################################################
 # plot performance as a function of noise
 
-#python3 -i -m pme.evaluation.test_set.compare_noise --reference '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/parameters_009.npz' --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set' --output '/glade/work/rjarolim/pinn_me/test_set/evaluation'
+python3 -i -m pme.evaluation.test_set.compare_noise --reference '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/parameters_009.npz' --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set' --output '/glade/work/rjarolim/pinn_me/test_set/evaluation'

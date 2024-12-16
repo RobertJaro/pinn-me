@@ -52,6 +52,7 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
 class GenericDataModule(LightningDataModule):
 
     def __init__(self, stokes_vector, mu, times, lambda_config,
+                 coordinates=None,
                  seconds_per_dt=3600, pixel_per_ds=1e2,
                  batch_size=4096, num_workers=None):
         super().__init__()
@@ -80,11 +81,17 @@ class GenericDataModule(LightningDataModule):
         normalized_times = [(t - self.ref_time).total_seconds() / seconds_per_dt for t in times]
         normalized_times = np.array(normalized_times, dtype=np.float32)
 
-        coordinates = np.stack(np.meshgrid(
-            normalized_times,
-            np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - (stokes_vector.shape[1] - 1) / 2,
-            np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - (stokes_vector.shape[2] - 1) / 2,
-            indexing='ij'), -1, dtype=np.float32)
+        if coordinates is None:
+            coordinates = np.stack(np.meshgrid(
+                normalized_times,
+                np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - (stokes_vector.shape[1] - 1) / 2,
+                np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - (stokes_vector.shape[2] - 1) / 2,
+                indexing='ij'), -1, dtype=np.float32)
+        else:
+            print('Using provided coordinates', coordinates.shape, stokes_vector.shape)
+            time_coord = np.ones((*coordinates.shape[:-1], 1), dtype=np.float32)
+            time_coord = np.einsum('...i,i->...i', time_coord, normalized_times)
+            coordinates = np.concatenate([time_coord, coordinates], -1)
 
         coordinates[..., 1] /= self.pixel_per_ds  # x
         coordinates[..., 2] /= self.pixel_per_ds  # y
@@ -98,10 +105,10 @@ class GenericDataModule(LightningDataModule):
         self.value_range = np.stack([stokes_vector.min((0, 1, 2, -1)),
                                      stokes_vector.max((0, 1, 2, -1))], -1)
         print('VALUE RANGE')
-        print(f'Stokes-I: {self.value_range[0, 0]:.2f} - {self.value_range[0, 1]:.2f}')
-        print(f'Stokes-Q: {self.value_range[1, 0]:.2f} - {self.value_range[1, 1]:.2f}')
-        print(f'Stokes-U: {self.value_range[2, 0]:.2f} - {self.value_range[2, 1]:.2f}')
-        print(f'Stokes-V: {self.value_range[3, 0]:.2f} - {self.value_range[3, 1]:.2f}')
+        print(f'Stokes-I: {self.value_range[0, 0]:.3f} - {self.value_range[0, 1]:.3f}')
+        print(f'Stokes-Q: {self.value_range[1, 0]:.3f} - {self.value_range[1, 1]:.3f}')
+        print(f'Stokes-U: {self.value_range[2, 0]:.3f} - {self.value_range[2, 1]:.3f}')
+        print(f'Stokes-V: {self.value_range[3, 0]:.3f} - {self.value_range[3, 1]:.3f}')
 
         print('Coordinate Range')
         print(f'Time: {self.data_range[0, 0]:.2f} - {self.data_range[0, 1]:.2f} ({coordinates.shape[0]})')
@@ -344,15 +351,18 @@ class FitsDataModule(GenericDataModule):
 
 def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
     # convolve with psf
+    if bin > 1:
+        block_size = (1, bin, bin, 1, 1) if stokes_vector.ndim == 5 else (bin, bin, 1, 1)
+        stokes_vector = block_reduce(stokes_vector, block_size, func=np.mean)
     if psf_file is not None:
         if psf_file.endswith('.npy'):
+            psf = np.load(psf_file)
+        elif psf_file.endswith('.npz'):
             psf = np.load(psf_file)['PSF']
         elif psf_file.endswith('.fits'):
             psf = fits.getdata(psf_file).astype(np.float32)
         else:
             raise ValueError('Invalid psf file format')
-        psf = block_replicate(psf, (bin, bin))
-        psf /= psf.sum()  # assure valid psf
         print('CONVOLVING WITH PSF: ', psf.shape)
         # stokes vector (x, y, lambda); psf (x, y)
         flat_stokes_vector = stokes_vector.reshape(*stokes_vector.shape[:2], -1)
@@ -362,12 +372,9 @@ def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
             convolved_maps = np.stack([r for r in tqdm(p.imap(conv.conv_f, flat_stokes_vector),
                                                        total=flat_stokes_vector.shape[0])], -1)
         stokes_vector = convolved_maps.reshape(stokes_vector.shape)
-    if bin > 1:
-        block_size = (1, bin, bin, 1, 1) if stokes_vector.ndim == 5 else (bin, bin, 1, 1)
-        stokes_vector = block_reduce(stokes_vector, block_size, func=np.mean)
     # add noise
     if noise is not None:
-        np.random.seed(42) # assure reproducibility
+        np.random.seed(42)  # assure reproducibility
         stokes_vector += np.random.normal(0, noise, stokes_vector.shape)
     return stokes_vector
 

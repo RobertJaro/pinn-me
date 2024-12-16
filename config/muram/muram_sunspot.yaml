@@ -1,8 +1,9 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01"
+base_path: "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hinode/muram_sunspot_v04"
 data:
   type: "fits"
-  file: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot.fits"
+  file: "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot_v2.fits"
   num_workers: 8
   batch_size: 4096
 logging:
@@ -11,5 +12,5 @@ logging:
 model:
   encoding: "gaussian_positional"
 training:
-  epochs: 200
+  epochs: 100
   check_val_every_n_epoch: 5

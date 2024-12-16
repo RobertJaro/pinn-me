@@ -46,11 +46,19 @@ static_paths = {
 }
 
 pymilne_1D = {
-    'Clear': os.path.join(input_path, 'pymilne_1D_clear_v01.npz'),
-    'PSF': os.path.join(input_path, 'pymilne_1D_1.0e-8_v01.npz'),
-    '1e-4': os.path.join(input_path, 'pymilne_1D_1.0e-4_v01.npz'),
-    '1e-3': os.path.join(input_path, 'pymilne_1D_1.0e-3_v01.npz'),
-    '1e-2': os.path.join(input_path, 'pymilne_1D_1.0e-2_v01.npz'),
+    'Clear': os.path.join(input_path, 'pymilne_testset_1D_clear_v01.npz'),
+    'PSF': os.path.join(input_path, 'pymilne_testset_1D_1.0e-8_v01.npz'),
+    '1e-4': os.path.join(input_path, 'pymilne_testset_1D_1.0e-4_v01.npz'),
+    '1e-3': os.path.join(input_path, 'pymilne_testset_1D_1.0e-3_v01.npz'),
+    '1e-2': os.path.join(input_path, 'pymilne_testset_1D_1.0e-2_v01.npz'),
+}
+
+pymilne_2D = {
+    'Clear': None,
+    'PSF': os.path.join(input_path,   'pymilne_testset_2D_1e-8_v01.npz'),
+    '1e-4': os.path.join(input_path,  'pymilne_testset_2D_1e-4_v01.npz'),
+    '1e-3': os.path.join(input_path,  'pymilne_testset_2D_1e-3_v01.npz'),
+    '1e-2': os.path.join(input_path,  'pymilne_testset_2D_1e-2_v01.npz'),
 }
 
 parameters_true = np.load(ref_file)
@@ -127,31 +135,48 @@ for key, path in pymilne_1D.items():
         metrics = _evaluate(b_xyz, b_true)
         pymilne_1D_b[key] = {'b_xyz': b_xyz, 'b_los': b_los, 'b_trv': b_trv, 'azi': azi, **metrics}
 
+pymilne_2D_b = {}
+for key, path in pymilne_2D.items():
+    if path:
+        data = np.load(path)
+        b_field = data['b_field'].T
+        theta = data['theta'].T
+        chi = data['chi'].T
+        b_xyz = to_cartesian(b_field, theta, chi % np.pi)
+        b_los = b_field * np.cos(theta)
+        b_trv = b_field * np.sin(theta)
+        azi = chi % np.pi
+        metrics = _evaluate(b_xyz, b_true)
+        pymilne_2D_b[key] = {'b_xyz': b_xyz, 'b_los': b_los, 'b_trv': b_trv, 'azi': azi, **metrics}
+
+
 ########################################################################################################################
 # plot noise comparison
 
 x_labels = no_psf_paths.keys()
 
-fig, axs = plt.subplots(2, 1, figsize=(5, 5))
+fig, axs = plt.subplots(2, 1, figsize=(6, 4.5))
 
 ax = axs[0]
-ax.plot(range(1, 5), [val['E_n'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
-ax.plot(range(0, 5), [val['E_n'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
 ax.plot(range(0, 5), [val['E_n'] for val in static_b.values()], marker='o', label='PINN ME Static', alpha=0.5)
+ax.plot(range(0, 5), [val['E_n'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
+ax.plot(range(1, 5), [val['E_n'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
 ax.plot(range(0, 5), [val['E_n'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne 1D', alpha=0.5)
+ax.plot(range(1, 5), [val['E_n'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne 2D', alpha=0.5)
 
 ax.set_ylabel(r'$E_n$', fontsize=18)
 
 ax = axs[1]
-ax.plot(range(1, 5), [val['c_vec'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
-ax.plot(range(0, 5), [val['c_vec'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
 ax.plot(range(0, 5), [val['c_vec'] for val in static_b.values()], marker='o', label='PINN ME Static', alpha=0.5)
+ax.plot(range(0, 5), [val['c_vec'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
+ax.plot(range(1, 5), [val['c_vec'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
 ax.plot(range(0, 5), [val['c_vec'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne 1D', alpha=0.5)
+ax.plot(range(1, 5), [val['c_vec'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne 2D', alpha=0.5)
 
 ax.set_xlabel('Noise level', fontsize=14)
 ax.set_ylabel(r'$c_{vec}$', fontsize=18)
 
-axs[1].legend(loc='lower left', fancybox=True, framealpha=0.7, fontsize=13)
+axs[0].legend(loc='lower left', fancybox=True, framealpha=0.7, fontsize=13)
 [ax.set_xticks(range(0, 5)) for ax in axs]
 [ax.set_xticklabels(x_labels) for ax in axs]
 
@@ -163,7 +188,7 @@ plt.close(fig)
 # plot example images for 1e-3
 target_noise = '1e-2'
 
-fig, axs = plt.subplots(5, 3, figsize=(5, 8))
+fig, axs = plt.subplots(6, 3, figsize=(6, 12.5))
 
 im_los = axs[0, 0].imshow(true_data['b_los'], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[0, 1].imshow(true_data['b_trv'], cmap='cividis', vmin=0, vmax=1000)
@@ -185,15 +210,19 @@ im_los = axs[4, 0].imshow(pymilne_1D_b[target_noise]['b_los'], cmap='RdBu_r', vm
 im_trv = axs[4, 1].imshow(pymilne_1D_b[target_noise]['b_trv'], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[4, 2].imshow(np.rad2deg(pymilne_1D_b[target_noise]['azi']), cmap='twilight', vmin=0, vmax=180)
 
-divider = make_axes_locatable(axs[4, 0])
+im_los = axs[5, 0].imshow(pymilne_2D_b[target_noise]['b_los'], cmap='RdBu_r', vmin=-1000, vmax=1000)
+im_trv = axs[5, 1].imshow(pymilne_2D_b[target_noise]['b_trv'], cmap='cividis', vmin=0, vmax=1000)
+im_azi = axs[5, 2].imshow(np.rad2deg(pymilne_2D_b[target_noise]['azi']), cmap='twilight', vmin=0, vmax=180)
+
+divider = make_axes_locatable(axs[-1, 0])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
 fig.colorbar(im_los, cax=cax, orientation='horizontal', label='$B_{LOS}$ [G]')
 
-divider = make_axes_locatable(axs[4, 1])
+divider = make_axes_locatable(axs[-1, 1])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
 fig.colorbar(im_trv, cax=cax, orientation='horizontal', label='$B_{TRV}$ [G]')
 
-divider = make_axes_locatable(axs[4, 2])
+divider = make_axes_locatable(axs[-1, 2])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
 fig.colorbar(im_azi, cax=cax, orientation='horizontal', label='Azimuth [deg]')
 
@@ -205,6 +234,7 @@ axs[1, 0].set_ylabel('PINN ME Static', fontsize=12)
 axs[2, 0].set_ylabel('PINN ME', fontsize=12)
 axs[3, 0].set_ylabel('PINN ME PSF', fontsize=12)
 axs[4, 0].set_ylabel('PyMilne 1D', fontsize=12)
+axs[5, 0].set_ylabel('PyMilne 2D', fontsize=12)
 
 fig.tight_layout()
 fig.savefig(f'{output_path}/comparison.png', transparent=True, dpi=300)

@@ -23,7 +23,13 @@ python3 -m pme.inversion --config config/hinode/2024_05_09.yaml
 #################################################################################
 # convert to npz files
 
-#python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_set/clear_v01/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/clear_v01.npz
+#python3 -m pme.evaluation.pme_to_npz --input "/glade/work/rjarolim/pinn_me/hinode/20070105_psf_v01/inversion.pme" --output "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode/20070105_psf_v01.npz"
+#python3 -m pme.evaluation.pme_to_npz --input "/glade/work/rjarolim/pinn_me/hinode/20070105_v01/inversion.pme" --output "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode/20070105_v01.npz"
 
 #################################################################################
 # plot performance as a function of noise
+
+#python3 -i -m pme.evaluation.hinode.compare_hinode --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/hinode' --output '/glade/work/rjarolim/pinn_me/hinode/evaluation'
+
+#python3 -i -m pme.evaluation.hinode.load_time_series --input '/glade/work/rjarolim/pinn_me/hinode/20240509_v04/inversion.pme' --output '/glade/work/rjarolim/pinn_me/hinode/20240509_v04/evaluation'
+

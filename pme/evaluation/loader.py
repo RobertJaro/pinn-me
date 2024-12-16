@@ -26,6 +26,10 @@ class PINNMEOutput:
         self.forward_model = nn.DataParallel(self.forward_model)
         self.forward_model.eval()
 
+        self.times = state.get('times', None)
+        self.ref_time = state.get('ref_time', None)
+        self.seconds_per_dt = state.get('seconds_per_dt', None)
+
     def load(self, coords, batch_size=int(2**13), mu=None, progress=True, compute_jacobian=False):
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
@@ -99,13 +103,16 @@ class PINNMEOutput:
 
     def load_time(self, time, **kwargs):
         coords = np.meshgrid(
-            np.linspace(self.data_range[0][0], self.data_range[0][1], self.cube_shape[0], dtype=np.float32),
+            np.ones(1, dtype=np.float32) * self._normalize_time(time),
             np.linspace(self.data_range[1][0], self.data_range[1][1], self.cube_shape[1], dtype=np.float32),
-            np.ones(1, dtype=np.float32) * time,
+            np.linspace(self.data_range[2][0], self.data_range[2][1], self.cube_shape[2], dtype=np.float32),
             indexing='ij')
         coords = np.stack(coords, axis=-1)
 
         return self.load(coords, **kwargs)
+
+    def _normalize_time(self, time):
+        return (time - self.ref_time).total_seconds() / self.seconds_per_dt
 
 
 def to_cartesian(b, inc, azi, disamb=None):
