@@ -16,10 +16,16 @@ parser.add_argument('--reference', type=str, help='the path to the reference fil
 
 args = parser.parse_args()
 
-stokes_vector_ref = fits.getdata(args.ref_stokes).astype(np.float32)
+if args.ref_stokes.endswith('.fits'):
+    stokes_vector_ref = fits.getdata(args.ref_stokes).astype(np.float32)
+elif args.ref_stokes.endswith('.npz'):
+    stokes_vector_ref = np.load(args.ref_stokes)['stokes_profiles'].astype(np.float32)
+else:
+    raise ValueError('Invalid reference Stokes profile file format')
 
 pinnme = PINNMEOutput(args.input)
-parameters = pinnme.load_cube(compute_jacobian=True, batch_size=1024)
+# parameters = pinnme.load_cube(compute_jacobian=True, batch_size=1024)
+parameters = pinnme.load_time(pinnme.times[9], compute_jacobian=True, batch_size=4096)
 
 stokes_vector_pred = np.stack([parameters['I'], parameters['Q'], parameters['U'], parameters['V']], axis=-2)
 stokes_vector_pred = stokes_vector_pred[0] # remove time dimension

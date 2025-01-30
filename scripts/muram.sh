@@ -39,4 +39,4 @@ python3 -i -m pme.evaluation.muram.compare_muram --input '/glade/campaign/hao/ra
 #################################################################################
 # evaluate uncertainty
 
-#python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01/inversion.pme" --output "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v01" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot.fits"
+#python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04/inversion.pme" --output "/glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/data/SIRprofiles_sunspot.fits"

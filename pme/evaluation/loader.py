@@ -31,6 +31,7 @@ class PINNMEOutput:
         self.seconds_per_dt = state.get('seconds_per_dt', None)
 
     def load(self, coords, batch_size=int(2**13), mu=None, progress=True, compute_jacobian=False):
+        batch_size = batch_size * torch.cuda.device_count() if torch.cuda.is_available() else batch_size
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
 

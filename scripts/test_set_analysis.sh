@@ -67,3 +67,7 @@ python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_s
 # plot performance as a function of noise
 
 python3 -i -m pme.evaluation.test_set.compare_noise --reference '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/parameters_009.npz' --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set' --output '/glade/work/rjarolim/pinn_me/test_set/evaluation'
+
+#################################################################################
+# evaluate uncertainty
+python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v02/inversion.pme" --output "/glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v02" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/profile_009.npz"

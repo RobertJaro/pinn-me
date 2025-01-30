@@ -161,20 +161,20 @@ ax = axs[0]
 ax.plot(range(0, 5), [val['E_n'] for val in static_b.values()], marker='o', label='PINN ME Static', alpha=0.5)
 ax.plot(range(0, 5), [val['E_n'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
 ax.plot(range(1, 5), [val['E_n'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
-ax.plot(range(0, 5), [val['E_n'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne 1D', alpha=0.5)
-ax.plot(range(1, 5), [val['E_n'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne 2D', alpha=0.5)
+ax.plot(range(0, 5), [val['E_n'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne', alpha=0.5)
+ax.plot(range(1, 5), [val['E_n'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne PSF', alpha=0.5)
 
-ax.set_ylabel(r'$E_n$', fontsize=18)
+ax.set_ylabel(r'$E_\text{n}$', fontsize=18)
 
 ax = axs[1]
 ax.plot(range(0, 5), [val['c_vec'] for val in static_b.values()], marker='o', label='PINN ME Static', alpha=0.5)
 ax.plot(range(0, 5), [val['c_vec'] for val in no_psf_b.values()], marker='o', label='PINN ME', alpha=0.5)
 ax.plot(range(1, 5), [val['c_vec'] for val in psf_b.values()], marker='o', label='PINN ME PSF', alpha=0.5)
-ax.plot(range(0, 5), [val['c_vec'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne 1D', alpha=0.5)
-ax.plot(range(1, 5), [val['c_vec'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne 2D', alpha=0.5)
+ax.plot(range(0, 5), [val['c_vec'] for val in pymilne_1D_b.values()], marker='o', label='PyMilne', alpha=0.5)
+ax.plot(range(1, 5), [val['c_vec'] for val in pymilne_2D_b.values()], marker='o', label='PyMilne PSF', alpha=0.5)
 
-ax.set_xlabel('Noise level', fontsize=14)
-ax.set_ylabel(r'$c_{vec}$', fontsize=18)
+ax.set_xlabel('Degradation', fontsize=14)
+ax.set_ylabel(r'$C_\text{vec}$', fontsize=18)
 
 axs[0].legend(loc='lower left', fancybox=True, framealpha=0.7, fontsize=13)
 [ax.set_xticks(range(0, 5)) for ax in axs]
@@ -233,8 +233,8 @@ axs[0, 0].set_ylabel('Ground-Truth', fontsize=12)
 axs[1, 0].set_ylabel('PINN ME Static', fontsize=12)
 axs[2, 0].set_ylabel('PINN ME', fontsize=12)
 axs[3, 0].set_ylabel('PINN ME PSF', fontsize=12)
-axs[4, 0].set_ylabel('PyMilne 1D', fontsize=12)
-axs[5, 0].set_ylabel('PyMilne 2D', fontsize=12)
+axs[4, 0].set_ylabel('PyMilne', fontsize=12)
+axs[5, 0].set_ylabel('PyMilne PSF', fontsize=12)
 
 fig.tight_layout()
 fig.savefig(f'{output_path}/comparison.png', transparent=True, dpi=300)
