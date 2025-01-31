@@ -72,7 +72,14 @@ class MESphericalModule(LightningModule):
 
         for key in output.keys():
             if torch.isnan(output[key]).any():
-                print(batch)
+                print(f'coords t: {coords[..., 0].min()} - {coords[..., 0].max()}')
+                print(f'coords x: {coords[..., 1].min()} - {coords[..., 1].max()}')
+                print(f'coords y: {coords[..., 2].min()} - {coords[..., 2].max()}')
+                print(f'coords z: {coords[..., 3].min()} - {coords[..., 3].max()}')
+                print(f'mu: {mu.min()} - {mu.max()}')
+                print(f'stokes_true: {stokes_true.min()} - {stokes_true.max()}')
+                print(f'cartesian_to_spherical_transform: {cartesian_to_spherical_transform.min()} - {cartesian_to_spherical_transform.max()}')
+                print(f'rtp_to_img_transform: {rtp_to_img_transform.min()} - {rtp_to_img_transform.max()}')
                 raise Exception(f"Encountered invalid value (forward). {key} is NaN")
 
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)

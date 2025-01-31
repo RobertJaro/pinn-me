@@ -24,7 +24,7 @@ class SphericalDataModule(LightningDataModule):
 
     def __init__(self, train_config, valid_config, work_directory, seconds_per_dt=36000, Rs_per_ds=1,
                  stokes_normalization=83696.0,
-                 ref_time=datetime(2010, 5, 6, 18, 58), batch_size=4096, num_workers=None):
+                 ref_time=datetime(2010, 5, 1, 18, 58), batch_size=4096, num_workers=None):
         super().__init__()
 
         # train parameters
