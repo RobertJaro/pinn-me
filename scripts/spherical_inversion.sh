@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#PBS -N inversion
+#PBS -N pinn-me
 #PBS -A P22100000
 #PBS -q main
 #PBS -l job_priority=economy
@@ -13,4 +13,4 @@ conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 
-python3 -m pme.inversion_spherical --config config/hmi/hmi_spherical.yaml
+python3 -m pme.inversion_spherical --config config/hmi/hmi_spherical.yaml --reload

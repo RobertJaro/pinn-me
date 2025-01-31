@@ -13,6 +13,7 @@ from pme.train.util import load_yaml_config
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True,
                     help='config file for the simulation')
+parser.add_argument('--reload', action='store_true')
 args, unknown_args = parser.parse_known_args()
 
 config = load_yaml_config(args.config, unknown_args)
@@ -32,7 +33,7 @@ data_config = config['data']
 # type = data_config.pop('type')
 
 data_module_save_path = os.path.join(work_directory, 'data_module.pt')
-if os.path.exists(data_module_save_path):
+if os.path.exists(data_module_save_path) and not args.reload:
     data_module = torch.load(data_module_save_path)
 else:
     data_module = SphericalDataModule(**data_config, work_directory=work_directory)
@@ -74,7 +75,7 @@ trainer = Trainer(max_epochs=epochs,
                   devices=n_gpus if n_gpus > 0 else None,
                   accelerator='gpu' if n_gpus >= 1 else None,
                   strategy='dp' if n_gpus > 1 else None,  # ddp breaks memory and wandb
-                  num_sanity_val_steps=0,
+                  num_sanity_val_steps=-1,
                   check_val_every_n_epoch=check_val_every_n_epoch,
                   gradient_clip_val=0.1,
                   reload_dataloaders_every_n_epochs=5,  # reload dataloaders every 5 epochs to avoid oscillating loss

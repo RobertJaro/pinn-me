@@ -1,9 +1,9 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/hmi/20100510_v01"
-work_directory: "/glade/derecho/scratch/rjarolim/nf2/hmi/20100510_v01"
+base_path: "/glade/work/rjarolim/pinn_me/hmi/20100510_v02"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hmi/20100510_v02"
 data:
   train_config: {data_path: "/glade/work/mmolnar/PINN-ME/HMI/HMI_20100510_720s"}
-  valid_config: {data_path: "/glade/work/mmolnar/PINN-ME/HMI/HMI_20100510_720s", sample_idx: 5}
+  valid_config: {data_path: "/glade/work/mmolnar/PINN-ME/HMI/HMI_20100510_720s", sample_idx: 0}
   num_workers: 16
   batch_size: 16384
 logging:

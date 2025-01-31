@@ -54,11 +54,12 @@ class MESphericalModule(LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_nb):
-        coords = batch['coords']
-        mu = batch['mu']
-        stokes_true = batch['stokes']
-        cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
-        rtp_to_img_transform = batch['rtp_to_img_transform']
+        ds_keys = list(batch.keys())
+        coords = torch.cat([batch[k]['coords'] for k in ds_keys], 0)
+        mu = torch.cat([batch[k]['mu'] for k in ds_keys], 0)
+        stokes_true = torch.cat([batch[k]['stokes'] for k in ds_keys], 0)
+        cartesian_to_spherical_transform = torch.cat([batch[k]['cartesian_to_spherical_transform'] for k in ds_keys], 0)
+        rtp_to_img_transform = torch.cat([batch[k]['rtp_to_img_transform'] for k in ds_keys], 0)
 
         assert not torch.isnan(coords).any(), "Encountered invalid value. coords is NaN"
         assert not torch.isnan(mu).any(), "Encountered invalid value. mu is NaN"
@@ -69,8 +70,12 @@ class MESphericalModule(LightningModule):
         # forward step
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
-                                                               rtp_to_img_transform)
+        for key in output.keys():
+            if torch.isnan(output[key]).any():
+                print(batch)
+                raise Exception(f"Encountered invalid value (forward). {key} is NaN")
+
+        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
 
         forward_params = {'b_field': transformed_output['b_field'],
                           'theta': transformed_output['theta'],
@@ -177,15 +182,15 @@ class MESphericalModule(LightningModule):
 
         parameters = {}
         for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl', 'v_rtp', 'b_rtp']:
-            field = outputs[k].reshape(*self.image_shape[1:3]).cpu().numpy()
+            field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
 
         self.plot_parameter_overview(parameters)
         self.plot_B_rtp(parameters)
         self.plot_v_rtp(parameters)
 
-        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.image_shape[1:3], 4, -1)
-        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.image_shape[1:3], 4, -1)
+        stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.image_shape[:2], 4, -1)
+        stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.image_shape[:2], 4, -1)
 
         self.plot_stokes(stokes_pred, stokes_true)
 
@@ -249,7 +254,7 @@ class MESphericalModule(LightningModule):
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b, cmap='viridis', vmin=0, origin='lower', norm='log')
+        im = ax.imshow(b, cmap='viridis', vmin=.1, origin='lower', norm='log')
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)

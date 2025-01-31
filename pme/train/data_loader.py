@@ -75,9 +75,10 @@ class BatchesDataset(Dataset):
         [os.remove(f) for f in self.batches_file_paths.values()]
 
     def shuffle(self):
-        r = np.random.permutation(list(self.batches_file_paths.values())[0].shape[0])
+        ref_file = list(self.batches_file_paths.values())[0]
+        r = np.random.permutation(np.load(ref_file, mmap_mode='r').shape[0])
         for bf in self.batches_file_paths.values():
-            data = np.load(bf, mmap_mode='r')
+            data = np.load(bf)
             data = data[r]
             np.save(bf, data)
 
@@ -640,3 +641,14 @@ def load_Hinode_files(data_dir):
             sp_raster[el, :, :, :] = np.moveaxis(a[0].data, 0, -1)
 
     return sp_raster, dwavelength, wavelength_central
+
+
+def shuffle_async(datasets, num_workers=None):
+    num_workers = num_workers if num_workers is not None else os.cpu_count()
+    with Pool(num_workers) as p:
+        p.map(_shuffle, datasets.values())
+
+
+def _shuffle(ds):
+    ds.shuffle()
+    return None
