@@ -1,6 +1,7 @@
 import glob
 import itertools
 import os
+import uuid
 from datetime import datetime, timedelta
 from multiprocessing import Pool
 
@@ -11,7 +12,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.io.fits import getheader
-from astropy.nddata import block_reduce, block_replicate
+from astropy.nddata import block_reduce
 from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
@@ -47,6 +48,62 @@ def apply_along_space(f, np_array, axes, progress_bar=True):
     for slic in iter:
         np_array[slic] = f(np_array[slic])
     return np_array
+
+
+class BatchesDataset(Dataset):
+
+    def __init__(self, batches_file_paths, batch_size=2 ** 13, **kwargs):
+        """Data set for lazy loading a pre-batched numpy data array.
+
+        :param batches_path: path to the numpy array.
+        """
+        self.batches_file_paths = batches_file_paths
+        self.batch_size = int(batch_size)
+
+    def __len__(self):
+        ref_file = list(self.batches_file_paths.values())[0]
+        n_batches = np.ceil(np.load(ref_file, mmap_mode='r').shape[0] / self.batch_size)
+        return n_batches.astype(np.int32)
+
+    def __getitem__(self, idx):
+        # lazy load data
+        data = {k: np.copy(np.load(bf, mmap_mode='r')[idx * self.batch_size: (idx + 1) * self.batch_size])
+                for k, bf in self.batches_file_paths.items()}
+        return data
+
+    def clear(self):
+        [os.remove(f) for f in self.batches_file_paths.values()]
+
+    def shuffle(self):
+        r = np.random.permutation(list(self.batches_file_paths.values())[0].shape[0])
+        for bf in self.batches_file_paths.values():
+            data = np.load(bf, mmap_mode='r')
+            data = data[r]
+            np.save(bf, data)
+
+
+class TensorsDataset(BatchesDataset):
+
+    def __init__(self, tensors, work_directory, filter_nans=True, shuffle=True, ds_name=None, **kwargs):
+        # filter nan entries
+        nan_mask = np.any([np.any(np.isnan(t), axis=tuple(range(1, t.ndim))) for t in tensors.values()], axis=0)
+        if nan_mask.sum() > 0 and filter_nans:
+            print(f'Filtering {nan_mask.sum()} nan entries')
+            tensors = {k: v[~nan_mask] for k, v in tensors.items()}
+
+        # shuffle data
+        if shuffle:
+            r = np.random.permutation(list(tensors.values())[0].shape[0])
+            tensors = {k: v[r] for k, v in tensors.items()}
+
+        ds_name = uuid.uuid4() if ds_name is None else ds_name
+        batches_paths = {}
+        for k, v in tensors.items():
+            coords_npy_path = os.path.join(work_directory, f'{ds_name}_{k}.npy')
+            np.save(coords_npy_path, v.astype(np.float32))
+            batches_paths[k] = coords_npy_path
+
+        super().__init__(batches_paths, **kwargs)
 
 
 class GenericDataModule(LightningDataModule):

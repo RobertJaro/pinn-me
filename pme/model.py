@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch import nn
+from torch.distributions import Normal
 
 
 class Swish(nn.Module):
@@ -50,12 +51,8 @@ class MEModel(nn.Module):
             posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "learned_positional":
-            posenc = LearnedPositionalEncoding(num_freqs=20, d_input=in_coords)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "gaussian_positional":
-            posenc = GaussianPositionalEncoding(num_freqs=20, d_input=in_coords)
+        elif encoding == "gaussian":
+            posenc = GaussianPositionalEncoding(d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "linear":
@@ -114,32 +111,100 @@ class MEModel(nn.Module):
 
         return output
 
-class LearnedPositionalEncoding(nn.Module):
 
-    def __init__(self, num_freqs, d_input):
+class MESphericalModel(nn.Module):
+
+    def __init__(self, in_coords, dim=256, encoding='gaussian_positional', activation='sine', num_layers=8):
         super().__init__()
-        frequencies = torch.randn(num_freqs, d_input)
-        self.frequencies = nn.Parameter(frequencies[None], requires_grad=True)
-        self.d_output = d_input * (num_freqs * 2 + 1)
+        # encoding layer
+        if encoding == "periodic":
+            posenc = PeriodicBoundary()
+            d_in = nn.Linear(in_coords + 2, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        if encoding == "positional":
+            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "gaussian":
+            posenc = GaussianPositionalEncoding(d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "linear":
+            self.d_in = nn.Linear(in_coords, dim)
+        else:
+            raise ValueError(f"Unknown encoding: {encoding}")
+
+        # hidden layers
+        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
+        self.linear_layers = nn.ModuleList(lin)
+
+        # output layer
+        self.d_out = nn.Linear(dim, 13)
+
+        # activation functions
+        if activation == "swish":
+            self.in_activation = Swish()
+            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+        elif activation == "sine":
+            self.in_activation = Sine()
+            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        # output activations
+        self.softplus = nn.Softplus()
+        self.register_buffer("c", torch.tensor(3e8))
 
     def forward(self, x):
-        encoded = x[:, None, :] * torch.pi * 2 ** self.frequencies
-        encoded = encoded.reshape(x.shape[0], -1)
-        encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
-        return encoded
+        x = self.in_activation(self.d_in(x))
+        for l, a in zip(self.linear_layers, self.activations):
+            x = a(l(x))
+        params = self.d_out(x)
+        #
+        b_scale = 10 ** params[..., 0:1]
+        b_x = params[..., 1:2] * b_scale
+        b_y = params[..., 2:3] * b_scale
+        b_z = params[..., 3:4] * b_scale
+        #
+        vmac = torch.sigmoid(params[..., 4:5]) * 20e3
+        damping = torch.sigmoid(params[..., 5:6]) * 1
+        b0 = torch.sigmoid(params[..., 6:7])
+        b1 = torch.sigmoid(params[..., 7:8])
+        v_scale = 10 ** params[..., 8:9]
+        v_x = params[..., 9:10] * v_scale
+        v_y = params[..., 10:11] * v_scale
+        v_z = params[..., 11:12] * v_scale
+        kl = torch.sigmoid(params[..., 12:13]) * 100
+        #
+        output = {
+            "b_x": b_x,
+            "b_y": b_y,
+            "b_z": b_z,
+            "vmac": vmac,
+            "damping": damping,
+            "b0": b0,
+            "b1": b1,
+            "v_x": v_x,
+            "v_y": v_y,
+            "v_z": v_z,
+            "kl": kl,
+        }
+
+        return output
 
 
 class GaussianPositionalEncoding(nn.Module):
 
-    def __init__(self, num_freqs, d_input):
+    def __init__(self, d_input, num_freqs=128, scale=64):
         super().__init__()
-        frequencies = torch.randn(num_freqs, d_input)
-        self.frequencies = nn.Parameter(frequencies[None], requires_grad=False)
+        dist = Normal(loc=0, scale=scale)
+        frequencies = dist.sample([num_freqs, d_input])
+        self.frequencies = nn.Parameter(2 * torch.pi * frequencies, requires_grad=False)
         self.d_output = d_input * (num_freqs * 2 + 1)
 
     def forward(self, x):
-        encoded = x[:, None, :] * self.frequencies
-        encoded = encoded.reshape(x.shape[0], -1)
+        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies)
+        encoded = encoded.reshape(*x.shape[:-1], -1)
         encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
         return encoded
 
@@ -176,6 +241,6 @@ class NormalizationModule(nn.Module):
         self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
 
     def forward(self, stokes):
-        stokes = stokes / self.value_range[..., 1] # normalize by max value (I = [0, 1]; QUV = [-1, 1])
+        stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
         stokes = torch.asinh(stokes * 1e2) / self.stretch
         return stokes
