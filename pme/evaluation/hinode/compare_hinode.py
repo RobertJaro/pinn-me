@@ -88,7 +88,7 @@ cax.xaxis.set_label_position('top')
 
 divider = make_axes_locatable(axs[0, 2])
 cax = divider.append_axes('top', size='5%', pad=0.05)
-fig.colorbar(im_azi, cax=cax, orientation='horizontal', label=r'Azimuth [deg]')
+fig.colorbar(im_azi, cax=cax, orientation='horizontal', label=r'$\phi$ [deg]')
 cax.xaxis.set_ticks_position('top')
 cax.xaxis.set_label_position('top')
 
@@ -146,7 +146,7 @@ def _plot_subframe(subframe, name, ax_color, b_max=2.0e3):
 
     divider = make_axes_locatable(axs[0, 2])
     cax = divider.append_axes('top', size='5%', pad=0.05)
-    fig.colorbar(im_azi, cax=cax, orientation='horizontal', label=r'Azimuth [deg]')
+    fig.colorbar(im_azi, cax=cax, orientation='horizontal', label=r'$\phi$ [deg]')
     cax.xaxis.set_ticks_position('top')
     cax.xaxis.set_label_position('top')
 

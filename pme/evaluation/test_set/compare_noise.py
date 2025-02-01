@@ -216,25 +216,28 @@ im_azi = axs[5, 2].imshow(np.rad2deg(pymilne_2D_b[target_noise]['azi']), cmap='t
 
 divider = make_axes_locatable(axs[-1, 0])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
-fig.colorbar(im_los, cax=cax, orientation='horizontal', label='$B_{LOS}$ [G]')
+cbar = fig.colorbar(im_los, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$B_\text{LOS}$ [G]', size=12)
 
 divider = make_axes_locatable(axs[-1, 1])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
-fig.colorbar(im_trv, cax=cax, orientation='horizontal', label='$B_{TRV}$ [G]')
+cbar = fig.colorbar(im_trv, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$B_\text{TRV}$ [G]', size=12)
 
 divider = make_axes_locatable(axs[-1, 2])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
-fig.colorbar(im_azi, cax=cax, orientation='horizontal', label='Azimuth [deg]')
+cbar = fig.colorbar(im_azi, cax=cax, orientation='horizontal')
+cbar.set_label(label='$\phi$ [deg]', size=12)
 
 [ax.set_xticks([]) for ax in axs.ravel()]
 [ax.set_yticks([]) for ax in axs.ravel()]
 
-axs[0, 0].set_ylabel('Ground-Truth', fontsize=12)
-axs[1, 0].set_ylabel('PINN ME Static', fontsize=12)
-axs[2, 0].set_ylabel('PINN ME', fontsize=12)
-axs[3, 0].set_ylabel('PINN ME PSF', fontsize=12)
-axs[4, 0].set_ylabel('PyMilne', fontsize=12)
-axs[5, 0].set_ylabel('PyMilne PSF', fontsize=12)
+axs[0, 0].set_ylabel('Ground-Truth', fontsize=14)
+axs[1, 0].set_ylabel('PINN ME Static', fontsize=14)
+axs[2, 0].set_ylabel('PINN ME', fontsize=14)
+axs[3, 0].set_ylabel('PINN ME PSF', fontsize=14)
+axs[4, 0].set_ylabel('PyMilne', fontsize=14)
+axs[5, 0].set_ylabel('PyMilne PSF', fontsize=14)
 
 fig.tight_layout()
 fig.savefig(f'{output_path}/comparison.png', transparent=True, dpi=300)

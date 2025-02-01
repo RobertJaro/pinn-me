@@ -84,19 +84,22 @@ im_azi = axs[4, 2].imshow(np.rad2deg(results['PyMilne 2D']['azi']), cmap='twilig
 
 divider = make_axes_locatable(axs[0, 0])
 cax = divider.append_axes('top', size='15%', pad=0.05)
-fig.colorbar(im_los, cax=cax, orientation='horizontal', label='$B_{LOS}$ [G]')
+cbar = fig.colorbar(im_los, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$B_\text{LOS}$ [G]', size=12)
 cax.xaxis.set_ticks_position('top')
 cax.xaxis.set_label_position('top')
 
 divider = make_axes_locatable(axs[0, 1])
 cax = divider.append_axes('top', size='15%', pad=0.05)
-fig.colorbar(im_trv, cax=cax, orientation='horizontal', label='$B_{TRV}$ [G]')
+cbar = fig.colorbar(im_trv, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$B_\text{TRV}$ [G]', size=12)
 cax.xaxis.set_ticks_position('top')
 cax.xaxis.set_label_position('top')
 
 divider = make_axes_locatable(axs[0, 2])
 cax = divider.append_axes('top', size='15%', pad=0.05)
-fig.colorbar(im_azi, cax=cax, orientation='horizontal', label='Azimuth [deg]')
+cbar = fig.colorbar(im_azi, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$\phi$ [deg]', size=12)
 cax.xaxis.set_ticks_position('top')
 cax.xaxis.set_label_position('top')
 
