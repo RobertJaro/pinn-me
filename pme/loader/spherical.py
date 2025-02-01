@@ -110,10 +110,11 @@ class SphericalDataModule(LightningDataModule):
         shuffle_async(datasets, self.num_workers)
         # data loader with iterations based on the largest dataset
         max_ds_len = max([len(ds) for ds in datasets.values()])
+        n_ds_workers = max(self.num_workers // len(datasets), 2)
         loaders = {}
         for i, (name, dataset) in enumerate(datasets.items()):
             sampler = RandomSampler(dataset, replacement=True, num_samples=int(max_ds_len))
-            loaders[name] = DataLoader(dataset, batch_size=None, num_workers=self.num_workers,
+            loaders[name] = DataLoader(dataset, batch_size=None, num_workers=n_ds_workers,
                                        pin_memory=True, sampler=sampler)
         return loaders
 
@@ -220,7 +221,7 @@ class HMISphericalDataset(TensorsDataset):
         stokes = np.stack([I_profile, Q_profile, U_profile, V_profile], -2)
 
         # apply mask filter - coordinates + stokes for normalization
-        radius_mask = radial_distance > 0.98
+        radius_mask = radial_distance > 0.99
         cartesian_coords[radius_mask] = np.nan
         stokes[radius_mask] = np.nan
 

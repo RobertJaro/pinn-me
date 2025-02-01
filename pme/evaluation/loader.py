@@ -87,6 +87,35 @@ class PINNMEOutput:
 
         return parameters
 
+    def load_parameters(self, coords, batch_size=int(2**13), mu=None, progress=True, compute_jacobian=False):
+        batch_size = batch_size * torch.cuda.device_count() if torch.cuda.is_available() else batch_size
+        coords_shape = coords.shape
+        coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
+
+        mu = torch.ones(*coords_tensor.shape[:-1], 1, dtype=torch.float32) if mu is None \
+            else torch.tensor(mu, dtype=torch.float32).reshape(-1, 1)
+        parameters = {}
+
+        n_batches = int(np.ceil(coords_tensor.shape[0] / batch_size))
+        iter_ = tqdm(range(n_batches)) if progress else range(n_batches)
+        for i in iter_:
+            batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
+            mu_batch = mu[i * batch_size:(i + 1) * batch_size].to(self.device)
+
+            pred = self.parameter_model(batch)
+            # workaround to compute jacobian for all parameters
+
+            for key, value in pred.items():
+                if key not in parameters:
+                    parameters[key] = []
+                value = value.detach().cpu().numpy()
+                parameters[key].append(value)
+
+        parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], *value[0].shape[1:])
+                      for key, value in parameters.items()}
+
+        return parameters
+
     def load_profiles(self, parameters):
         tensors = {key: torch.tensor(value, dtype=torch.float32).to(self.device) for key, value in parameters.items()}
         I, Q, U, V = self.forward_model(**tensors)

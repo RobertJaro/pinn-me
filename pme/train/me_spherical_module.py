@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.evaluation.loader import to_spherical, to_cartesian
 from pme.model import NormalizationModule, MESphericalModel
 from pme.train.me_atmosphere import MEAtmosphere
+from pme.train.util import acos_safe, atan2_safe
 
 
 class MESphericalModule(LightningModule):
@@ -121,8 +122,9 @@ class MESphericalModule(LightningModule):
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
-        theta = torch.acos(b_img[..., 2:3] / (b_field + 1e-8))
-        chi = torch.atan2(-b_img[..., 0:1], b_img[..., 1:2])
+
+        theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)

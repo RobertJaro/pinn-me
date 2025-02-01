@@ -1,3 +1,4 @@
+import gc
 import glob
 import itertools
 import os
@@ -103,6 +104,10 @@ class TensorsDataset(BatchesDataset):
             coords_npy_path = os.path.join(work_directory, f'{ds_name}_{k}.npy')
             np.save(coords_npy_path, v.astype(np.float32))
             batches_paths[k] = coords_npy_path
+
+        # cleanup memory to avoid out of memory errors when loading data
+        del tensors
+        gc.collect()
 
         super().__init__(batches_paths, **kwargs)
 

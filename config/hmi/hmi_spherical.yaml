@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/hmi/20100510_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/nf2/hmi/20100510_v02"
+base_path: "/glade/work/rjarolim/pinn_me/hmi/20100510_v03"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hmi/20100510_v03"
 data:
   train_config: {data_path: "/glade/work/mmolnar/PINN-ME/HMI/HMI_20100510_720s"}
   valid_config: {data_path: "/glade/work/mmolnar/PINN-ME/HMI/HMI_20100510_720s", sample_idx: 0}
@@ -14,4 +14,4 @@ model:
   encoding: "gaussian"
 training:
   epochs: 500
-  check_val_every_n_epoch: 1
+  check_val_every_n_epoch: 10
