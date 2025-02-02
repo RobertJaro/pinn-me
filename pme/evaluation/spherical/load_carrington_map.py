@@ -30,18 +30,19 @@ if __name__ == '__main__':
     lon = np.arange(0, 360, resolution)
 
     target_time = pinnme.times[0]
+    normalized_time = pinnme._normalize_time(target_time)
     lat, lon = np.deg2rad(lat), np.deg2rad(lon)
 
     spherical_coords = np.stack(np.meshgrid(
-        [1.], [1], lat, lon, indexing='ij'),
+        [1], lat, lon, indexing='ij'),
         axis=-1)
-    spherical_coords[..., 0] = pinnme._normalize_time(target_time)
-    spherical_coords = spherical_coords[0, 0, :, :]
+    spherical_coords = spherical_coords[0, :, :]
 
-    cartesian_coords = spherical_to_cartesian(spherical_coords[..., 1:])
-    cartesian_coords = np.concatenate([spherical_coords[..., :1], cartesian_coords], axis=-1)
+    cartesian_coords = spherical_to_cartesian(spherical_coords)
+    time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) *  normalized_time
+    coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
 
-    parameter_cube = pinnme.load_parameters(coords=cartesian_coords)
+    parameter_cube = pinnme.load_parameters(coords=coords)
     b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
     b_rtp = vector_cartesian_to_spherical(b_xyz, spherical_coords)
 

@@ -381,7 +381,7 @@ class MESphericalModule(LightningModule):
         v_rtp = parameters['v_rtp']
         v_img = parameters['v_img']
 
-        norm = SymLogNorm(linthresh=10, vmin=-np.nanmax(np.abs(v_rtp)), vmax=np.nanmax(np.abs(v_rtp)))
+        norm = SymLogNorm(linthresh=1, vmin=-np.nanmax(np.abs(v_rtp)), vmax=np.nanmax(np.abs(v_rtp)))
 
         fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
         ax = axs[0, 0]
