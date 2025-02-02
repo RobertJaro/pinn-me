@@ -113,8 +113,7 @@ def image_to_spherical_matrix(lon, lat, latc, lonc, pAng, sin=np.sin, cos=np.cos
         latc) * cos(pAng)
     a33 = cos(lat) * cos(latc) * cos(lon - lonc) + sin(lat) * sin(latc)
 
-    # a_matrix = np.stack([a11, a12, a13, a21, a22, a23, a31, a32, a33], axis=-1)
-    a_matrix = np.stack([a11, a12, a13, a21, a22, a23, a31, a32, a33], axis=-1)
+    a_matrix = np.stack([a31, a32, a33, a21, a22, a23, a11, a12, a13], axis=-1)
     a_matrix = a_matrix.reshape((*a_matrix.shape[:-1], 3, 3))
     return a_matrix
 
