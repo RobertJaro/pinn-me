@@ -13,10 +13,10 @@ conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 
-python3 -m pme.inversion_spherical --config config/hmi/hmi_spherical.yaml
+python3 -m pme.inversion_spherical --config config/hmi/hmi_spherical.yaml --reload
 
 
 ########################################################################################
 # load carrington map
 
-python3 -m pme.evaluation.spherical.load_carrington_map --input "/glade/work/rjarolim/pinn_me/hmi/20100510_v03/inversion.pme" --output "/glade/work/rjarolim/pinn_me/hmi/20100510_v03"
+python3 -i -m pme.evaluation.spherical.load_carrington_map --input "/glade/work/rjarolim/pinn_me/hmi/20100510_v04/inversion.pme" --output "/glade/work/rjarolim/pinn_me/hmi/20100510_v04"

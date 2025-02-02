@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import wandb
 from astropy.visualization import ImageNormalize
+from matplotlib.colors import SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
@@ -65,23 +66,12 @@ class MESphericalModule(LightningModule):
         assert not torch.isnan(coords).any(), "Encountered invalid value. coords is NaN"
         assert not torch.isnan(mu).any(), "Encountered invalid value. mu is NaN"
         assert not torch.isnan(stokes_true).any(), "Encountered invalid value. stokes_true is NaN"
-        assert not torch.isnan(cartesian_to_spherical_transform).any(), "Encountered invalid value. cartesian_to_spherical_transform is NaN"
+        assert not torch.isnan(
+            cartesian_to_spherical_transform).any(), "Encountered invalid value. cartesian_to_spherical_transform is NaN"
         assert not torch.isnan(rtp_to_img_transform).any(), "Encountered invalid value. rtp_to_img_transform is NaN"
 
         # forward step
         output = self.parameter_model(coords)
-
-        for key in output.keys():
-            if torch.isnan(output[key]).any():
-                print(f'coords t: {coords[..., 0].min()} - {coords[..., 0].max()}')
-                print(f'coords x: {coords[..., 1].min()} - {coords[..., 1].max()}')
-                print(f'coords y: {coords[..., 2].min()} - {coords[..., 2].max()}')
-                print(f'coords z: {coords[..., 3].min()} - {coords[..., 3].max()}')
-                print(f'mu: {mu.min()} - {mu.max()}')
-                print(f'stokes_true: {stokes_true.min()} - {stokes_true.max()}')
-                print(f'cartesian_to_spherical_transform: {cartesian_to_spherical_transform.min()} - {cartesian_to_spherical_transform.max()}')
-                print(f'rtp_to_img_transform: {rtp_to_img_transform.min()} - {rtp_to_img_transform.max()}')
-                raise Exception(f"Encountered invalid value (forward). {key} is NaN")
 
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
 
@@ -93,7 +83,6 @@ class MESphericalModule(LightningModule):
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
 
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
-
 
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
@@ -121,17 +110,25 @@ class MESphericalModule(LightningModule):
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
-        b_field = torch.norm(b_img, dim=-1, keepdim=True)
 
+        # xi, eta, zeta
+        # (field, inclination, azimuth) = field, gamma, psi = b_field, theta, chi
+        # b_xi = - field * sin(gamma) * sin(psi)
+        # b_eta = field * sin(gamma) * cos(psi)
+        # b_zeta = field * cos(gamma)
+        b_field = torch.norm(b_img, dim=-1, keepdim=True)
         theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
         chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
+
         v_dop = v_img[..., 2:3]
 
-        return {'b_field': b_field, 'chi': chi, 'theta': theta, 'v_dop': v_dop, 'v_rtp': v_rtp, 'b_rtp': b_rtp}
+        return {'b_field': b_field, 'chi': chi, 'theta': theta, 'v_dop': v_dop,
+                'v_rtp': v_rtp, 'b_rtp': b_rtp, 'v_img': v_img, 'b_img': b_img}
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -155,7 +152,7 @@ class MESphericalModule(LightningModule):
         output = self.parameter_model(coords)
 
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
-                                                               rtp_to_img_transform)
+                                                       rtp_to_img_transform)
 
         forward_params = {'b_field': transformed_output['b_field'],
                           'theta': transformed_output['theta'],
@@ -163,7 +160,6 @@ class MESphericalModule(LightningModule):
                           'vdop': transformed_output['v_dop'],
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
-
 
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
 
@@ -175,7 +171,8 @@ class MESphericalModule(LightningModule):
         diff = torch.abs(stokes_true - stokes_pred)
 
         return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
-                **forward_params, 'b_rtp': transformed_output['b_rtp'], 'v_rtp': transformed_output['v_rtp']}
+                **forward_params, 'b_rtp': transformed_output['b_rtp'], 'v_rtp': transformed_output['v_rtp'],
+                'b_img': transformed_output['b_img'], 'v_img': transformed_output['v_img']}
 
     def validation_epoch_end(self, outputs_list):
         if len(outputs_list) == 0 or any([len(o) == 0 for o in outputs_list]):
@@ -190,7 +187,8 @@ class MESphericalModule(LightningModule):
                            'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff})
 
         parameters = {}
-        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl', 'v_rtp', 'b_rtp']:
+        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
+                  'v_rtp', 'b_rtp', 'v_img', 'b_img']:
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
 
@@ -269,7 +267,7 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(theta, cmap='RdBu_r', vmin=0, vmax=np.pi, origin='lower')
+        im = ax.imshow(theta, cmap='seismic', vmin=0, vmax=np.pi, origin='lower')
         ax.set_title("Theta")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -309,7 +307,7 @@ class MESphericalModule(LightningModule):
 
         ax = axs[1, 3]
         vdop_max = np.nanmax(np.abs(parameters['vdop']))
-        im = ax.imshow(parameters['vdop'], cmap='RdBu_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')
+        im = ax.imshow(parameters['vdop'], cmap='seismic_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')
         ax.set_title("Vdop")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -326,28 +324,51 @@ class MESphericalModule(LightningModule):
 
     def plot_B_rtp(self, parameters):
         b_rtp = parameters['b_rtp']
+        b_img = parameters['b_img']
 
-        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
-        ax = axs[0]
-        br_max = np.nanmax(np.abs(b_rtp[..., 0]))
-        im = ax.imshow(b_rtp[..., 0], cmap='gray', vmin=-br_max, vmax=br_max, origin='lower')
+        b_rtp_min_max = np.nanmax(np.abs(b_rtp))
+        norm = SymLogNorm(linthresh=1, vmin=-b_rtp_min_max, vmax=b_rtp_min_max)
+
+        fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
+
+        ax = axs[0, 0]
+        im = ax.imshow(b_rtp[..., 0], norm=norm, origin='lower', cmap='RdBu_r')
         ax.set_title("$B_r$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[1]
-        bt_max = np.nanmax(np.abs(b_rtp[..., 1]))
-        im = ax.imshow(b_rtp[..., 1], cmap='gray', vmin=-bt_max, vmax=bt_max, origin='lower')
+        ax = axs[0, 1]
+        im = ax.imshow(b_rtp[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
         ax.set_title("$B_t$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[2]
-        bp_max = np.nanmax(np.abs(b_rtp[..., 2]))
-        im = ax.imshow(b_rtp[..., 2], cmap='gray', vmin=-bp_max, vmax=bp_max, origin='lower')
+        ax = axs[0, 2]
+        im = ax.imshow(b_rtp[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
         ax.set_title("$B_p$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 0]
+        im = ax.imshow(b_img[..., 0], norm=norm, origin='lower', cmap='RdBu_r')
+        ax.set_title(r"$B_\text{xi}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 1]
+        im = ax.imshow(b_img[..., 1], norm=norm, origin='lower', cmap='RdBu_r')
+        ax.set_title(r"$B_\text{eta}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 2]
+        im = ax.imshow(b_img[..., 2], norm=norm, origin='lower', cmap='RdBu_r')
+        ax.set_title(r"$B_\text{zeta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
@@ -358,25 +379,49 @@ class MESphericalModule(LightningModule):
 
     def plot_v_rtp(self, parameters):
         v_rtp = parameters['v_rtp']
+        v_img = parameters['v_img']
 
-        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
-        ax = axs[0]
-        im = ax.imshow(v_rtp[..., 0], cmap='gray', origin='lower')
+        norm = SymLogNorm(linthresh=10, vmin=-np.nanmax(np.abs(v_rtp)), vmax=np.nanmax(np.abs(v_rtp)))
+
+        fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
+        ax = axs[0, 0]
+        im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=norm)
         ax.set_title("$v_r$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[1]
-        im = ax.imshow(v_rtp[..., 1], cmap='gray', origin='lower')
+        ax = axs[0, 1]
+        im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', norm=norm)
         ax.set_title("$v_t$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[2]
-        im = ax.imshow(v_rtp[..., 2], cmap='gray', origin='lower')
+        ax = axs[0, 2]
+        im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', norm=norm)
         ax.set_title("$v_p$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 0]
+        im = ax.imshow(v_img[..., 0], cmap='seismic_r', origin='lower', norm=norm)
+        ax.set_title(r"$v_\text{xi}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 1]
+        im = ax.imshow(v_img[..., 1], cmap='seismic_r', origin='lower', norm=norm)
+        ax.set_title(r"$v_\text{eta}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 2]
+        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', norm=norm)
+        ax.set_title(r"$v_\text{zeta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)

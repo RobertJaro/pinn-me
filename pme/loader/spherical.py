@@ -163,6 +163,7 @@ class HMISphericalDataset(TensorsDataset):
         self.time = data['time']
         self.value_range = np.stack([np.nanmin(stokes, (0, 1, -1)), np.nanmax(stokes, (0, 1, -1))], -1)
         self.image_shape = stokes.shape[:2]  # x, y
+        self.wcs = data['wcs']
 
         self.data_range = np.array(
             [[np.nanmin(carrington_coords[..., i]), np.nanmax(carrington_coords[..., i])] for i in range(3)])
@@ -196,7 +197,7 @@ class HMISphericalDataset(TensorsDataset):
         r = carrington_coords.radius
         #
         r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-        carrington_coords = np.stack([r.to_value(u.solRad), np.pi / 2 - lat, lon], -1)
+        carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
         cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
 
         # append time
@@ -213,10 +214,18 @@ class HMISphericalDataset(TensorsDataset):
         a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
-        I_profile = np.stack([fits.getdata(I[j]).data for j in range(self.num_wl)], -1)
-        Q_profile = np.stack([fits.getdata(Q[j]).data for j in range(self.num_wl)], -1)
-        U_profile = np.stack([fits.getdata(U[j]).data for j in range(self.num_wl)], -1)
-        V_profile = np.stack([fits.getdata(V[j]).data for j in range(self.num_wl)], -1)
+        # alternative hmi_b2ptr
+        # stonyhurst_coords = spherical_coords.transform_to(frames.HeliographicStonyhurst)
+        # phi, lam = stonyhurst_coords.lon.to(u.rad).value, stonyhurst_coords.lat.to(u.rad).value
+        # pAng = -np.deg2rad(s_map.meta['CROTA2'])
+        # b = np.deg2rad(s_map.meta['CRLT_OBS'])
+        # a_matrix = image_to_spherical_matrix(phi=phi, lam=lam, b=b, pAng=pAng)
+        # rtp_to_img_transform = np.linalg.inv(a_matrix)
+
+        I_profile = np.stack([fits.getdata(I[j]) for j in range(self.num_wl)], -1)
+        Q_profile = np.stack([fits.getdata(Q[j]) for j in range(self.num_wl)], -1)
+        U_profile = np.stack([fits.getdata(U[j]) for j in range(self.num_wl)], -1)
+        V_profile = np.stack([fits.getdata(V[j]) for j in range(self.num_wl)], -1)
 
         stokes = np.stack([I_profile, Q_profile, U_profile, V_profile], -2)
 
@@ -230,6 +239,6 @@ class HMISphericalDataset(TensorsDataset):
                 'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
                 'rtp_to_img_transform': rtp_to_img_transform,
                 'mu': mu,
-                'time': s_map.date.to_datetime(), 'obs_lat': latc * u.rad,
-                'obs_lon': lonc * u.rad,
-                'carrington_coords': carrington_coords}
+                'time': s_map.date.to_datetime(), 'obs_lat': s_map.carrington_latitude,
+                'obs_lon': s_map.carrington_longitude,
+                'carrington_coords': carrington_coords, 'wcs': s_map.wcs}
