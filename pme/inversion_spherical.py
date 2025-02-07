@@ -42,6 +42,7 @@ else:
 model_config = config['model'] if 'model' in config else {}
 training_config = config['training'] if 'training' in config else {}
 check_val_every_n_epoch = training_config.pop('check_val_every_n_epoch', None)
+val_check_interval = training_config.pop('val_check_interval', None)
 epochs = training_config.pop('epochs', 50)
 
 me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config=data_module.lambda_config,
@@ -77,6 +78,7 @@ trainer = Trainer(max_epochs=epochs,
                   strategy='dp' if n_gpus > 1 else None,  # ddp breaks memory and wandb
                   num_sanity_val_steps=-1,
                   check_val_every_n_epoch=check_val_every_n_epoch,
+                  val_check_interval=val_check_interval,
                   gradient_clip_val=0.1,
                   reload_dataloaders_every_n_epochs=5,  # reload dataloaders every 5 epochs to avoid oscillating loss
                   callbacks=[checkpoint_callback, save_callback], )

@@ -9,40 +9,46 @@ import torch
 import wandb
 from astropy import units as u
 from astropy.io import fits
+from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningDataModule
 from sunpy.coordinates import frames
 from sunpy.map import all_coordinates_from_map, Map
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
-from pme.train.data_loader import TensorsDataset, shuffle_async
+from pme.train.data_loader import TensorsDataset, shuffle_async, CombinedDataset
 
 
 class SphericalDataModule(LightningDataModule):
 
     def __init__(self, train_config, valid_config, work_directory, seconds_per_dt=36000, Rs_per_ds=1,
                  stokes_normalization=83696.0,
-                 ref_time=datetime(2010, 5, 1, 18, 58), batch_size=4096, num_workers=None):
+                 ref_time=datetime(2010, 5, 1, 18, 58),
+                 batch_size=4096, dataset_batch_size=2048,
+                 num_workers=None):
         super().__init__()
+        ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
 
         # train parameters
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.batch_size = batch_size * n_gpus
+        self.dataset_batch_size = dataset_batch_size * n_gpus
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
         train_files = self._load_files(train_config['data_path'])
         train_files = train_files
-        data_set_batch_size = np.ceil(self.batch_size / len(train_files)).astype(int)
         with Pool(num_workers) as p:
             args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
-                       repeat(stokes_normalization), repeat(data_set_batch_size), repeat(work_directory))
+                       repeat(stokes_normalization), repeat(dataset_batch_size), repeat(work_directory))
             train_datasets = p.starmap(HMISphericalDataset, args)
 
-        self.train_datasets = {f'hmi_{i:02d}': ds for i, ds in enumerate(train_datasets)}
+        self.train_datasets = train_datasets
 
-        for ds in train_datasets:
+        max_samples = 10
+        sample_step = max(1, len(train_datasets) // max_samples)
+        for ds in train_datasets[::sample_step]:
             self.plot_dataset(ds)
 
         valid_files = self._load_files(valid_config['data_path'])
@@ -55,7 +61,7 @@ class SphericalDataModule(LightningDataModule):
                                                  filter_nans=False, shuffle=False)
 
         self.ref_time = ref_time
-        self.times = [d.time for d in self.train_datasets.values()]
+        self.times = [d.time for d in self.train_datasets]
         self.seconds_per_dt = seconds_per_dt
         self.Rs_per_ds = Rs_per_ds
         self.image_shape = self.valid_dataset.image_shape
@@ -109,14 +115,10 @@ class SphericalDataModule(LightningDataModule):
         datasets = self.train_datasets
         shuffle_async(datasets, self.num_workers)
         # data loader with iterations based on the largest dataset
-        max_ds_len = max([len(ds) for ds in datasets.values()])
-        n_ds_workers = max(self.num_workers // len(datasets), 2)
-        loaders = {}
-        for i, (name, dataset) in enumerate(datasets.items()):
-            sampler = RandomSampler(dataset, replacement=True, num_samples=int(max_ds_len))
-            loaders[name] = DataLoader(dataset, batch_size=None, num_workers=n_ds_workers,
-                                       pin_memory=True, sampler=sampler)
-        return loaders
+        combined_dataset = CombinedDataset(datasets, self.batch_size // self.dataset_batch_size)
+        loader = DataLoader(combined_dataset, batch_size=None, num_workers=self.num_workers,
+                            pin_memory=True, shuffle=True)
+        return loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
@@ -193,7 +195,7 @@ class HMISphericalDataset(TensorsDataset):
         mu = mu.astype(np.float32)
 
         carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
-        lat, lon = carrington_coords.lat.to(u.rad).value, carrington_coords.lon.to(u.rad).value
+        lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
         r = carrington_coords.radius
         #
         r = r * u.solRad if r.unit == u.dimensionless_unscaled else r

@@ -18,11 +18,30 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
+from sklearn.utils import shuffle
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map, make_fitswcs_header
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
+
+class CombinedDataset(Dataset):
+
+    def __init__(self, datasets, n_samples):
+        super().__init__()
+        self.datasets = datasets
+        self.sample_indices = shuffle([(i, j) for i, d in enumerate(datasets) for j in range(len(d))])
+        self.n_samples = n_samples
+
+    def __len__(self):
+        return len(self.sample_indices) // self.n_samples
+
+    def __getitem__(self, idx):
+        batch = []
+        for i, j in self.sample_indices[idx * self.n_samples: (idx + 1) * self.n_samples]:
+            batch.append(self.datasets[i][j])
+        keys = list(batch[0].keys())
+        return {k: np.concatenate([b[k] for b in batch], 0) for k in keys}
 
 class BatchDataset(Dataset):
 
@@ -651,7 +670,7 @@ def load_Hinode_files(data_dir):
 def shuffle_async(datasets, num_workers=None):
     num_workers = num_workers if num_workers is not None else os.cpu_count()
     with Pool(num_workers) as p:
-        p.map(_shuffle, datasets.values())
+        p.map(_shuffle, datasets)
 
 
 def _shuffle(ds):

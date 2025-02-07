@@ -21,15 +21,16 @@ if __name__ == '__main__':
     # load
     pinnme = PINNMEOutput(args.input)
 
+    target_time = pinnme.times[0]
+
     # resolution = 0.01
-    # lat = np.arange(-40, 0, resolution)
-    # lon = np.arange(120, 150, resolution)
+    # lat = np.arange(-30, -10, resolution)
+    # lon = np.arange(330, 370, resolution)
 
     resolution = 0.1
     lat = np.arange(-90, 90, resolution)
     lon = np.arange(0, 360, resolution)
 
-    target_time = pinnme.times[0]
     normalized_time = pinnme._normalize_time(target_time)
     lat, lon = np.deg2rad(lat), np.deg2rad(lon)
 
@@ -55,26 +56,26 @@ if __name__ == '__main__':
     extent = np.rad2deg(extent)
 
     v_min_max = np.max(np.abs(b_rtp))
-    norm = SymLogNorm(linthresh=1, vmin=-v_min_max, vmax=v_min_max)
+    norm = Normalize(-500, 500)#SymLogNorm(linthresh=1, vmin=-v_min_max, vmax=v_min_max)
 
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
 
     ax = axs[0]
-    im = ax.imshow(b_rtp[..., 0], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 0], cmap='gray', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('B_r')
 
     ax = axs[1]
-    im = ax.imshow(b_rtp[..., 1], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 1], cmap='gray', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('B_theta')
 
     ax = axs[2]
-    im = ax.imshow(b_rtp[..., 2], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 2], cmap='gray', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
@@ -110,7 +111,7 @@ if __name__ == '__main__':
     cbar.set_label('|B| [G]', fontsize=16)
 
     ax = axs[1]
-    im = ax.imshow(np.rad2deg(inclination), cmap='seismic_r', origin='lower', extent=extent, vmin=0, vmax=180)
+    im = ax.imshow(np.rad2deg(inclination), cmap='PiYG', origin='lower', extent=extent, vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     cbar = fig.colorbar(im, cax=cax, orientation='vertical')
@@ -141,21 +142,21 @@ if __name__ == '__main__':
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
 
     ax = axs[0]
-    im = ax.imshow(v_rtp[..., 0], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('V_r')
 
     ax = axs[1]
-    im = ax.imshow(v_rtp[..., 1], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('V_theta')
 
     ax = axs[2]
-    im = ax.imshow(v_rtp[..., 2], cmap='RdBu_r', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', norm=norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')

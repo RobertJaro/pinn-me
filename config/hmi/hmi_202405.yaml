@@ -1,0 +1,19 @@
+---
+base_path: "/glade/work/rjarolim/pinn_me/hmi/202405_v02"
+work_directory: "/glade/derecho/scratch/rjarolim/nf2/hmi/202405_v02"
+data:
+  train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
+  valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 0}
+  ref_time: "2024-05-01T00:00:00"
+  num_workers: 16
+  batch_size: 16384
+logging:
+  project: pinn-me-spherical
+  tags: ["hmi"]
+  name: "2010-05-10"
+model:
+  encoding: "gaussian"
+training:
+  epochs: 500
+#  check_val_every_n_epoch: 1
+#  val_check_interval: 10000

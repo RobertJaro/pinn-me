@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import wandb
 from astropy.visualization import ImageNormalize
-from matplotlib.colors import SymLogNorm
+from matplotlib.colors import SymLogNorm, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
@@ -18,7 +18,7 @@ from pme.train.util import acos_safe, atan2_safe
 class MESphericalModule(LightningModule):
 
     def __init__(self, image_shape, lambda_config, value_range, lr_params=None,
-                 lambda_stokes=None, model_config=None, **kwargs):
+                 lambda_stokes=None, model_config=None, normalization_config=None, **kwargs):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
         lambda_stokes = lambda_stokes if lambda_stokes is not None else [1, 1, 1, 1]
@@ -33,7 +33,8 @@ class MESphericalModule(LightningModule):
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
-        self.normalization = NormalizationModule(value_range)
+        normalization_config = normalization_config if normalization_config is not None else {}
+        self.normalization = NormalizationModule(value_range, **normalization_config)
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
 
@@ -56,19 +57,11 @@ class MESphericalModule(LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_nb):
-        ds_keys = list(batch.keys())
-        coords = torch.cat([batch[k]['coords'] for k in ds_keys], 0)
-        mu = torch.cat([batch[k]['mu'] for k in ds_keys], 0)
-        stokes_true = torch.cat([batch[k]['stokes'] for k in ds_keys], 0)
-        cartesian_to_spherical_transform = torch.cat([batch[k]['cartesian_to_spherical_transform'] for k in ds_keys], 0)
-        rtp_to_img_transform = torch.cat([batch[k]['rtp_to_img_transform'] for k in ds_keys], 0)
-
-        assert not torch.isnan(coords).any(), "Encountered invalid value. coords is NaN"
-        assert not torch.isnan(mu).any(), "Encountered invalid value. mu is NaN"
-        assert not torch.isnan(stokes_true).any(), "Encountered invalid value. stokes_true is NaN"
-        assert not torch.isnan(
-            cartesian_to_spherical_transform).any(), "Encountered invalid value. cartesian_to_spherical_transform is NaN"
-        assert not torch.isnan(rtp_to_img_transform).any(), "Encountered invalid value. rtp_to_img_transform is NaN"
+        coords = batch['coords']
+        mu = batch['mu']
+        stokes_true = batch['stokes']
+        cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
+        rtp_to_img_transform = batch['rtp_to_img_transform']
 
         # forward step
         output = self.parameter_model(coords)
@@ -109,6 +102,7 @@ class MESphericalModule(LightningModule):
         # transform B
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
+        b_rtp[..., 1] *= -1
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
         # xi, eta, zeta
@@ -123,6 +117,7 @@ class MESphericalModule(LightningModule):
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
+        v_rtp[..., 1] *= -1
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
 
         v_dop = v_img[..., 2:3]
@@ -194,6 +189,7 @@ class MESphericalModule(LightningModule):
 
         self.plot_parameter_overview(parameters)
         self.plot_B_rtp(parameters)
+        self.plot_B_rtp_scaled(parameters)
         self.plot_v_rtp(parameters)
 
         stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.image_shape[:2], 4, -1)
@@ -201,7 +197,7 @@ class MESphericalModule(LightningModule):
 
         self.plot_stokes(stokes_pred, stokes_true)
 
-        self.plot_profile(stokes_pred, stokes_true)
+        # self.plot_profile(stokes_pred, stokes_true)
 
     def plot_profile(self, stokes_pred, stokes_true):
         y_range = stokes_true.shape[0]
@@ -377,11 +373,44 @@ class MESphericalModule(LightningModule):
         wandb.log({"B": fig})
         plt.close('all')
 
+    def plot_B_rtp_scaled(self, parameters):
+        b_rtp = parameters['b_rtp']
+
+        norm = Normalize(vmin=-500, vmax=500)
+
+        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
+
+        ax = axs[0]
+        im = ax.imshow(b_rtp[..., 0], norm=norm, origin='lower', cmap='gray')
+        ax.set_title("$B_r$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1]
+        im = ax.imshow(b_rtp[..., 1], cmap='gray', norm=norm, origin='lower')
+        ax.set_title("$B_t$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[2]
+        im = ax.imshow(b_rtp[..., 2], cmap='gray', norm=norm, origin='lower')
+        ax.set_title("$B_p$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        plt.tight_layout()
+        wandb.log({"B_rtp": fig})
+        plt.close('all')
+
     def plot_v_rtp(self, parameters):
         v_rtp = parameters['v_rtp']
         v_img = parameters['v_img']
 
-        norm = SymLogNorm(linthresh=1, vmin=-np.nanmax(np.abs(v_rtp)), vmax=np.nanmax(np.abs(v_rtp)))
+        v_min_max = np.nanmax(np.abs(v_rtp))
+        norm = Normalize(vmin=-v_min_max, vmax=v_min_max)
 
         fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
         ax = axs[0, 0]
