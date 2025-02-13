@@ -117,10 +117,6 @@ class MESphericalModel(nn.Module):
     def __init__(self, in_coords, dim=256, encoding='gaussian_positional', activation='sine', num_layers=8):
         super().__init__()
         # encoding layer
-        if encoding == "periodic":
-            posenc = PeriodicBoundary()
-            d_in = nn.Linear(in_coords + 2, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
         if encoding == "positional":
             posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
             d_in = nn.Linear(posenc.d_output, dim)
@@ -166,7 +162,7 @@ class MESphericalModel(nn.Module):
         b_y = params[..., 2:3] * b_scale
         b_z = params[..., 3:4] * b_scale
         #
-        vmac = torch.sigmoid(params[..., 4:5]) * 20e3
+        vmac = 10 ** params[..., 4:5] #torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
@@ -174,7 +170,7 @@ class MESphericalModel(nn.Module):
         v_x = params[..., 9:10] * v_scale
         v_y = params[..., 10:11] * v_scale
         v_z = params[..., 11:12] * v_scale
-        kl = torch.sigmoid(params[..., 12:13]) * 100
+        kl = 10 ** params[..., 12:13] #torch.sigmoid(params[..., 12:13]) * 100
         #
         output = {
             "b_x": b_x,

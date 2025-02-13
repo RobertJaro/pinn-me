@@ -9,16 +9,13 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
 
-from pme.data.util import spherical_to_cartesian, vector_cartesian_to_spherical, cartesian_to_spherical_matrix, \
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix
 from pme.evaluation.loader import PINNMEOutput
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
     parser.add_argument('--input', type=str, help='the path to the input file')
-    parser.add_argument('--ref_map_r', type=str, help='the path to the reference map Br')
-    parser.add_argument('--ref_map_t', type=str, help='the path to the reference map Bt')
-    parser.add_argument('--ref_map_p', type=str, help='the path to the reference map Bp')
     parser.add_argument('--ref_map_fld', type=str, help='the path to the reference map fld')
     parser.add_argument('--ref_map_inc', type=str, help='the path to the reference map inc')
     parser.add_argument('--ref_map_azi', type=str, help='the path to the reference map azi')
@@ -33,18 +30,15 @@ if __name__ == '__main__':
     pinnme = PINNMEOutput(args.input)
 
     # load reference maps
-    ref_map_r = Map(args.ref_map_r)
-    ref_map_t = Map(args.ref_map_t)
-    ref_map_p = Map(args.ref_map_p)
+    ref_map = Map(args.ref_map_fld)
 
     # load time
-    target_time = ref_map_r.date.to_datetime()
+    target_time = ref_map.date.to_datetime()
     normalized_time = pinnme._normalize_time(target_time)
-    normalized_time = 0
 
-    coords = all_coordinates_from_map(ref_map_r).transform_to(frames.HeliographicCarrington)
+    coords = all_coordinates_from_map(ref_map).transform_to(frames.HeliographicCarrington)
     lat, lon = coords.lat.to_value(u.rad), coords.lon.to_value(u.rad)
-    r = coords.radius.to_value(u.solRad)
+    r = np.ones_like(lat)  # coords.radius.to_value(u.solRad)
 
     spherical_coords = np.stack([r, lat, lon], axis=-1)
     #
@@ -53,8 +47,8 @@ if __name__ == '__main__':
     coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
 
-    latc, lonc = np.deg2rad(ref_map_r.meta['CRLT_OBS']), np.deg2rad(ref_map_r.meta['CRLN_OBS'])
-    pAng = -np.deg2rad(ref_map_r.meta['CROTA2'])
+    latc, lonc = np.deg2rad(ref_map.meta['CRLT_OBS']), np.deg2rad(ref_map.meta['CRLN_OBS'])
+    pAng = -np.deg2rad(ref_map.meta['CROTA2'])
     a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
@@ -65,6 +59,7 @@ if __name__ == '__main__':
 
     v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
     v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+    v_rtp[..., 1] *= -1
 
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
 
@@ -77,8 +72,6 @@ if __name__ == '__main__':
 
     ########################################################################################################################
     # load reference map
-    b_rtp_ref = np.stack([ref_map_r.data, ref_map_t.data, ref_map_p.data], axis=-1)
-
     fld_ref = Map(args.ref_map_fld).data
     inc_ref = Map(args.ref_map_inc).data
     azi_ref = Map(args.ref_map_azi).data
@@ -90,11 +83,21 @@ if __name__ == '__main__':
     azi_ref[condition] += 180
 
     ########################################################################################################################
+    # transform to B_r, B_theta, B_phi
+    b_xi = - fld_ref * np.sin(np.deg2rad(inc_ref)) * np.sin(np.deg2rad(azi_ref))
+    b_eta = fld_ref * np.sin(np.deg2rad(inc_ref)) * np.cos(np.deg2rad(azi_ref))
+    b_zeta = fld_ref * np.cos(np.deg2rad(inc_ref))
+
+    b_img_ref = np.stack([b_xi, b_eta, b_zeta], axis=-1)
+
+    b_rtp_ref = np.einsum('...ij,...j->...i', a_matrix, b_img_ref)
+    b_rtp_ref[..., 1] *= -1
+    ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
 
     norm = Normalize(-500, 500)
 
-    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map_r})
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
     im = ax.imshow(b_rtp[..., 0], cmap='gray', norm=norm, origin='lower')
@@ -153,7 +156,7 @@ if __name__ == '__main__':
     b_norm = np.linalg.norm(b_rtp, axis=-1)
     b_norm_ref = np.linalg.norm(b_rtp_ref, axis=-1)
 
-    fig, axs = plt.subplots(1, 2, figsize=(15, 10), subplot_kw={'projection': ref_map_r})
+    fig, axs = plt.subplots(1, 2, figsize=(15, 10), subplot_kw={'projection': ref_map})
 
     ax = axs[0]
     im = ax.imshow(b_norm, cmap='viridis', origin='lower', vmin=1, vmax=3000, norm='log')
@@ -176,7 +179,7 @@ if __name__ == '__main__':
     ########################################################################################################################
     # plot fld, inc, azi
 
-    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map_r})
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
     im = ax.imshow(fld_ref, cmap='viridis', origin='lower', vmin=1, vmax=2000, norm='log')
@@ -193,7 +196,7 @@ if __name__ == '__main__':
     ax.set_title('Reference')
 
     ax = axs[0, 2]
-    im = ax.imshow(azi_ref % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
+    im = ax.imshow(azi_ref % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [rad]')
@@ -214,7 +217,7 @@ if __name__ == '__main__':
     ax.set_title('PINN ME')
 
     ax = axs[1, 2]
-    im = ax.imshow(azi % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
+    im = ax.imshow(azi % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [rad]')
@@ -226,5 +229,3 @@ if __name__ == '__main__':
     fig.tight_layout()
     plt.savefig(os.path.join(args.output, 'fld_inc_azi_comparison.jpg'), dpi=300)
     plt.close()
-
-

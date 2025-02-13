@@ -28,7 +28,6 @@ def cartesian_to_spherical_matrix(c):
     #
     return matrix
 
-
 def vector_spherical_to_cartesian(v, c, f=np):
     vr, vt, vp = v[..., 0], v[..., 1], v[..., 2]
     r, t, p = c[..., 0], c[..., 1], c[..., 2]

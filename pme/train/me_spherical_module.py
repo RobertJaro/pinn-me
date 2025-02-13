@@ -62,16 +62,24 @@ class MESphericalModule(LightningModule):
         stokes_true = batch['stokes']
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
+        v_obs_los = batch['v_obs_los']
+
+        # shuffle 20% time coordinates
+        # n_random = int(coords.shape[0] * 0.20)
+        # indices = torch.randperm(n_random, device=coords.device)
+        # coords[:n_random, 0] = coords[indices, 0]
 
         # forward step
         output = self.parameter_model(coords)
 
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
+        v_dop = transformed_output['v_dop'] + v_obs_los # add doppler correction - spacecraft velocity
+        chi = transformed_output['chi'] + np.pi * (torch.rand_like(transformed_output['chi']) < 0.5)  # add random azimuth flips
 
         forward_params = {'b_field': transformed_output['b_field'],
                           'theta': transformed_output['theta'],
-                          'chi': transformed_output['chi'],
-                          'vdop': transformed_output['v_dop'],
+                          'chi': chi,
+                          'vdop': v_dop,
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
 
@@ -102,7 +110,7 @@ class MESphericalModule(LightningModule):
         # transform B
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
-        b_rtp[..., 1] *= -1
+        b_rtp[..., 1] *= -1 # TODO do we need this?
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
         # xi, eta, zeta
@@ -111,13 +119,14 @@ class MESphericalModule(LightningModule):
         # b_eta = field * sin(gamma) * cos(psi)
         # b_zeta = field * cos(gamma)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
-        theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+        # TODO: why is this shifted by pi?
+        theta = torch.pi - acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2]) + torch.pi / 2
 
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
-        v_rtp[..., 1] *= -1
+        v_rtp[..., 1] *= -1 # TODO do we need this?
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
 
         v_dop = v_img[..., 2:3]

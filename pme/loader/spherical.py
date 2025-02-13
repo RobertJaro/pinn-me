@@ -9,6 +9,7 @@ import torch
 import wandb
 from astropy import units as u
 from astropy.io import fits
+from astropy.nddata import block_reduce
 from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -150,12 +151,13 @@ class HMISphericalDataset(TensorsDataset):
         cartesian_to_spherical_transform = data['cartesian_to_spherical_transform']  # x, y, 3, 3
         rtp_to_img_transform = data['rtp_to_img_transform']  # x, y, 3, 3
         mu = data['mu']  # x, y
+        v_obs_los = data['v_obs_los']  # x, y
         carrington_coords = data['carrington_coords']  # x, y, 3
 
         # Plot Data Overview
-        self.integrated_V = np.abs(stokes[:, :, -1]).sum(-1)
-        self.latitude = carrington_coords[..., 1]
-        self.longitude = carrington_coords[..., 2]
+        self.integrated_V = block_reduce(np.abs(stokes[:, :, -1]).sum(-1), (8, 8), np.mean)
+        self.latitude = block_reduce(carrington_coords[..., 1], (8, 8), np.mean)
+        self.longitude = block_reduce(carrington_coords[..., 2], (8, 8), np.mean)
         self.obs_lat = data['obs_lat']
         self.obs_lon = data['obs_lon']
 
@@ -175,7 +177,7 @@ class HMISphericalDataset(TensorsDataset):
                    'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape(
                        (-1, *cartesian_to_spherical_transform.shape[2:])),
                    'rtp_to_img_transform': rtp_to_img_transform.reshape((-1, *rtp_to_img_transform.shape[2:])),
-                   'mu': mu.reshape((-1, 1))}
+                   'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1))}
 
         super().__init__(tensors=tensors, batch_size=batch_size, work_directory=work_directory, **kwargs)
 
@@ -196,10 +198,10 @@ class HMISphericalDataset(TensorsDataset):
 
         carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
         lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
-        r = carrington_coords.radius
+        r = np.ones_like(lon) #carrington_coords.radius
+        # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
         #
-        r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-        carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
+        carrington_coords = np.stack([r, lat, lon], -1)
         cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
 
         # append time
@@ -215,6 +217,9 @@ class HMISphericalDataset(TensorsDataset):
         pAng = -np.deg2rad(s_map.meta['CROTA2'])
         a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
+
+        # load observer velocity
+        v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
 
         # alternative hmi_b2ptr
         # stonyhurst_coords = spherical_coords.transform_to(frames.HeliographicStonyhurst)
@@ -240,7 +245,31 @@ class HMISphericalDataset(TensorsDataset):
                 'coords': cartesian_coords,
                 'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
                 'rtp_to_img_transform': rtp_to_img_transform,
-                'mu': mu,
+                'mu': mu, 'v_obs_los': v_obs_los,
                 'time': s_map.date.to_datetime(), 'obs_lat': s_map.carrington_latitude,
                 'obs_lon': s_map.carrington_longitude,
                 'carrington_coords': carrington_coords, 'wcs': s_map.wcs}
+
+def compute_v_observer(v_r, v_w, v_n, theta_p, psi):
+    return -(v_w*np.sin(theta_p)*np.sin(psi)-v_n*np.sin(theta_p)*np.cos(psi)+v_r*np.cos(theta_p))
+
+
+def load_v_observer_LOS(s_map):
+    hgc_out = all_coordinates_from_map(s_map)
+    hpc_out = hgc_out.transform_to(frame=frames.Helioprojective)
+
+    # Components of the SDO satellite velocity
+    v_sdo_r = s_map.meta['OBS_VR']
+    v_sdo_w = s_map.meta['OBS_VW']
+    v_sdo_n = s_map.meta['OBS_VN']
+
+    theta_x = hpc_out.Tx.to_value(u.rad)
+    theta_y = hpc_out.Ty.to_value(u.rad)
+
+    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2),
+                         np.cos(theta_y) * np.cos(theta_x))
+    psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
+
+    # SDO motion
+    v_obs_los = compute_v_observer(v_sdo_r, v_sdo_w, v_sdo_n, theta_p, psi)
+    return v_obs_los

@@ -1,13 +1,18 @@
 import argparse
 import os.path
+from datetime import timedelta
 
 import numpy as np
+import pandas as pd
+from astropy.coordinates import SkyCoord
 from matplotlib import pyplot as plt
 from matplotlib.colors import SymLogNorm, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sunpy.coordinates import frames
 
 from pme.data.util import spherical_to_cartesian, vector_cartesian_to_spherical
 from pme.evaluation.loader import PINNMEOutput
+from astropy import units as u
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -21,26 +26,27 @@ if __name__ == '__main__':
     # load
     pinnme = PINNMEOutput(args.input)
 
-    target_time = pinnme.times[0]
+    start_time = pinnme.times[0]
+    rotation_time = timedelta(days=25.38)
+    times = pd.date_range(start_time, start_time + rotation_time, periods=3600)
+    end_time = times[-1].to_pydatetime()
 
-    # resolution = 0.01
-    # lat = np.arange(-30, -10, resolution)
-    # lon = np.arange(330, 370, resolution)
+    latitudes = np.linspace(-90, 90, 1800)
 
-    resolution = 0.1
-    lat = np.arange(-90, 90, resolution)
-    lon = np.arange(0, 360, resolution)
+    longitudes = []
+    for t in times:
+        coord = SkyCoord(0 *u.deg, 0 * u.deg, frame=frames.HeliographicStonyhurst, obstime=t, observer='earth')
+        longitudes.append(coord.transform_to(frames.HeliographicCarrington).lon.to_value(u.deg))
 
-    normalized_time = pinnme._normalize_time(target_time)
-    lat, lon = np.deg2rad(lat), np.deg2rad(lon)
+    normalized_times = np.array([pinnme._normalize_time(t.to_pydatetime()) for t in times])
+    latitudes, longitudes = np.deg2rad(latitudes), np.deg2rad(longitudes)
 
-    spherical_coords = np.stack(np.meshgrid(
-        [1], lat, lon, indexing='ij'),
+    spherical_coords = np.stack(np.meshgrid( [1], latitudes, longitudes, indexing='ij'),
         axis=-1)
     spherical_coords = spherical_coords[0, :, :]
 
     cartesian_coords = spherical_to_cartesian(spherical_coords)
-    time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) *  normalized_time
+    time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) *  normalized_times[None, :, None]
     coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
@@ -52,7 +58,7 @@ if __name__ == '__main__':
 
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
-    extent = [lon.min(), lon.max(), lat.min(), lat.max()]
+    extent = [longitudes.min(), longitudes.max(), latitudes.min(), latitudes.max()]
     extent = np.rad2deg(extent)
 
     v_min_max = np.max(np.abs(b_rtp))
@@ -85,7 +91,7 @@ if __name__ == '__main__':
     [ax.set_xlabel('Longitude [deg]') for ax in axs]
 
     # add subtitle with date
-    plt.suptitle(f'Carrington map at {target_time}', fontsize=16)
+    plt.suptitle(f'Carrington map {start_time} -- {end_time}', fontsize=16)
 
     plt.tight_layout()
     plt.savefig(os.path.join(args.output, 'carrington.jpg'), dpi=300)
@@ -98,7 +104,7 @@ if __name__ == '__main__':
     inclination = np.arccos(b_rtp[..., 2] / b) % np.pi
     azimuth = np.arctan2(b_rtp[..., 1], b_rtp[..., 0]) % (2 * np.pi)
 
-    extent = [lon.min(), lon.max(), lat.min(), lat.max()]
+    extent = [longitudes.min(), longitudes.max(), latitudes.min(), latitudes.max()]
     extent = np.rad2deg(extent)
 
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
