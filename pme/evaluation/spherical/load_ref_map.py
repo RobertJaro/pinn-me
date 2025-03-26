@@ -64,6 +64,8 @@ if __name__ == '__main__':
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
 
     fld = np.linalg.norm(b_img, axis=-1, keepdims=True)
+    # inc = np.pi - np.arccos(b_img[..., 2:3] / (fld + 1e-8))
+    # azi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2]) + np.pi / 2
     inc = np.arccos(b_img[..., 2:3] / (fld + 1e-8))
     azi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2])
 
@@ -156,7 +158,7 @@ if __name__ == '__main__':
     b_norm = np.linalg.norm(b_rtp, axis=-1)
     b_norm_ref = np.linalg.norm(b_rtp_ref, axis=-1)
 
-    fig, axs = plt.subplots(1, 2, figsize=(15, 10), subplot_kw={'projection': ref_map})
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5), subplot_kw={'projection': ref_map})
 
     ax = axs[0]
     im = ax.imshow(b_norm, cmap='viridis', origin='lower', vmin=1, vmax=3000, norm='log')
@@ -172,6 +174,8 @@ if __name__ == '__main__':
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
     ax.set_title('Reference')
 
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
     fig.tight_layout()
     plt.savefig(os.path.join(args.output, 'field_strength_comparison.jpg'), dpi=300)
     plt.close()
@@ -179,53 +183,99 @@ if __name__ == '__main__':
     ########################################################################################################################
     # plot fld, inc, azi
 
-    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
+    fig, axs = plt.subplots(2, 4, figsize=(15, 5), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
     im = ax.imshow(fld_ref, cmap='viridis', origin='lower', vmin=1, vmax=2000, norm='log')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
-    ax.set_title('Reference')
 
     ax = axs[0, 1]
     im = ax.imshow(inc_ref % 180, cmap='PiYG', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [rad]')
-    ax.set_title('Reference')
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
     ax = axs[0, 2]
     im = ax.imshow(azi_ref % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [rad]')
-    ax.set_title('Reference')
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
+
+    ax = axs[0, 3]
+    im = ax.imshow(azi_ref % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
     ax = axs[1, 0]
     im = ax.imshow(fld, cmap='viridis', origin='lower', vmin=1, vmax=2000, norm='log')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
-    ax.set_title('PINN ME')
 
     ax = axs[1, 1]
     im = ax.imshow(inc % 180, cmap='PiYG', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [rad]')
-    ax.set_title('PINN ME')
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
     ax = axs[1, 2]
     im = ax.imshow(azi % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [rad]')
-    ax.set_title('PINN ME')
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
+
+    ax = axs[1, 3]
+    im = ax.imshow(azi % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
+
 
     [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
     [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
 
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    axs[0, 0].set_ylabel('Reference')
+    axs[1, 0].set_ylabel('PINN ME')
+
     fig.tight_layout()
     plt.savefig(os.path.join(args.output, 'fld_inc_azi_comparison.jpg'), dpi=300)
+    plt.close()
+
+    ########################################################################################################################
+    # plot composite of fld, inc, azi and comparison
+    h = 120
+    h_start = 1050
+    w = 2048
+
+    fig, axs = plt.subplots(3, 1, figsize=(15, 2))
+
+    fld_im = axs[0].imshow(fld[h_start:h_start + h, :w], cmap='viridis', origin='upper', vmin=1, vmax=3000, norm='log')
+    inc_im = axs[1].imshow((inc % 180)[h_start + h:h_start + h * 2, :w], cmap='PiYG', origin='upper', vmin=0, vmax=180)
+    azi_im = axs[2].imshow((azi % 180)[h_start + h * 2:h_start + h * 3, :w], cmap='twilight', origin='upper', vmin=0,
+                           vmax=180)
+
+    [ax.set_axis_off() for ax in axs]
+    fig.tight_layout(pad=0)
+    fig.savefig(os.path.join(args.output, 'composite_pinnme.jpg'), dpi=300, transparent=True)
+    plt.close()
+
+    #
+    fig, axs = plt.subplots(3, 1, figsize=(15, 2))
+
+    fld_im = axs[0].imshow(fld_ref[h_start:h_start + h, :w], cmap='viridis', origin='upper', vmin=1, vmax=3000,
+                           norm='log')
+    inc_im = axs[1].imshow((inc_ref % 180)[h_start + h:h_start + h * 2, :w], cmap='PiYG', origin='upper', vmin=0,
+                           vmax=180)
+    azi_im = axs[2].imshow((azi_ref % 180)[h_start + h * 2:h_start + h * 3, :w], cmap='twilight', origin='upper',
+                           vmin=0,
+                           vmax=180)
+
+    [ax.set_axis_off() for ax in axs]
+    fig.tight_layout(pad=0)
+    fig.savefig(os.path.join(args.output, 'composite_ref.jpg'), dpi=300, transparent=True)
     plt.close()

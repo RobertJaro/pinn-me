@@ -1,9 +1,9 @@
 ---
-base_path: "/glade/work/rjarolim/pinn_me/hmi/201102_v03"
-work_directory: "/glade/derecho/scratch/rjarolim/pinn_me/hmi/201102_v01"
+base_path: "/glade/work/rjarolim/pinn_me/hmi/201102_v09"
+work_directory: "/glade/derecho/scratch/rjarolim/pinn_me/hmi/201102_v09"
 data:
-  train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_6h"}
-  valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_6h", sample_idx: 2}
+  train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/20110215"}
+  valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/20110215", sample_idx: 0}
   ref_time: "2011-02-15T00:00:00"
   num_workers: 16
   batch_size: 16384
@@ -15,6 +15,6 @@ model:
   encoding: "gaussian"
 training:
   epochs: 500
-#  check_val_every_n_epoch: 1
-  val_check_interval: 2000
-  lambda_stokes: [10, 1, 1, 10]
+  check_val_every_n_epoch: 10
+#  val_check_interval: 10000
+  lambda_stokes: [10, 1, 1, 10] # maybe increase I weight?
