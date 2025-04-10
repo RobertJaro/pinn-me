@@ -20,7 +20,6 @@ ref_file = args.reference_file
 
 os.makedirs(output_path, exist_ok=True)
 
-
 no_psf_paths = {
     'Clear': os.path.join(input_path, 'clear_v01.npz'),
     'PSF': os.path.join(input_path, 'no_psf_0.0_v01.npz'),
@@ -55,10 +54,10 @@ pymilne_1D = {
 
 pymilne_2D = {
     'Clear': None,
-    'PSF': os.path.join(input_path,   'pymilne_testset_2D_1e-8_v01.npz'),
-    '1e-4': os.path.join(input_path,  'pymilne_testset_2D_1e-4_v01.npz'),
-    '1e-3': os.path.join(input_path,  'pymilne_testset_2D_1e-3_v01.npz'),
-    '1e-2': os.path.join(input_path,  'pymilne_testset_2D_1e-2_v01.npz'),
+    'PSF': os.path.join(input_path, 'pymilne_testset_2D_1e-8_v01.npz'),
+    '1e-4': os.path.join(input_path, 'pymilne_testset_2D_1e-4_v01.npz'),
+    '1e-3': os.path.join(input_path, 'pymilne_testset_2D_1e-3_v01.npz'),
+    '1e-2': os.path.join(input_path, 'pymilne_testset_2D_1e-2_v01.npz'),
 }
 
 parameters_true = np.load(ref_file)
@@ -149,13 +148,12 @@ for key, path in pymilne_2D.items():
         metrics = _evaluate(b_xyz, b_true)
         pymilne_2D_b[key] = {'b_xyz': b_xyz, 'b_los': b_los, 'b_trv': b_trv, 'azi': azi, **metrics}
 
-
 ########################################################################################################################
 # plot noise comparison
 
-x_labels = no_psf_paths.keys()
+x_labels = ['Clear', 'PSF', '$10^{-4}$ [$I_c$]', '$10^{-3}$ [$I_c$]', '$10^{-2}$ [$I_c$]']
 
-fig, axs = plt.subplots(2, 1, figsize=(6, 4.5))
+fig, axs = plt.subplots(2, 1, figsize=(7, 4.5))
 
 ax = axs[0]
 ax.plot(range(0, 5), [val['E_n'] for val in static_b.values()], marker='o', label='PINN ME Static', alpha=0.5)
@@ -184,35 +182,96 @@ fig.tight_layout()
 fig.savefig(f'{output_path}/noise_comparison.png', transparent=True, dpi=300)
 plt.close(fig)
 
+
+
 ########################################################################################################################
-# plot example images for 1e-3
+# plot example images for 1e-2
 target_noise = '1e-2'
 
-fig, axs = plt.subplots(6, 3, figsize=(6, 12.5))
+def _to_vector(b_los, b_trv, azi):
+    return np.stack([b_trv * np.cos(azi), b_trv * np.sin(azi), b_los], axis=-1)
+
+true_vec = _to_vector(true_data['b_los'], true_data['b_trv'], true_data['azi'])
+static_vec = _to_vector(static_b[target_noise]['b_los'][0, :, :, 0], static_b[target_noise]['b_trv'][0, :, :, 0], static_b[target_noise]['azi'][0, :, :, 0])
+no_psf_vec = _to_vector(no_psf_b[target_noise]['b_los'][9, :, :, 0], no_psf_b[target_noise]['b_trv'][9, :, :, 0], no_psf_b[target_noise]['azi'][9, :, :, 0])
+psf_vec = _to_vector(psf_b[target_noise]['b_los'][9, :, :, 0], psf_b[target_noise]['b_trv'][9, :, :, 0], psf_b[target_noise]['azi'][9, :, :, 0])
+pymilne_1D_vec = _to_vector(pymilne_1D_b[target_noise]['b_los'], pymilne_1D_b[target_noise]['b_trv'], pymilne_1D_b[target_noise]['azi'])
+pymilne_2D_vec = _to_vector(pymilne_2D_b[target_noise]['b_los'], pymilne_2D_b[target_noise]['b_trv'], pymilne_2D_b[target_noise]['azi'])
+
+# alpha_left = np.triu(np.ones_like(true_data['b_los']))
+# alpha_right = 1 - alpha_left
+
+fig, axs = plt.subplots(6, 4, figsize=(8, 12.5))
 
 im_los = axs[0, 0].imshow(true_data['b_los'], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[0, 1].imshow(true_data['b_trv'], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[0, 2].imshow(np.rad2deg(true_data['azi']), cmap='twilight', vmin=0, vmax=180)
+axs[0, 3].set_axis_off()
 
 im_los = axs[1, 0].imshow(static_b[target_noise]['b_los'][0, :, :, 0], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[1, 1].imshow(static_b[target_noise]['b_trv'][0, :, :, 0], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[1, 2].imshow(np.rad2deg(static_b[target_noise]['azi'][0, :, :, 0]), cmap='twilight', vmin=0, vmax=180)
+diff_vec = np.linalg.norm(true_vec - static_vec, axis=-1)
+im_err = axs[1, 3].imshow(diff_vec, cmap='Reds', vmin=0, vmax=1000)
 
 im_los = axs[2, 0].imshow(no_psf_b[target_noise]['b_los'][9, :, :, 0], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[2, 1].imshow(no_psf_b[target_noise]['b_trv'][9, :, :, 0], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[2, 2].imshow(np.rad2deg(no_psf_b[target_noise]['azi'][9, :, :, 0]), cmap='twilight', vmin=0, vmax=180)
+diff_vec = np.linalg.norm(true_vec - no_psf_vec, axis=-1)
+im_err = axs[2, 3].imshow(diff_vec, cmap='Reds', vmin=0, vmax=1000)
 
 im_los = axs[3, 0].imshow(psf_b[target_noise]['b_los'][9, :, :, 0], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[3, 1].imshow(psf_b[target_noise]['b_trv'][9, :, :, 0], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[3, 2].imshow(np.rad2deg(psf_b[target_noise]['azi'][9, :, :, 0]), cmap='twilight', vmin=0, vmax=180)
+diff_vec = np.linalg.norm(true_vec - psf_vec, axis=-1)
+im_err = axs[3, 3].imshow(diff_vec, cmap='Reds', vmin=0, vmax=1000)
 
 im_los = axs[4, 0].imshow(pymilne_1D_b[target_noise]['b_los'], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[4, 1].imshow(pymilne_1D_b[target_noise]['b_trv'], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[4, 2].imshow(np.rad2deg(pymilne_1D_b[target_noise]['azi']), cmap='twilight', vmin=0, vmax=180)
+diff_vec = np.linalg.norm(true_vec - pymilne_1D_vec, axis=-1)
+im_err = axs[4, 3].imshow(diff_vec, cmap='Reds', vmin=0, vmax=1000)
 
 im_los = axs[5, 0].imshow(pymilne_2D_b[target_noise]['b_los'], cmap='RdBu_r', vmin=-1000, vmax=1000)
 im_trv = axs[5, 1].imshow(pymilne_2D_b[target_noise]['b_trv'], cmap='cividis', vmin=0, vmax=1000)
 im_azi = axs[5, 2].imshow(np.rad2deg(pymilne_2D_b[target_noise]['azi']), cmap='twilight', vmin=0, vmax=180)
+diff_vec = np.linalg.norm(true_vec - pymilne_2D_vec, axis=-1)
+im_err = axs[5, 3].imshow(diff_vec, cmap='Reds', vmin=0, vmax=1000)
+
+# los_diff = np.abs(static_b[target_noise]['b_los'][0, :, :, 0] - true_data['b_los'])
+# trv_diff = np.abs(static_b[target_noise]['b_trv'][0, :, :, 0] - true_data['b_trv'])
+# azi_diff = np.abs(static_b[target_noise]['azi'][0, :, :, 0], true_data['azi'])
+# im_los_diff = axs[1, 0].imshow(los_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_trv_diff = axs[1, 1].imshow(trv_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_azi_diff = axs[1, 2].imshow(np.rad2deg(azi_diff), cmap='Reds', vmin=0, vmax=180, alpha=alpha_right)
+#
+# los_diff = np.abs(no_psf_b[target_noise]['b_los'][9, :, :, 0] - true_data['b_los'])
+# trv_diff = np.abs(no_psf_b[target_noise]['b_trv'][9, :, :, 0] - true_data['b_trv'])
+# azi_diff = np.abs(no_psf_b[target_noise]['azi'][9, :, :, 0] - true_data['azi'])
+# im_los_diff = axs[2, 0].imshow(los_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_trv_diff = axs[2, 1].imshow(trv_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_azi_diff = axs[2, 2].imshow(np.rad2deg(azi_diff), cmap='Reds', vmin=0, vmax=180, alpha=alpha_right)
+#
+# los_diff = np.abs(psf_b[target_noise]['b_los'][9, :, :, 0] - true_data['b_los'])
+# trv_diff = np.abs(psf_b[target_noise]['b_trv'][9, :, :, 0] - true_data['b_trv'])
+# azi_diff = np.abs(psf_b[target_noise]['azi'][9, :, :, 0] - true_data['azi'])
+# im_los_diff = axs[3, 0].imshow(los_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_trv_diff = axs[3, 1].imshow(trv_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_azi_diff = axs[3, 2].imshow(np.rad2deg(azi_diff), cmap='Reds', vmin=0, vmax=180, alpha=alpha_right)
+#
+# los_diff = np.abs(pymilne_1D_b[target_noise]['b_los'] - true_data['b_los'])
+# trv_diff = np.abs(pymilne_1D_b[target_noise]['b_trv'] - true_data['b_trv'])
+# azi_diff = np.abs(pymilne_1D_b[target_noise]['azi'] - true_data['azi'])
+# im_los_diff = axs[4, 0].imshow(los_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_trv_diff = axs[4, 1].imshow(trv_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_azi_diff = axs[4, 2].imshow(np.rad2deg(azi_diff), cmap='Reds', vmin=0, vmax=180, alpha=alpha_right)
+#
+# los_diff = np.abs(pymilne_2D_b[target_noise]['b_los'] - true_data['b_los'])
+# trv_diff = np.abs(pymilne_2D_b[target_noise]['b_trv'] - true_data['b_trv'])
+# azi_diff = np.abs(pymilne_2D_b[target_noise]['azi'] - true_data['azi'])
+# im_los_diff = axs[5, 0].imshow(los_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_trv_diff = axs[5, 1].imshow(trv_diff, cmap='Reds', vmin=0, vmax=1000, alpha=alpha_right)
+# im_azi_diff = axs[5, 2].imshow(np.rad2deg(azi_diff), cmap='Reds', vmin=0, vmax=180, alpha=alpha_right)
 
 divider = make_axes_locatable(axs[-1, 0])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
@@ -228,6 +287,32 @@ divider = make_axes_locatable(axs[-1, 2])
 cax = divider.append_axes('bottom', size='5%', pad=0.05)
 cbar = fig.colorbar(im_azi, cax=cax, orientation='horizontal')
 cbar.set_label(label='$\phi$ [deg]', size=12)
+
+divider = make_axes_locatable(axs[-1, 3])
+cax = divider.append_axes('bottom', size='5%', pad=0.05)
+cbar = fig.colorbar(im_err, cax=cax, orientation='horizontal')
+cbar.set_label(label=r'$\Delta \vec{B}$ [G]', size=12)
+
+# divider = make_axes_locatable(axs[0, 0])
+# cax = divider.append_axes('top', size='5%', pad=0.05)
+# cbar = fig.colorbar(im_los_diff, cax=cax, orientation='horizontal')
+# cbar.set_label(label=r'$\Delta B_\text{LOS}$ [G]', size=12)
+# cbar.ax.xaxis.set_ticks_position("top")  # Move ticks to the top
+# cbar.ax.xaxis.set_label_position("top")  # Move label to the top
+#
+# divider = make_axes_locatable(axs[0, 1])
+# cax = divider.append_axes('top', size='5%', pad=0.05)
+# cbar = fig.colorbar(im_trv_diff, cax=cax, orientation='horizontal')
+# cbar.set_label(label=r'$\Delta B_\text{TRV}$ [G]', size=12)
+# cbar.ax.xaxis.set_ticks_position("top")  # Move ticks to the top
+# cbar.ax.xaxis.set_label_position("top")  # Move label to the top
+#
+# divider = make_axes_locatable(axs[0, 2])
+# cax = divider.append_axes('top', size='5%', pad=0.05)
+# cbar = fig.colorbar(im_azi_diff, cax=cax, orientation='horizontal')
+# cbar.set_label(label=r'$\Delta \phi$ [deg]', size=12)
+# cbar.ax.xaxis.set_ticks_position("top")  # Move ticks to the top
+# cbar.ax.xaxis.set_label_position("top")  # Move label to the top
 
 [ax.set_xticks([]) for ax in axs.ravel()]
 [ax.set_yticks([]) for ax in axs.ravel()]

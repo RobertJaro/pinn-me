@@ -58,20 +58,21 @@ subframe_1 = {'x': 34, 'y': 20, 'w': 5, 'h': 5, 'color': 'm'}
 subframe_2 = {'x': 35, 'y': 11, 'w': 8, 'h': 8, 'color': 'g'}
 
 Mm_per_pix = 0.07
-b_max = 2.0e3
 b_ref = results['PINN-ME PSF']['b_los']
+b_max_los = np.abs(b_ref).max()
+b_max_trv = np.abs(results['PINN-ME PSF']['b_trv']).max()
 extent = [0, b_ref.shape[1] * Mm_per_pix, 0, b_ref.shape[0] * Mm_per_pix]
 
 plot_kwargs = {'extent': extent, 'origin': 'lower'}
 
 fig, axs = plt.subplots(2, 3, figsize=(10, 4.5))
 
-im_los = axs[0, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[0, 1].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[0, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[0, 1].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[0, 2].imshow(np.rad2deg(results['PINN-ME PSF']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
-im_los = axs[1, 0].imshow(ref_b_los, cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 1].imshow(ref_b_trv, cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[1, 0].imshow(ref_b_los, cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[1, 1].imshow(ref_b_trv, cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[1, 2].imshow(np.rad2deg(ref_b_azi), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
 divider = make_axes_locatable(axs[0, 0])
@@ -113,10 +114,16 @@ plt.close(fig)
 ########################################################################################################################
 # plot subframe
 
-def _plot_subframe(subframe, name, ax_color, b_max=2.0e3):
+def _change_label_format(cax):
+    labels = [item.get_text() for item in cax.get_xticklabels()]
+    labels = [label.replace('−', '-') for label in labels]
+    labels = [f'{int(label) / 1000:.0f}e3' if abs(float(label)) >= 1e3 else label for label in labels]
+    cax.set_xticklabels(labels)
+
+def _plot_subframe(subframe, name, ax_color, b_max=2.0e3, azi_diff_range = 90):
     plot_kwargs = {'extent': extent, 'origin': 'lower'}
 
-    fig, axs = plt.subplots(2, 3, figsize=(5, 4.2))
+    fig, axs = plt.subplots(3, 3, figsize=(5, 6))
 
     im_los = axs[0, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
     im_trv = axs[0, 1].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
@@ -126,10 +133,15 @@ def _plot_subframe(subframe, name, ax_color, b_max=2.0e3):
     im_trv = axs[1, 1].imshow(ref_b_trv, cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
     im_azi = axs[1, 2].imshow(np.rad2deg(ref_b_azi), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
+    im_los_diff = axs[2, 0].imshow(np.abs(results['PINN-ME PSF']['b_los']) - np.abs(ref_b_los), cmap='seismic', vmin=-b_max, vmax=b_max, **plot_kwargs)
+    im_trv_diff = axs[2, 1].imshow(results['PINN-ME PSF']['b_trv'] - ref_b_trv, cmap='seismic', vmin=-b_max, vmax=b_max, **plot_kwargs)
+    im_azi_diff = axs[2, 2].imshow(np.rad2deg(results['PINN-ME PSF']['azi']) - np.rad2deg(ref_b_azi), cmap='PiYG', vmin=-azi_diff_range, vmax=azi_diff_range, **plot_kwargs)
+
+
     [ax.set_xlim(subframe['x'], subframe['x'] + subframe['w']) for ax in axs.ravel()]
     [ax.set_ylim(subframe['y'], subframe['y'] + subframe['h']) for ax in axs.ravel()]
 
-    [ax.set_xticklabels([]) for ax in axs[0, :]]
+    [ax.set_xticklabels([]) for ax in axs.ravel()]
     [ax.set_yticklabels([]) for ax in axs[:, 1:].ravel()]
 
     divider = make_axes_locatable(axs[0, 0])
@@ -137,16 +149,38 @@ def _plot_subframe(subframe, name, ax_color, b_max=2.0e3):
     fig.colorbar(im_los, cax=cax, orientation='horizontal', label=r'$B_\text{LOS}$ [G]')
     cax.xaxis.set_ticks_position('top')
     cax.xaxis.set_label_position('top')
+    _change_label_format(cax)
 
     divider = make_axes_locatable(axs[0, 1])
     cax = divider.append_axes('top', size='5%', pad=0.05)
     fig.colorbar(im_trv, cax=cax, orientation='horizontal', label=r'$B_\text{TRV}$ [G]')
     cax.xaxis.set_ticks_position('top')
     cax.xaxis.set_label_position('top')
+    _change_label_format(cax)
 
     divider = make_axes_locatable(axs[0, 2])
     cax = divider.append_axes('top', size='5%', pad=0.05)
     fig.colorbar(im_azi, cax=cax, orientation='horizontal', label=r'$\phi$ [deg]')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+
+    divider = make_axes_locatable(axs[2, 0])
+    cax = divider.append_axes('top', size='5%', pad=0.05)
+    fig.colorbar(im_los_diff, cax=cax, orientation='horizontal', label=r'$\Delta |B_\text{LOS}|$ [G]')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+    _change_label_format(cax)
+
+    divider = make_axes_locatable(axs[2, 1])
+    cax = divider.append_axes('top', size='5%', pad=0.05)
+    fig.colorbar(im_trv_diff, cax=cax, orientation='horizontal', label=r'$\Delta B_\text{TRV}$ [G]')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+    _change_label_format(cax)
+
+    divider = make_axes_locatable(axs[2, 2])
+    cax = divider.append_axes('top', size='5%', pad=0.05)
+    fig.colorbar(im_azi_diff, cax=cax, orientation='horizontal', label=r'$\Delta \phi$ [deg]')
     cax.xaxis.set_ticks_position('top')
     cax.xaxis.set_label_position('top')
 
@@ -167,8 +201,8 @@ def _plot_subframe(subframe, name, ax_color, b_max=2.0e3):
     fig.savefig(f'{output_path}/{name}.png', transparent=True, dpi=300)
     plt.close(fig)
 
-_plot_subframe(subframe_1, 'subframe_1', subframe_1['color'], b_max=500)
-_plot_subframe(subframe_2, 'subframe_2', subframe_2['color'], b_max=2.5e3)
+_plot_subframe(subframe_1, 'subframe_1', subframe_1['color'], b_max=1.2e3, azi_diff_range = 45)
+_plot_subframe(subframe_2, 'subframe_2', subframe_2['color'], b_max=2.4e3, azi_diff_range = 45)
 
 ########################################################################################################################
 # save individual images
@@ -188,7 +222,7 @@ print(f'Q: {Q.min()} - {Q.max()}')
 print(f'U: {U.min()} - {U.max()}')
 print(f'V: {V.min()} - {V.max()}')
 
-plt.imsave(f'{output_path}/b.png', b, cmap='viridis', vmin=0, vmax=b_max)
+plt.imsave(f'{output_path}/b.png', b, cmap='viridis', vmin=0, vmax=b_max_los)
 plt.imsave(f'{output_path}/theta.png', theta, cmap='seismic', vmin=0, vmax=np.pi)
 plt.imsave(f'{output_path}/chi.png', chi, cmap='twilight', vmin=-np.pi, vmax=np.pi)
 

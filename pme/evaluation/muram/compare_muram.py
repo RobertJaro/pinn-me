@@ -53,7 +53,8 @@ for k, path in paths.items():
 # plot example images
 
 subframe = {'x': 60, 'y': 4, 'w': 80, 'h': 40}
-b_max = 2.5e3  # np.max(np.abs(results['PINN-ME']['b_los']))
+b_max_los = np.max(np.abs(results['PINN-ME']['b_los']))
+b_max_trv = np.max(np.abs(results['PINN-ME']['b_trv']))
 Mm_per_pix = 0.192 * 4
 b_ref = results['PINN-ME']['b_los']
 extent = [0, b_ref.shape[1] * Mm_per_pix, 0, b_ref.shape[0] * Mm_per_pix]
@@ -62,24 +63,24 @@ plot_kwargs = {'extent': extent, 'origin': 'lower'}
 
 fig, axs = plt.subplots(5, 3, figsize=(12, 5))
 
-im_los = axs[0, 0].imshow(results['MURaM']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[0, 1].imshow(results['MURaM']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[0, 0].imshow(results['MURaM']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[0, 1].imshow(results['MURaM']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[0, 2].imshow(np.rad2deg(results['MURaM']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
-im_los = axs[1, 0].imshow(results['PINN-ME']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 1].imshow(results['PINN-ME']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[1, 0].imshow(results['PINN-ME']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[1, 1].imshow(results['PINN-ME']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[1, 2].imshow(np.rad2deg(results['PINN-ME']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
-im_los = axs[2, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[2, 1].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[2, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[2, 1].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[2, 2].imshow(np.rad2deg(results['PINN-ME PSF']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
-im_los = axs[3, 0].imshow(results['PyMilne 1D']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[3, 1].imshow(results['PyMilne 1D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[3, 0].imshow(results['PyMilne 1D']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[3, 1].imshow(results['PyMilne 1D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[3, 2].imshow(np.rad2deg(results['PyMilne 1D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
-im_los = axs[4, 0].imshow(results['PyMilne 2D']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[4, 1].imshow(results['PyMilne 2D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
+im_los = axs[4, 0].imshow(results['PyMilne 2D']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_trv = axs[4, 1].imshow(results['PyMilne 2D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
 im_azi = axs[4, 2].imshow(np.rad2deg(results['PyMilne 2D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
 
 divider = make_axes_locatable(axs[0, 0])
@@ -121,25 +122,58 @@ plt.close(fig)
 ########################################################################################################################
 # plot subframe
 
+b_los_true = block_reduce(results['MURaM']['b_los'], (4, 4), np.mean)
+b_trv_true = block_reduce(results['MURaM']['b_trv'], (4, 4), np.mean)
+b_azi_true = block_reduce(results['MURaM']['azi'], (4, 4), np.mean)
+b_diff_max = 500
+
 plot_kwargs = {'extent': extent, 'origin': 'lower'}
 
-fig, axs = plt.subplots(3, 5, figsize=(10, 3.5))
+fig, axs = plt.subplots(5, 6, figsize=(11, 5), constrained_layout=True)
 
-im_los = axs[0, 0].imshow(results['MURaM']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 0].imshow(results['MURaM']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
-im_azi = axs[2, 0].imshow(np.rad2deg(results['MURaM']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
-im_los = axs[0, 1].imshow(results['PINN-ME']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 1].imshow(results['PINN-ME']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
-im_azi = axs[2, 1].imshow(np.rad2deg(results['PINN-ME']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
-im_los = axs[0, 2].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 2].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
-im_azi = axs[2, 2].imshow(np.rad2deg(results['PINN-ME PSF']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
-im_los = axs[0, 3].imshow(results['PyMilne 1D']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 3].imshow(results['PyMilne 1D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
-im_azi = axs[2, 3].imshow(np.rad2deg(results['PyMilne 1D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
-im_los = axs[0, 4].imshow(results['PyMilne 2D']['b_los'], cmap='RdBu_r', vmin=-b_max, vmax=b_max, **plot_kwargs)
-im_trv = axs[1, 4].imshow(results['PyMilne 2D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max, **plot_kwargs)
-im_azi = axs[2, 4].imshow(np.rad2deg(results['PyMilne 2D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+im_los = axs[0, 0].imshow(results['MURaM']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+axs[0, 1].set_axis_off()
+im_trv = axs[0, 2].imshow(results['MURaM']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
+axs[0, 3].set_axis_off()
+im_azi = axs[0, 4].imshow(np.rad2deg(results['MURaM']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+axs[0, 5].set_axis_off()
+
+im_los = axs[1, 0].imshow(results['PINN-ME']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_los_diff = axs[1, 1].imshow(np.abs(results['PINN-ME']['b_los'] - b_los_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_trv = axs[1, 2].imshow(results['PINN-ME']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
+im_trv_diff = axs[1, 3].imshow(np.abs(results['PINN-ME']['b_trv'] - b_trv_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_azi = axs[1, 4].imshow(np.rad2deg(results['PINN-ME']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+im_azi_diff = axs[1, 5].imshow(np.rad2deg(np.abs(results['PINN-ME']['azi'] - b_azi_true)), cmap='Reds', vmin=0, vmax=180, **plot_kwargs)
+
+im_los = axs[2, 0].imshow(results['PINN-ME PSF']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_los_diff = axs[2, 1].imshow(np.abs(results['PINN-ME PSF']['b_los'] - b_los_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_trv = axs[2, 2].imshow(results['PINN-ME PSF']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
+im_trv_diff = axs[2, 3].imshow(np.abs(results['PINN-ME PSF']['b_trv'] - b_trv_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_azi = axs[2, 4].imshow(np.rad2deg(results['PINN-ME PSF']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+im_azi_diff = axs[2, 5].imshow(np.rad2deg(np.abs(results['PINN-ME PSF']['azi'] - b_azi_true)), cmap='Reds', vmin=0, vmax=180, **plot_kwargs)
+
+
+im_los = axs[3, 0].imshow(results['PyMilne 1D']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_los_diff = axs[3, 1].imshow(np.abs(results['PyMilne 1D']['b_los'] - b_los_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_trv = axs[3, 2].imshow(results['PyMilne 1D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
+im_trv_diff = axs[3, 3].imshow(np.abs(results['PyMilne 1D']['b_trv'] - b_trv_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_azi = axs[3, 4].imshow(np.rad2deg(results['PyMilne 1D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+im_azi_diff = axs[3, 5].imshow(np.rad2deg(np.abs(results['PyMilne 1D']['azi'] - b_azi_true)), cmap='Reds', vmin=0, vmax=180, **plot_kwargs)
+
+im_los = axs[4, 0].imshow(results['PyMilne 2D']['b_los'], cmap='RdBu_r', vmin=-b_max_los, vmax=b_max_los, **plot_kwargs)
+im_los_diff = axs[4, 1].imshow(np.abs(results['PyMilne 2D']['b_los'] - b_los_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_trv = axs[4, 2].imshow(results['PyMilne 2D']['b_trv'], cmap='cividis', vmin=0, vmax=b_max_trv, **plot_kwargs)
+im_trv_diff = axs[4, 3].imshow(np.abs(results['PyMilne 2D']['b_trv'] - b_trv_true), cmap='Reds', vmin=0, vmax=b_diff_max, **plot_kwargs)
+im_azi = axs[4, 4].imshow(np.rad2deg(results['PyMilne 2D']['azi']), cmap='twilight', vmin=0, vmax=180, **plot_kwargs)
+im_azi_diff = axs[4, 5].imshow(np.rad2deg(np.abs(results['PyMilne 2D']['azi'] - b_azi_true)), cmap='Reds', vmin=0, vmax=180, **plot_kwargs)
+
+# add colorbars
+plt.colorbar(im_los, ax=axs[0, 0], orientation='horizontal', pad=0.05, label=r'$B_\text{LOS}$ [G]', location='top', shrink=0.8)
+plt.colorbar(im_los_diff, ax=axs[0, 1], orientation='horizontal', pad=0.05, label=r'$|B_\text{LOS} - B_\text{LOS, ref}|$ [G]', location='top', shrink=0.8)
+plt.colorbar(im_trv, ax=axs[0, 2], orientation='horizontal', pad=0.05, label=r'$B_\text{TRV}$ [G]', location='top', shrink=0.8)
+plt.colorbar(im_trv_diff, ax=axs[0, 3], orientation='horizontal', pad=0.05, label=r'$|B_\text{TRV} - B_\text{TRV, ref}|$ [G]', location='top', shrink=0.8)
+plt.colorbar(im_azi, ax=axs[0, 4], orientation='horizontal', pad=0.05, label=r'$\phi$ [deg]', location='top', shrink=0.8)
+plt.colorbar(im_azi_diff, ax=axs[0, 5], orientation='horizontal', pad=0.05, label=r'$|\phi - \phi_\text{ref}|$ [deg]', location='top', shrink=0.8)
 
 [ax.set_xlabel('X [Mm]', fontsize=8) for ax in axs[-1, :]]
 [ax.set_ylabel('Y [Mm]', fontsize=8) for ax in axs[:, 0]]
@@ -150,9 +184,11 @@ im_azi = axs[2, 4].imshow(np.rad2deg(results['PyMilne 2D']['azi']), cmap='twilig
 [ax.set_xticklabels([]) for ax in axs[:-1, :].ravel()]
 [ax.set_yticklabels([]) for ax in axs[:, 1:].ravel()]
 
-[ax.set_xticks(range(60, 140, 20)) for ax in axs.ravel()]
+[ax.set_xticks(range(60, 140, 30)) for ax in axs.ravel()]
 
-fig.tight_layout()
+# axs[-2, 0].set_xlabel('X [Mm]', fontsize=8)
+# axs[-2, 0].set_xticklabels(range(60, 140, 30))
+
 fig.savefig(f'{output_path}/subframe.png', transparent=True, dpi=300)
 plt.close(fig)
 

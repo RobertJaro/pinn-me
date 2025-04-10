@@ -2,7 +2,7 @@
 
 #PBS -N pinn-me
 #PBS -A P22100000
-#PBS -q main
+#PBS -q casper
 #PBS -l job_priority=economy
 #PBS -l select=1:ncpus=16:ngpus=4:mem=64gb
 #PBS -l walltime=12:00:00
@@ -21,19 +21,19 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #################################################################################
 # train
 
-python3 -m pme.inversion --config config/muram/muram_sunspot.yaml
-#python3 -m pme.inversion --config config/muram/muram_sunspot_psf.yaml
+#python3 -m pme.inversion --config config/muram/muram_sunspot.yaml
+python3 -m pme.inversion --config config/muram/muram_sunspot_psf.yaml
 
 #################################################################################
 # convert to npz files
 
 python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_psf_v05/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_psf_v01.npz
+python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_psf_v05/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_psf_v02.npz
 
 #################################################################################
 # plot examples
 
-python3 -i -m pme.evaluation.muram.compare_muram --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram' --output '/glade/work/rjarolim/pinn_me/muram/evaluation'
+python3 -m pme.evaluation.muram.compare_muram --input '/glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram' --output '/glade/work/rjarolim/pinn_me/muram/evaluation'
 
 
 #################################################################################
