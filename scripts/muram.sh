@@ -27,8 +27,8 @@ python3 -m pme.inversion --config config/muram/muram_sunspot_psf.yaml
 #################################################################################
 # convert to npz files
 
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_v01.npz
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_psf_v05/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_psf_v02.npz
+python3 -m pme.convert.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_v04/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_v01.npz
+python3 -m pme.convert.pme_to_npz --input /glade/work/rjarolim/pinn_me/muram/muram_sunspot_psf_v05/inversion.pme --output /glade/campaign/hao/radmhd/rjarolim/PINN-ME/muram/muram_sunspot_psf_v02.npz
 
 #################################################################################
 # plot examples

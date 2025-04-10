@@ -11,4 +11,4 @@ module load cuda/11.7.1
 conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
-python3 -m pme.evaluation.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_data/test_psf/inversion.pme
+python3 -m pme.convert.pme_to_npz --input /glade/work/rjarolim/pinn_me/test_data/test_psf/inversion.pme
