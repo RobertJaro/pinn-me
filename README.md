@@ -30,7 +30,7 @@ https://csac.hao.ucar.edu/sp_data.php
 
 Example Hinode/SOTSP data available at: https://app.globus.org/file-manager?origin_id=aa4a093a-5b00-4a4b-b8d4-5bb65f324c8c&origin_path=%2F
 
-
+Create .yaml file for the configuration. The following is an example Hinode/SOTSP configuration file:
 ```yaml
 ---
 base_path: "<<PATH TO OUTPUT DIRECTORY>>"
