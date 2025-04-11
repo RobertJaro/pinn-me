@@ -1,9 +1,13 @@
 import setuptools
 from setuptools import setup
 
+with open("README.md", "r") as fh:
+    long_description = fh.read()
+
+
 setup(
     name='pinn-me',
-    version='0.1',
+    version='0.1.1',
     packages=setuptools.find_packages(),
     url='https://github.com/RobertJaro/pinn-me',
     license='GNU GENERAL PUBLIC LICENSE',
@@ -16,5 +20,7 @@ setup(
         'console_scripts': [
             'pinn-me-inversion = pme.inversion:main',
             'pinn-me-to-npz = pme.convert.pme_to_npz:main',
-        ]}
+        ]},
+    long_description=long_description,
+    long_description_content_type='text/markdown',
 )
