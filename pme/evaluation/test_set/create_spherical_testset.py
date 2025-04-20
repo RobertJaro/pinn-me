@@ -137,8 +137,11 @@ def observed_params(x_POS, y_POS, carrington_lon, carrington_lat, carrington_pAn
                 Reprojected ME parameters for the synthesis
     """
 
-    lat_observed = np.arcsin(y_POS / sun_radius)
-    lon_observed = np.arcsin(x_POS / sun_radius)
+
+
+    lat_observed = np.arcsin(y_POS / sun_radius) - carrington_lat
+    lon_observed = np.arcsin(x_POS / sun_radius) - carrington_lon
+
     a_matrix = image_to_spherical_matrix(lon_observed, lat_observed,
                                          carrington_lon, carrington_lat,
                                          pAng=carrington_pAng)
@@ -286,22 +289,13 @@ class Carrington_map():
 
         plt.clf()
 
-if __name__ == '__main__':
-    # resulting image size
-    output_dir = "/home/memolnar/Data/PINN-ME/datasets/spherical/test_case/"
-    nx_image = 100
-    ny_image = 100
-    time_string = "2010-01-01T00:00:00"
+def write_testcase_file(output_dir, nx_image, ny_image, image_size,
+                        sc, filename='blah.fits'):
 
-    # Define observer time and xyz
-    observer_lon = 0 * u.deg
-    observer_lat = 0 * u.deg
-    observer_distance = 1 * u.AU
-    obs_time = Time(time_string)
+    observer_lon = sc.lon
+    observer_lat = sc.lat
+    obs_time = sc.obstime
     observer_pAng = 0 * u.deg # Corresponding to CROTA angle for the observer
-
-    sc = SkyCoord(observer_lon, observer_lat, observer_distance,
-                  obstime=obs_time, observer="self", frame="heliographic_carrington")
 
     sun_radius = sun.angular_radius(obs_time)
     print(f"the sun radius in arcsed: {sun_radius}")
@@ -309,15 +303,13 @@ if __name__ == '__main__':
     # resulting image range on the sun in arcseconds
     # in notation [x0 x1 y0 y1] in terms of left bottom / right top x/y coordinates
 
-    image_size = [2000 * u.arcsec, 2000 * u.arcsec]
     plate_scale = [image_size[0] / nx_image, image_size[1] / ny_image]
 
-    x0 = -1000 * u.arcsec
-    x1 = 1000 * u.arcsec
-    y0 = -1000 * u.arcsec
-    y1 = 1000 * u.arcsec
+    x0 = -0.5 * image_size[0]
+    x1 = 0.5 * image_size[0]
+    y0 = -0.5 * image_size[1]
+    y1 = 0.5 * image_size[1]
 
-    shift_lon = -30 / 180 * 3.1415
 
     x_coords_image_plane = np.linspace(x0, x1, num=nx_image)
     y_coords_image_plane = np.linspace(y0, y1, num=ny_image)
@@ -346,8 +338,10 @@ if __name__ == '__main__':
         ny_testset = parameter_array.shape[1]
 
         # define the spherical coordinate system for the data
-        lat_array = np.linspace(-np.pi/2 + shift_lon, np.pi/2 + shift_lon, num=nx_testset) * u.rad
-        lon_array = np.linspace(-np.pi, np.pi, num=ny_testset) * u.rad
+        lat_array = np.linspace(-np.pi/2,
+                                np.pi/2, num=nx_testset) * u.rad
+        lon_array = np.linspace(-np.pi,
+                                np.pi, num=ny_testset) * u.rad
         params_dict[el] = parameter_array
         parameters_interpolators[el] = RectBivariateSpline(lon_array, lat_array, parameter_array)
 
@@ -361,9 +355,9 @@ if __name__ == '__main__':
                 continue
 
             params_transformed[f'{xx}_{yy}'] = observed_params(xy_meshgrid_image_plane[0][xx, yy],
-                                                                 xy_meshgrid_image_plane[1][xx, yy],
-                                                                 observer_lon, observer_lat, observer_pAng,
-                                                                 parameters_interpolators, sun_radius=sun_radius)
+                                                               xy_meshgrid_image_plane[1][xx, yy],
+                                                               observer_lon, observer_lat, observer_pAng,
+                                                               parameters_interpolators, sun_radius=sun_radius)
 
 
     Bx = make_map_from_dicts(params_transformed, 'Bx', (nx_image, ny_image))
@@ -373,31 +367,33 @@ if __name__ == '__main__':
     mu = make_map_from_dicts(params_transformed, 'mu', (nx_image, ny_image))
 
 
-    Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
-    plt.clf()
-    im1 = plt.imshow(Bz.T, cmap="seismic")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, f"Bz_map_{shift_lon:0.3f}_deg_lon_shift.png"))
-    plt.clf()
-    im1 = plt.imshow(b0.T, cmap="plasma")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, f"b0_{shift_lon:0.3f}_deg_lon_shift.png"))
-    plt.clf()
-    im1 = plt.imshow(b0.T, cmap="plasma")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, "b0_{shift_lon:0.3f}_deg_lon_shift.png"))
-    plt.clf()
-    im1 = plt.imshow(Bx.T, cmap="seismic")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, "Bx_map_{shift_lon:0.3f}_deg_lon_shift.png"))
-    plt.clf()
-    im1 = plt.imshow(By.T, cmap="seismic")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, "By_map_{shift_lon:0.3f}_deg_lon_shift.png"))
-    plt.clf()
-    im1 = plt.imshow(Btot.T, cmap="seismic")
-    plt.colorbar(im1)
-    plt.savefig(os.path.join(output_dir, f"B_map_{shift_lon:0.3f}_deg_lon_shift.png"))
+    plot_results = True
+    if plot_results:
+        Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
+        plt.clf()
+        im1 = plt.imshow(Bz.T, cmap="seismic")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, f"Bz_map_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
+        plt.clf()
+        im1 = plt.imshow(b0.T, cmap="plasma")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, f"b0_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
+        plt.clf()
+        im1 = plt.imshow(b0.T, cmap="plasma")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, "b0_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
+        plt.clf()
+        im1 = plt.imshow(Bx.T, cmap="seismic")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, "Bx_map_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
+        plt.clf()
+        im1 = plt.imshow(By.T, cmap="seismic")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, "By_map_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
+        plt.clf()
+        im1 = plt.imshow(Btot.T, cmap="seismic")
+        plt.colorbar(im1)
+        plt.savefig(os.path.join(output_dir, f"B_map_{observer_lon:0.3f}_d_lon_{observer_lat:0.3f}_deg_lat.png"))
 
     synthesizer = Synthesizer()
     spectra = {}
@@ -427,8 +423,6 @@ if __name__ == '__main__':
                                                      (nx_image, ny_image))
 
     header = fits.Header()
-
-
     filename = "blah.fits"
     filename = os.path.join(output_dir, filename)
     # Create PrimaryHDU for the primary array (array1)
@@ -444,6 +438,7 @@ if __name__ == '__main__':
     # Create header for the secondary array
     hdu2.header['TITLE'] = 'COMPRESSED IMAGE'
     hdu2.header['DIM'] = 4
+
     hdu2.header['CONTENT'] = 'Simulated Test case Data for PINNME'
     hdu2.header['TELESCOP'] = 'Momos computer'
     hdu2.header['DATE-OBS'] = time_string
@@ -460,8 +455,8 @@ if __name__ == '__main__':
     hdu2.header['CROTA2'] = 0
     hdu2.header['CUNIT1'] = 'arcsec'
     hdu2.header['CUNIT2'] = 'arcsec'
-    hdu2.header['CRLT_OBS'] = 0
-    hdu2.header['CRLN_OBS'] = 0
+    hdu2.header['CRLT_OBS'] = observer_lat.value
+    hdu2.header['CRLN_OBS'] = observer_lon.value
 
     # Combine HDUs into an HDUList
     hdulist = fits.HDUList([hdu1, hdu2])
@@ -469,3 +464,26 @@ if __name__ == '__main__':
     # Write to a FITS file
     hdulist.writeto(filename, overwrite=True)
     print(f"FITS file {filename} written successfully.")
+
+
+if __name__ == '__main__':
+    # resulting image size
+    output_dir = "/home/memolnar/Data/PINN-ME/datasets/spherical/test_case/"
+    nx_image = 100
+    ny_image = 100
+
+    image_size = [2000 * u.arcsec, 2000 * u.arcsec]
+    time_string = "2010-01-01T00:00:00"
+
+    # Define observer time and xyz
+
+    observer_lon = 20 * u.deg
+    observer_lat = 10 * u.deg
+    observer_distance = 1 * u.AU
+    obs_time = Time(time_string)
+    observer_pAng = 0 * u.deg # Corresponding to CROTA angle for the observer
+    sc = SkyCoord(observer_lon, observer_lat, observer_distance,
+                  obstime=obs_time, observer="self", frame="heliographic_carrington")
+
+    write_testcase_file(output_dir, nx_image, ny_image, image_size,
+                        sc, filename='blah.fits')
