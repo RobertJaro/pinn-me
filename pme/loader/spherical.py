@@ -39,7 +39,6 @@ class SphericalDataModule(LightningDataModule):
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
         train_files = self._load_files(train_config['data_path'])
-        train_files = train_files
         with Pool(num_workers) as p:
             args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
                        repeat(stokes_normalization), repeat(dataset_batch_size), repeat(work_directory))
