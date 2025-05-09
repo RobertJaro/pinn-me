@@ -1,16 +1,21 @@
 import argparse
 import glob
 import os.path
-from distutils.command.install_data import install_data
+from datetime import datetime, timedelta
 from multiprocessing import Pool
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from astropy import units as u
+from astropy.coordinates import SkyCoord, EarthLocation
+from astropy.time import Time
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sunpy.coordinates import frames, sun
+from sunpy.map import make_heliographic_header, Map, make_fitswcs_header, all_coordinates_from_map
 
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
 from pme.train.me_atmosphere import MEAtmosphere
 
 
@@ -187,52 +192,132 @@ class TestSetGenerator():
         self.ny = ny
 
     def load_time_step(self, time_step):
+        parameters = self._load_parameters(time_step)
+        stokes_profiles = self.convert_to_profiles(**parameters)
+
+        return {'stokes_profiles': stokes_profiles}, parameters
+
+    def load_spherical_time_step(self, time_step):
+        date_0 = datetime(2025, 1, 1, 0, 0, 0)
+        date = date_0 + timedelta(hours=time_step)
+
+        parameters = self._load_parameters(time_step)
+
+        b_field = parameters['b_field']
+        b_incl = parameters['inc']
+        b_azi = parameters['azi']
+
+        # Convert to spherical coordinates
+        b_r = b_field * np.cos(b_incl)
+        b_theta = b_field * np.sin(b_incl) * np.cos(b_azi)
+        b_phi = b_field * np.sin(b_incl) * np.sin(b_azi)
+
+        v_r = parameters['v_dop']
+        v_theta = np.zeros_like(v_r)
+        v_phi = np.ones_like(v_r) * 2e4 # TODO solar differential rotation
+
+        reference_coord = SkyCoord(0 * u.arcsec, 0 * u.arcsec, obstime=date, observer='earth',
+                                   frame=frames.Helioprojective)
+        dummy_data = np.zeros((512, 512), dtype=np.float32)
+        # Define time and observer location
+        obstime = Time("2025-05-09T12:00:00")
+        location = EarthLocation.of_site('greenwich')  # or use lat/lon if you have a custom site
+
+        # Get angular radius of the Sun from this observer's location
+        angular_radius = sun.angular_radius(obstime, location)
+        scale = angular_radius.to_value(u.arcsec) / (512 * u.pix)
+        helioprojective_header = make_fitswcs_header(dummy_data, reference_coord, scale=(scale, scale))
+        s_map = Map(helioprojective_header, dummy_data)
+
+        spherical_coords = all_coordinates_from_map(s_map)
+
+        projective_coords = spherical_coords.transform_to(frames.Helioprojective)
+        radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
+        mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
+        mu = mu.astype(np.float32)
+
+        carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
+        lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
+        r = carrington_coords.radius
+        #
+        r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
+        carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
+        cartesian_coords = spherical_to_cartesian(carrington_coords)
+
+        # create rtp transform
+        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
+        # create observer transform
+        latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
+        pAng = -np.deg2rad(s_map.meta['CROTA2'])
+        a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+        rtp_to_img_transform = np.linalg.inv(a_matrix)
+
+        b_field = torch.norm(b_img, dim=-1, keepdim=True)
+
+        # TODO: why is this shifted by pi?
+        # theta = torch.pi - acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        # chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2]) + torch.pi / 2
+
+        theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+
+
+        dummy_data = np.zeros((self.nx, self.ny))
+
+        carr_header = make_heliographic_header(date, 'earth', dummy_data.shape, frame='carrington')
+
+        # cartesian_to_spherical_transform =
+        # rtp_to_img_transform =
+
+        project_parameters = {}
+        for k, parameter in parameters.items():
+            parameter_map = Map(parameter, carr_header)
+            parameter_map = parameter_map.transform_to(helioprojective_header)
+            project_parameters[k] = parameter_map.data
+
+        stokes_profiles = self.convert_to_profiles(**project_parameters)
+        return {'stokes_profiles': stokes_profiles, 'parameters': parameters, 'project_parameters': project_parameters}
+
+    def convert_to_profiles(self, b0, b1, b_field, azi, damping, kl, mu, inc, vdop, vmac):
+        atmos = MEAtmosphere(self.lambda0, self.jUp, self.jLow, self.gUp, self.gLow, self.lambda_grid)
+        # flatten and forward
+        I, Q, U, V = atmos.forward(b_field.reshape(-1, 1), inc.reshape(-1, 1), azi.reshape(-1, 1),
+                                   vmac.reshape(-1, 1), damping.reshape(-1, 1),
+                                   b0.reshape(-1, 1), b1.reshape(-1, 1), mu.reshape(-1, 1),
+                                   vdop.reshape(-1, 1), kl.reshape(-1, 1))
+        stokes_profiles = torch.stack([I, Q, U, V], -2).cpu().numpy()
+        # (x, y, n_lambda, n_stokes)
+        stokes_profiles = stokes_profiles.reshape(*b_field.shape, 4, *self.lambda_grid.shape)
+        return stokes_profiles
+
+    def _load_parameters(self, time_step):
         xx, yy = np.meshgrid(np.linspace(-0.5 * self.nx, 0.5 * self.nx, self.nx),
                              np.linspace(-0.5 * self.ny, 0.5 * self.ny, self.ny),
                              indexing='ij')
         r0 = 50 + time_step / 2
-
         r, t = convert_xy_to_rt(xx, yy)
-
         # B --> (100, 100); lambda --> (50,); B * lambda --> (100, 100, 50)
         # B[..., None] --> (100, 100, 1); lambda[None, None, :] --> (1, 1, 50)
-
         b_field = self.b_field_0 * (r0 / (r + r0)) ** 2
         # theta is defined between 0 and pi
-        t_arr = ((r % r0) / r0 * np.pi)
-        ch_arr = (t + time_step / 180 * np.pi)  # slow down the rotation
-
+        incl_arr = ((r % r0) / r0 * np.pi)
+        azi_arr = (t + time_step / 180 * np.pi)  # slow down the rotation
         b0_arr = self.b0 * (10 * r0 / (r + 10 * r0)) ** 2
         b1_arr = self.b1 * (10 * r0 / (r + 10 * r0)) ** 2
-
-        atmos = MEAtmosphere(self.lambda0, self.jUp, self.jLow, self.gUp, self.gLow, self.lambda_grid)
-
         b_field = torch.tensor(b_field, dtype=torch.float32)
-        t_arr = torch.tensor(t_arr, dtype=torch.float32)
-        ch_arr = torch.tensor(ch_arr, dtype=torch.float32)
+        incl_arr = torch.tensor(incl_arr, dtype=torch.float32)
+        azi_arr = torch.tensor(azi_arr, dtype=torch.float32)
         b0_arr = torch.tensor(b0_arr, dtype=torch.float32)
         b1_arr = torch.tensor(b1_arr, dtype=torch.float32)
-
         vmac_arr = self.vmac * torch.ones_like(b_field)
         damping_arr = self.damping * torch.ones_like(b_field)
         mu_arr = self.mu * torch.ones_like(b_field)
         vdop_arr = self.vdop * torch.ones_like(b_field)
         kl_arr = self.kl * torch.ones_like(b_field)
-
-        # flatten and forward
-        I, Q, U, V = atmos.forward(b_field.reshape(-1, 1), t_arr.reshape(-1, 1), ch_arr.reshape(-1, 1),
-                                   vmac_arr.reshape(-1, 1), damping_arr.reshape(-1, 1),
-                                   b0_arr.reshape(-1, 1), b1_arr.reshape(-1, 1), mu_arr.reshape(-1, 1),
-                                   vdop_arr.reshape(-1, 1), kl_arr.reshape(-1, 1))
-
-        stokes_profiles = torch.stack([I, Q, U, V], -2).cpu().numpy()
-        # (x, y, n_lambda, n_stokes)
-        stokes_profiles = stokes_profiles.reshape(*r.shape, 4, *self.lambda_grid.shape)
-
-        return {'stokes_profiles': stokes_profiles}, {'b_field': b_field, 'theta': t_arr, 'chi': ch_arr,
-                                                      'b0': b0_arr, 'b1': b1_arr, 'vmac': vmac_arr,
-                                                      'damping': damping_arr, 'mu': mu_arr,
-                                                      'vdop': vdop_arr, 'kl': kl_arr}
+        # return b0_arr, b1_arr, b_field, azi_arr, damping_arr, kl_arr, mu_arr, r, incl_arr, vdop_arr, vmac_arr
+        return {'b0': b0_arr, 'b1': b1_arr, 'b_field': b_field, 'azi': azi_arr,
+                'damping': damping_arr, 'kl': kl_arr, 'mu': mu_arr, 'inc': incl_arr,
+                'vdop': vdop_arr, 'vmac': vmac_arr}
 
     def create_time_step_file(self, t_step, base_path):
         profiles, parameters = self.load_time_step(t_step)
