@@ -1,5 +1,6 @@
 import numpy as np
 
+# Some documentation to be included
 
 def spherical_to_cartesian_matrix(c):
     r, t, p = c[..., 0], c[..., 1], c[..., 2]
@@ -97,23 +98,38 @@ def los_trv_azi_to_img(b, ambiguous=False, f=np):
     b = f.stack([B_x, B_y, B_z], -1)
     return b
 
-def image_to_spherical_matrix(lon, lat, latc, lonc, pAng, sin=np.sin, cos=np.cos):
-    a11 = -sin(latc) * sin(pAng) * sin(lon - lonc) + cos(pAng) * cos(lon - lonc)
-    a12 = sin(latc) * cos(pAng) * sin(lon - lonc) + sin(pAng) * cos(lon - lonc)
-    a13 = -cos(latc) * sin(lon - lonc)
-    a21 = -sin(lat) * (sin(latc) * sin(pAng) * cos(lon - lonc) + cos(pAng) * sin(lon - lonc)) - cos(lat) * cos(
-        latc) * sin(pAng)
-    a22 = sin(lat) * (sin(latc) * cos(pAng) * cos(lon - lonc) - sin(pAng) * sin(lon - lonc)) + cos(lat) * cos(
-        latc) * cos(pAng)
-    a23 = -cos(latc) * sin(lat) * cos(lon - lonc) + sin(latc) * cos(lat)
-    a31 = cos(lat) * (sin(latc) * sin(pAng) * cos(lon - lonc) + cos(pAng) * sin(lon - lonc)) - sin(lat) * cos(
-        latc) * sin(pAng)
-    a32 = -cos(lat) * (sin(latc) * cos(pAng) * cos(lon - lonc) - sin(pAng) * sin(lon - lonc)) + sin(lat) * cos(
-        latc) * cos(pAng)
-    a33 = cos(lat) * cos(latc) * cos(lon - lonc) + sin(lat) * sin(latc)
+def vector_cartesian_to_polar(v, f=np):
+    B_x, B_y, B_z = v[..., 0], v[..., 1], v[..., 2]
+    B_total = np.sqrt(B_x**2 + B_y **2 + B_z**2)
+    theta = np.arccos(B_z / B_total)
+    phi = np.arccos(B_y / np.sqrt(B_x**2 + B_y**2))
+    b = f.stack([B_total, theta, phi], -1)
+    return b
 
-    a_matrix = np.stack([a31, a32, a33, a21, a22, a23, a11, a12, a13], axis=-1)
-    a_matrix = a_matrix.reshape((*a_matrix.shape[:-1], 3, 3))
+def image_to_spherical_matrix(lon, lat, latc, lonc, pAng, sin=np.sin, cos=np.cos):
+    ''' Transformation of the POS to the heliocentric frame for any vector
+    '''
+
+    try:
+        a11 = -sin(latc) * sin(pAng) * sin(lon - lonc) + cos(pAng) * cos(lon - lonc)
+        a12 = sin(latc) * cos(pAng) * sin(lon - lonc) + sin(pAng) * cos(lon - lonc)
+        a13 = -cos(latc) * sin(lon - lonc)
+        a21 = -sin(lat) * (sin(latc) * sin(pAng) * cos(lon - lonc) + cos(pAng) * sin(lon - lonc)) - cos(lat) * cos(
+            latc) * sin(pAng)
+        a22 = sin(lat) * (sin(latc) * cos(pAng) * cos(lon - lonc) - sin(pAng) * sin(lon - lonc)) + cos(lat) * cos(
+            latc) * cos(pAng)
+        a23 = -cos(latc) * sin(lat) * cos(lon - lonc) + sin(latc) * cos(lat)
+        a31 = cos(lat) * (sin(latc) * sin(pAng) * cos(lon - lonc) + cos(pAng) * sin(lon - lonc)) - sin(lat) * cos(
+            latc) * sin(pAng)
+        a32 = -cos(lat) * (sin(latc) * cos(pAng) * cos(lon - lonc) - sin(pAng) * sin(lon - lonc)) + sin(lat) * cos(
+            latc) * cos(pAng)
+        a33 = cos(lat) * cos(latc) * cos(lon - lonc) + sin(lat) * sin(latc)
+
+        a_matrix = np.stack([a31, a32, a33, a21, a22, a23, a11, a12, a13], axis=-1)
+        a_matrix = a_matrix.reshape((*a_matrix.shape[:-1], 3, 3))
+
+    except:
+        a_matrix = np.ones((3, 3)) + np.array([[0, 0, 1], [1, 0, 0], [0, 0, 0]])
     return a_matrix
 
 # hmi_b2ptr
