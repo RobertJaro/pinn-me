@@ -158,6 +158,8 @@ class MEModule(LightningModule):
         I, Q, U, V = self.forward_model(**output, mu=mu)
 
         # reshape to original coords shape
+
+
         I = I.reshape(*coords_shape[:-1], -1)
         Q = Q.reshape(*coords_shape[:-1], -1)
         U = U.reshape(*coords_shape[:-1], -1)

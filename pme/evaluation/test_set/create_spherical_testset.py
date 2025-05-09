@@ -184,6 +184,7 @@ def observed_params(sunpy_dummy_map,
     transform_params['Bx'] = B_transformed[..., 0]
     transform_params['By'] = B_transformed[..., 1]
     transform_params['Bz'] = B_transformed[..., 2]
+
     return transform_params
 
 class Carrington_map():
@@ -289,7 +290,7 @@ class Carrington_map():
                                        obstime=self.obs_time)
 
         self.new_header = make_fitswcs_header(shape_output_map,
-                                         observer_coord, scale=scale)
+                                              observer_coord, scale=scale)
 
         # Reproject the Carrington map to the observer's perspective
         self.transformed_map = self.carrington_map.reproject_to(self.new_header)
@@ -306,7 +307,8 @@ class Carrington_map():
 
 def write_testcase_file(output_dir, nx_image, ny_image, image_size,
                         sc, filename='blah.fits'):
-
+    n_lambda = 102
+    n_stokes = 4
     observer_lon = sc.lon
     observer_lat = sc.lat
     obs_time = sc.obstime
@@ -324,7 +326,6 @@ def write_testcase_file(output_dir, nx_image, ny_image, image_size,
     x1 = 0.5 * image_size[0]
     y0 = -0.5 * image_size[1]
     y1 = 0.5 * image_size[1]
-
 
     x_coords_image_plane = np.linspace(x0, x1, num=nx_image)
     y_coords_image_plane = np.linspace(y0, y1, num=ny_image)
@@ -356,8 +357,15 @@ def write_testcase_file(output_dir, nx_image, ny_image, image_size,
         lat_array = np.linspace(-np.pi/2,
                                 np.pi/2, num=nx_testset) * u.rad
         lon_array = np.linspace(0, 2*np.pi, num=ny_testset) * u.rad
-        params_dict[el] = parameter_array
-        parameters_interpolators[el] = RectBivariateSpline(lon_array, lat_array, parameter_array)
+        # Make a carrington map with the test set parameters
+
+        #
+
+        # add it in the dictionary
+
+
+        # params_dict[el] = parameter_array
+        # parameters_interpolators[el] = RectBivariateSpline(lon_array, lat_array, parameter_array)
 
     ## Compute the coordinates of the sampled points in the space of the dataset
     params_transformed = np.zeros((10, nx_image, ny_image))
@@ -378,16 +386,18 @@ def write_testcase_file(output_dir, nx_image, ny_image, image_size,
         'CRVAL2': 0.0,  # solar disk center latitude in arcsec
         'CROTA2': 0.0,
         'DATE-OBS': time_string,  # date of observation
-
     }
 
     data_dummy  = np.random.rand(nx_image, ny_image)
     sunpy_dummy_map = sunpy.map.Map(data_dummy, header)
 
+    # Transform the Carrington data to the observer frame
 
-    params_transformed = observed_params(sunpy_dummy_map,
-                                         observer_lon, observer_lat, observer_pAng,
-                                         parameters_interpolators, sun_radius=sun_radius)
+    # Reproject the vectors to a local frame
+
+    # params_transformed = observed_params(sunpy_dummy_map,
+    #                                      observer_lon, observer_lat, observer_pAng,
+    #                                      parameters_interpolators, sun_radius=sun_radius)
 
     plot_results = True
 
@@ -409,7 +419,7 @@ def write_testcase_file(output_dir, nx_image, ny_image, image_size,
         plot_fn_quick(params_transformed['Bz'], label='Bz')
         plot_fn_quick(params_transformed['mu'], label='mu')
 
-    synthesizer = Synthesizer()
+    synthesizer = Synthesizer(n_lambda=n_lambda)
     spectra = {}
 
     for xx in tqdm(range(mask_image.shape[0])):
@@ -438,47 +448,53 @@ def write_testcase_file(output_dir, nx_image, ny_image, image_size,
         atmos_params[:, :, el] = make_map_from_dicts(spectra, atmos_keys[el],
                                                      (nx_image, ny_image))
 
-    header = fits.Header()
-    filename = os.path.join(output_dir, filename)
-    # Create PrimaryHDU for the primary array (array1)
-    hdu1 = fits.PrimaryHDU(data=atmos_params)
+    Stokes_labels = ["I", "Q", "U", "V"]
 
-    # Create ImageHDU for the secondary array (array2)
-    hdu2 = fits.ImageHDU(data=spectra_array)
+    for st in range(n_stokes):
+        for wvl in range(n_lambda):
+            filename = "test_set_"+Stokes_labels[st]+f'{wvl:03}'+'.fits'
 
-    # Create header for the primary array
-    hdu1.header['TITLE'] = 'Primary Array'
-    hdu1.header['DIM'] = 3
+            header = fits.Header()
+            filename = os.path.join(output_dir, filename)
+            # Create PrimaryHDU for the primary array (array1)
+            hdu1 = fits.PrimaryHDU(data=atmos_params)
 
-    # Create header for the secondary array
-    hdu2.header['TITLE'] = 'COMPRESSED IMAGE'
-    hdu2.header['DIM'] = 4
+            # Create ImageHDU for the secondary array (array2)
+            hdu2 = fits.ImageHDU(data=spectra_array[:, :, st, wvl])
 
-    hdu2.header['CONTENT'] = 'Simulated Test case Data for PINNME'
-    hdu2.header['TELESCOP'] = 'Momos computer'
-    hdu2.header['DATE-OBS'] = time_string
-    hdu2.header['WAVELNTH'] = 171
-    hdu2.header['WAVEUNIT'] = 'angstrom'
-    hdu2.header['CDELT1'] = plate_scale[0].value
-    hdu2.header['CDELT2'] = plate_scale[1].value
-    hdu2.header['CRPIX1'] = central_image_pixel_x
-    hdu2.header['CRPIX2'] = central_image_pixel_y
-    hdu2.header['CRVAL1'] = 0.0
-    hdu2.header['CRVAL2'] = 0.0
-    hdu2.header['CTYPE1'] = 'HPLN-TAN'
-    hdu2.header['CTYPE2'] = 'HPLT-TAN'
-    hdu2.header['CROTA2'] = 0
-    hdu2.header['CUNIT1'] = 'arcsec'
-    hdu2.header['CUNIT2'] = 'arcsec'
-    hdu2.header['CRLT_OBS'] = observer_lat.value
-    hdu2.header['CRLN_OBS'] = observer_lon.value
+            # Create header for the primary array
+            hdu1.header['TITLE'] = 'Primary Array'
+            hdu1.header['DIM'] = 3
 
-    # Combine HDUs into an HDUList
-    hdulist = fits.HDUList([hdu1, hdu2])
+            # Create header for the secondary array
+            hdu2.header['TITLE'] = 'COMPRESSED IMAGE'
+            hdu2.header['DIM'] = 4
 
-    # Write to a FITS file
-    hdulist.writeto(filename, overwrite=True)
-    print(f"FITS file {filename} written successfully.")
+            hdu2.header['CONTENT'] = 'Simulated Test case Data for PINNME'
+            hdu2.header['TELESCOP'] = 'Momos computer'
+            hdu2.header['DATE-OBS'] = time_string
+            hdu2.header['WAVELNTH'] = wvl
+            hdu2.header['WAVEUNIT'] = 'angstrom'
+            hdu2.header['CDELT1'] = plate_scale[0].value
+            hdu2.header['CDELT2'] = plate_scale[1].value
+            hdu2.header['CRPIX1'] = central_image_pixel_x
+            hdu2.header['CRPIX2'] = central_image_pixel_y
+            hdu2.header['CRVAL1'] = 0.0
+            hdu2.header['CRVAL2'] = 0.0
+            hdu2.header['CTYPE1'] = 'HPLN-TAN'
+            hdu2.header['CTYPE2'] = 'HPLT-TAN'
+            hdu2.header['CROTA2'] = 0
+            hdu2.header['CUNIT1'] = 'arcsec'
+            hdu2.header['CUNIT2'] = 'arcsec'
+            hdu2.header['CRLT_OBS'] = observer_lat.value
+            hdu2.header['CRLN_OBS'] = observer_lon.value
+
+            # Combine HDUs into an HDUList
+            hdulist = fits.HDUList([hdu1, hdu2])
+
+            # Write to a FITS file
+            hdulist.writeto(filename, overwrite=True)
+            print(f"FITS file {filename} written successfully.")
 
 
 if __name__ == '__main__':
@@ -506,3 +522,4 @@ if __name__ == '__main__':
 
     write_testcase_file(output_dir, nx_image, ny_image, image_size,
                         sc, filename=filename)
+

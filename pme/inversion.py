@@ -11,6 +11,7 @@ from pme.train.me_module import MEModule
 from pme.train.util import load_yaml_config
 
 parser = argparse.ArgumentParser()
+
 parser.add_argument('--config', type=str, required=True,
                     help='config file for the simulation')
 args, unknown_args = parser.parse_known_args()
@@ -18,6 +19,7 @@ args, unknown_args = parser.parse_known_args()
 config = load_yaml_config(args.config, unknown_args)
 
 base_path = config['base_path']
+
 os.makedirs(base_path, exist_ok=True)
 
 work_directory = config['work_directory'] if 'work_directory' in config else base_path

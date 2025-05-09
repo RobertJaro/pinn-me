@@ -199,7 +199,8 @@ class GaussianPositionalEncoding(nn.Module):
         self.d_output = d_input * (num_freqs * 2 + 1)
 
     def forward(self, x):
-        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies)
+
+        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies[0, ...])
         encoded = encoded.reshape(*x.shape[:-1], -1)
         encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
         return encoded

@@ -44,3 +44,9 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-17T00:00:00
 
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_test --email "robert.jarolim@uni-graz.at" --t_start "2011-02-15T00:00:00"
+
+
+
+python download_hmi.py --download_dir "/home/memolnar/Data/PINN-ME/HMI/20240505" --email "momchil.molnar@gmail.com" --t_start "2024/05/05 12:00:00" --t_end "2024/05/05 13:00:00"
+
+python download_hmi.py --download_dir "/home/memolnar/Data/PINN-ME/HMI/20151109_135s/" --email "momchil.molnar@gmail.com" --t_start "2015/11/09 11:00:00" --t_end "2015/11/09 12:00:00" --series 'S_135s'

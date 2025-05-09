@@ -23,9 +23,10 @@ elif args.ref_stokes.endswith('.npz'):
 else:
     raise ValueError('Invalid reference Stokes profile file format')
 
+n_time = 9
 pinnme = PINNMEOutput(args.input)
 # parameters = pinnme.load_cube(compute_jacobian=True, batch_size=1024)
-parameters = pinnme.load_time(pinnme.times[9], compute_jacobian=True, batch_size=4096)
+parameters = pinnme.load_time(pinnme.times[n_time], compute_jacobian=True, batch_size=8192)
 
 stokes_vector_pred = np.stack([parameters['I'], parameters['Q'], parameters['U'], parameters['V']], axis=-2)
 stokes_vector_pred = stokes_vector_pred[0] # remove time dimension
@@ -43,22 +44,25 @@ response = np.moveaxis(response, (0, 1, 2), (1, 2, 0))
 
 uncertainty = np.sqrt(stokes_diff[None] / (response + 1e-4))
 
-fig, axs = plt.subplots(uncertainty.shape[0] + 1, 1, figsize=(10, 10))
+# fig, axs = plt.subplots(uncertainty.shape[0] + 1, 1, figsize=(10, 10))
+fig, axs = plt.subplots(3, 3, figsize=(10, 10))
 
-im = axs[0].imshow(np.sqrt(stokes_diff), cmap='viridis')
-divider = make_axes_locatable(axs[0])
-cax = divider.append_axes('right', size='2%', pad=0.05)
-fig.colorbar(im, cax=cax, orientation='vertical')
-axs[0].set_title('Stokes difference')
+# im = axs[0].imshow(np.sqrt(stokes_diff), cmap='viridis')
+# divider = make_axes_locatable(axs[0])
+# cax = divider.append_axes('right', size='2%', pad=0.05)
+# fig.colorbar(im, cax=cax, orientation='vertical')
+# axs[0].set_title('Stokes difference')
 
-for i, ax in enumerate(axs[1:]):
+for i, ax in enumerate(axs.flatten()):
     parameter_key = parameter_keys[i]
-    im = ax.imshow(uncertainty[i], cmap='hot', norm='log')
+    im = ax.imshow(uncertainty[i], cmap='hot', norm='log', origin="lower")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='2%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title(f'Uncertainty {parameter_key}')
 
 plt.tight_layout()
-plt.savefig(os.path.join(args.output, 'uncertainty.png'), dpi=300)
+# plt.savefig(os.path.join(args.output, 'uncertainty.png'), dpi=300)
+plt.savefig(os.path.join(args.output, '../uncertainty.png'), dpi=300)
+
 plt.close()

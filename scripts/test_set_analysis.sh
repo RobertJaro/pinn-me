@@ -70,4 +70,4 @@ python3 -i -m pme.evaluation.test_set.compare_noise --reference '/glade/campaign
 
 #################################################################################
 # evaluate uncertainty
-python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v02/inversion.pme" --output "/glade/work/rjarolim/pinn_me/test_set/no_psf_0.0_v02" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/profile_009.npz"
+python3 -i -m pme.evaluation.compute_uncertainty --input "/glade/work/rjarolim/pinn_me/test_set/no_psf_1.0e-3_v02/inversion.pme" --output "/glade/u/home/mmolnar/Projects/PINNME/" --ref_stokes "/glade/campaign/hao/radmhd/rjarolim/PINN-ME/test_set/data/profile_009.npz"

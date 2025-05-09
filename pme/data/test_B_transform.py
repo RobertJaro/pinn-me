@@ -42,7 +42,7 @@ if __name__ == '__main__':
     carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
     r = carrington_coords.radius
-    #
+
     r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
     carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
     cartesian_coords = spherical_to_cartesian(carrington_coords)

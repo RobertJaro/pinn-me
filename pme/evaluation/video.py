@@ -2,7 +2,7 @@ import argparse
 import io
 import os
 
-import imageio
+# import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable

@@ -1,5 +1,6 @@
 import numpy as np
-
+from astropy import units as u
+from astropy.constants import R_sun
 # Some documentation to be included
 
 def spherical_to_cartesian_matrix(c):
@@ -157,3 +158,32 @@ def image_to_spherical_matrix(lon, lat, latc, lonc, pAng, sin=np.sin, cos=np.cos
 #     a_matrix = np.stack([k11, k12, k13, k21, k22, k23, k31, k32, k33], axis=-1)
 #     a_matrix = a_matrix.reshape((*a_matrix.shape[:-1], 3, 3))
 #     return a_matrix
+
+def solar_differential_rotation_velocity(latitude):
+    """
+    Compute solar differential rotation velocity at given latitude(s).
+
+    Parameters
+    ----------
+    latitude : `~astropy.units.Quantity`
+        Latitude(s) on the Sun (positive northward), with angular units (e.g., deg, rad).
+
+    Returns
+    -------
+    velocity : `~astropy.units.Quantity`
+        Tangential linear rotation velocity (m/s) at the given latitude(s).
+    """
+    # Ensure latitude is in radians
+    theta = latitude.to(u.rad)
+
+    # Differential rotation law (Snodgrass, 1983) in deg/day
+    A = 14.713 * u.deg / u.day
+    B = -2.396 * u.deg / u.day
+    C = -1.787 * u.deg / u.day
+
+    omega = A + B * np.sin(theta) ** 2 + C * np.sin(theta) ** 4  # deg/day
+    omega = omega.to(u.rad / u.s)  # Convert to rad/s
+
+    # Tangential velocity: v = R * omega * cos(latitude)
+    v = R_sun * omega * np.cos(theta) / u.rad
+    return v.to(u.m / u.s)
