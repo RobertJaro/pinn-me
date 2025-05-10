@@ -20,8 +20,6 @@ def plot_stokes(profile, save_path):
 
     fig, axs = plt.subplots(1, 4, figsize=(16, 4))
 
-    print(np.nanmin(profile.sum(axis=-1), (0, 1)), np.nanmax(profile.sum(axis=-1), (0, 1)))
-
     ax = axs[0]
     im = ax.imshow(profile[..., 0, :].sum(axis=-1), norm=LogNorm())
     ax.set_title("I")
@@ -66,70 +64,70 @@ def plot_parameters(parameters, save_path):
     fig, axs = plt.subplots(2, 5, figsize=(16, 4))
 
     ax = axs[0, 0]
-    im = ax.imshow(parameters['b_field'].T, cmap='viridis', vmin=0)
+    im = ax.imshow(parameters['b_field'], cmap='viridis', vmin=0)
     ax.set_title("B")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 1]
-    im = ax.imshow(parameters['inc'].T, cmap='RdBu_r')
+    im = ax.imshow(parameters['inc'], cmap='RdBu_r')
     ax.set_title("Inclination")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 2]
-    im = ax.imshow(parameters['azi'].T, cmap='twilight')
+    im = ax.imshow(parameters['azi'], cmap='twilight')
     ax.set_title("Azimuth")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 3]
-    im = ax.imshow(parameters['b0'].T)
+    im = ax.imshow(parameters['b0'])
     ax.set_title("B0")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 4]
-    im = ax.imshow(parameters['b1'].T)
+    im = ax.imshow(parameters['b1'])
     ax.set_title("B1")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1, 0]
-    im = ax.imshow(parameters['vmac'].T)
+    im = ax.imshow(parameters['vmac'])
     ax.set_title("Vmac")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1, 1]
-    im = ax.imshow(parameters['damping'].T)
+    im = ax.imshow(parameters['damping'])
     ax.set_title("Damping")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1, 2]
-    im = ax.imshow(parameters['mu'].T)
+    im = ax.imshow(parameters['mu'])
     ax.set_title("Mu")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1, 3]
-    im = ax.imshow(parameters['vdop'].T)
+    im = ax.imshow(parameters['vdop'])
     ax.set_title("Vdop")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1, 4]
-    im = ax.imshow(parameters['kl'].T)
+    im = ax.imshow(parameters['kl'])
     ax.set_title("Kl")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)

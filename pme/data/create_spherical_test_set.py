@@ -15,14 +15,14 @@ from pme.data.test_set_generator import TestSetGenerator, load_parameters, load_
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--out_path', type=str, required=True, help='base path for the output data')
-    parser.add_argument('--resolution', type=int, nargs=2, default=[400, 400], help='resolution of the images')
-    parser.add_argument('--n_time_steps', type=int, default=20, help='number of time steps to generate')
+    parser.add_argument('--resolution', type=int, nargs=2, default=[256, 256], help='resolution of the images')
+    parser.add_argument('--n_time_steps', type=int, default=100, help='number of time steps to generate')
     args = parser.parse_args()
 
     out_path = args.out_path
     os.makedirs(out_path, exist_ok=True)
 
-    obs_lon_start = 180 * u.deg
+    obs_lon_start = 0 * u.deg
     obs_lat = 0 * u.deg
     observer_distance = 1 * u.AU
 
@@ -35,10 +35,8 @@ if __name__ == '__main__':
     obs_lon_end = obs_lon_start + dlon * (t_end - t_start).total_seconds() * u.s
     longitudes = np.linspace(obs_lon_start, obs_lon_end, num=args.n_time_steps)
 
-    lambda_shifts = np.array(
-        [-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
+    lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
     lambda0 = 617.33433 * u.nm  # From Phillip Scherrer
-    lambda_grid = lambda_shifts + lambda0
 
     data_generator = TestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
                                       lambda0=lambda0, lambda_grid=lambda_grid, g_up=2.50)
@@ -59,10 +57,13 @@ if __name__ == '__main__':
 
     os.makedirs(os.path.join(out_path, 'images'), exist_ok=True)
 
-    # for i in range(profiles.shape[0]):
-    #     plot_stokes(profiles[i], os.path.join(out_path, 'images', f'stokes_{i:03d}.jpg'))
+    with Pool(16) as p:
+        in_data = [(profiles[i], os.path.join(out_path, 'images', f'stokes_{i:03d}.jpg'))
+                   for i in range(profiles.shape[0])]
+        p.starmap(plot_stokes, in_data)
 
-    for i in range(profiles.shape[0]):
-        t_step_parameters = {k: v[i] for k, v in parameters.items()}
-        plot_parameters(t_step_parameters,
-                        os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))
+    with Pool(16) as p:
+        in_data = [(parameters_dict := {k: v[i] for k, v in parameters.items()},
+                    os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))
+                   for i in range(profiles.shape[0])]
+        p.starmap(plot_parameters, in_data)

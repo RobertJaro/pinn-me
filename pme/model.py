@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
+from pme.train.siren import SirenModel
+
 
 class Swish(nn.Module):
 
@@ -112,65 +114,29 @@ class MEModel(nn.Module):
         return output
 
 
-class MESphericalModel(nn.Module):
+class MESphericalModel(SirenModel):
 
-    def __init__(self, in_coords, dim=256, encoding='gaussian_positional', activation='sine', num_layers=8):
-        super().__init__()
-        # encoding layer
-        if encoding == "positional":
-            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_coords)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "linear":
-            self.d_in = nn.Linear(in_coords, dim)
-        else:
-            raise ValueError(f"Unknown encoding: {encoding}")
-
-        # hidden layers
-        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
-        self.linear_layers = nn.ModuleList(lin)
-
-        # output layer
-        self.d_out = nn.Linear(dim, 13)
-
-        # activation functions
-        if activation == "swish":
-            self.in_activation = Swish()
-            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
-        elif activation == "sine":
-            self.in_activation = Sine()
-            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
-
-        # output activations
-        self.softplus = nn.Softplus()
-        self.register_buffer("c", torch.tensor(3e8))
+    def __init__(self, in_coords, dim=512, encoding='gaussian_positional', activation='sine', num_layers=8):
+        super().__init__(in_dim=in_coords, out_dim=13, dim=dim)
 
     def forward(self, x):
-        x = self.in_activation(self.d_in(x))
-        for l, a in zip(self.linear_layers, self.activations):
-            x = a(l(x))
-        params = self.d_out(x)
+        params = super().forward(x)
         #
-        b_scale = 10 ** params[..., 0:1]
+        b_scale = 1e3  # 10 ** params[..., 0:1]
         b_x = params[..., 1:2] * b_scale
         b_y = params[..., 2:3] * b_scale
         b_z = params[..., 3:4] * b_scale
         #
-        vmac = 10 ** params[..., 4:5] #torch.sigmoid(params[..., 4:5]) * 20e3
+        vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
-        v_scale = 10 ** params[..., 8:9]
+
+        v_scale = 2e3  # 10 ** params[..., 8:9]
         v_x = params[..., 9:10] * v_scale
         v_y = params[..., 10:11] * v_scale
         v_z = params[..., 11:12] * v_scale
-        kl = 10 ** params[..., 12:13] #torch.sigmoid(params[..., 12:13]) * 100
+        kl = torch.sigmoid(params[..., 12:13]) * 100
         #
         output = {
             "b_x": b_x,
@@ -199,8 +165,7 @@ class GaussianPositionalEncoding(nn.Module):
         self.d_output = d_input * (num_freqs * 2 + 1)
 
     def forward(self, x):
-
-        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies[0, ...])
+        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies)
         encoded = encoded.reshape(*x.shape[:-1], -1)
         encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
         return encoded
@@ -241,3 +206,13 @@ class NormalizationModule(nn.Module):
         stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
         stokes = torch.asinh(stokes * 1e2) / self.stretch
         return stokes
+
+
+class DisambiguationModel(SirenModel):
+    def __init__(self):
+        super().__init__(4, 1, dim=64, n_layers=4)
+
+    def forward(self, x):
+        x = super().forward(x)
+        x = torch.sigmoid(x)
+        return x

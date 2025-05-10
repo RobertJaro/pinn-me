@@ -50,7 +50,7 @@ me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config
                               **training_config)
 
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
-                                      every_n_epochs=check_val_every_n_epoch,
+                                      every_n_epochs=val_check_interval,
                                       save_last=True)
 
 # save callback

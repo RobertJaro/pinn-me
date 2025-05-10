@@ -9,8 +9,10 @@ from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
+from pme.data.util import cartesian_to_spherical
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import NormalizationModule, MESphericalModel
+from pme.data.differential_rotation import solar_differential_rotation_velocity_torch
+from pme.model import NormalizationModule, MESphericalModel, DisambiguationModel
 from pme.train.me_atmosphere import MEAtmosphere
 from pme.train.util import acos_safe, atan2_safe
 
@@ -28,6 +30,9 @@ class MESphericalModule(LightningModule):
         # init model
         model_config = model_config if model_config is not None else {}
         self.parameter_model = MESphericalModel(4, **model_config)
+
+        # init disambiguation model
+        # self.disambiguation_model = DisambiguationModel()
 
         self.forward_model = MEAtmosphere(**lambda_config)
         self.lr_params = lr_params
@@ -70,10 +75,21 @@ class MESphericalModule(LightningModule):
         # coords[:n_random, 0] = coords[indices, 0]
 
         # forward step
+        coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
-        v_dop = transformed_output['v_dop'] + v_obs_los # add doppler correction - spacecraft velocity
+        for k, v in output.items():
+            if torch.isnan(v).any():
+                raise ValueError(f"Encountered invalid value. {k} is NaN")
+
+        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform,
+                                                       coords)
+
+        for k, v in transformed_output.items():
+            if torch.isnan(v).any():
+                raise ValueError(f"Encountered invalid value (transformed). {k} is NaN")
+
+        v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
         chi = transformed_output['chi']
 
         forward_params = {'b_field': transformed_output['b_field'],
@@ -106,11 +122,11 @@ class MESphericalModule(LightningModule):
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss}
 
-    def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform):
+    def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
         # transform B
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
-        b_rtp[..., 1] *= -1 # TODO do we need this? --> I think this needs to go
+        b_rtp[..., 1] *= -1  # TODO do we need this? --> I think this needs to go
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
         # xi, eta, zeta
@@ -127,10 +143,15 @@ class MESphericalModule(LightningModule):
         theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
         chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
 
+        # compute differential rotation as function of latitude - (t, x, y, z)
+        spherical_coords = cartesian_to_spherical(coords[..., 1:], f=torch)
+        v_rot = solar_differential_rotation_velocity_torch(spherical_coords[..., 1])
+
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
-        v_rtp[..., 1] *= -1 # TODO do we need this?
+        v_rtp[..., 1] *= -1  # TODO do we need this?
+        v_rtp[..., 2] -= v_rot
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
 
         v_dop = v_img[..., 2:3]
@@ -149,6 +170,7 @@ class MESphericalModule(LightningModule):
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
+    @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
         coords = batch['coords']
         mu = batch['mu']
@@ -157,10 +179,11 @@ class MESphericalModule(LightningModule):
         rtp_to_img_transform = batch['rtp_to_img_transform']
 
         # forward step
+        coords.requires_grad = True
         output = self.parameter_model(coords)
 
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
-                                                       rtp_to_img_transform)
+                                                       rtp_to_img_transform, coords)
 
         forward_params = {'b_field': transformed_output['b_field'],
                           'theta': transformed_output['theta'],

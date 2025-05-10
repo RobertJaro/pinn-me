@@ -27,21 +27,21 @@ class SphericalDataModule(LightningDataModule):
     def __init__(self, train_config, valid_config, work_directory, seconds_per_dt=36000, Rs_per_ds=1,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
-                 batch_size=4096, dataset_batch_size=2048,
-                 num_workers=None):
+                 batch_size=4096, num_workers=None):
         super().__init__()
+
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
+        train_files = self._load_files(train_config['data_path'])
 
         # train parameters
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.batch_size = batch_size * n_gpus
-        self.dataset_batch_size = dataset_batch_size * n_gpus
+        self.dataset_batch_size = batch_size // len(train_files) * n_gpus
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
 
-        train_files = self._load_files(train_config['data_path'])
         with Pool(num_workers) as p:
             args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
-                       repeat(stokes_normalization), repeat(dataset_batch_size), repeat(work_directory))
+                       repeat(stokes_normalization), repeat(self.dataset_batch_size), repeat(work_directory))
             train_datasets = p.starmap(HMISphericalDataset, args)
 
         self.train_datasets = train_datasets
@@ -80,12 +80,12 @@ class SphericalDataModule(LightningDataModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Integrated V')
 
-        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic')
+        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic', vmin=-np.pi/2, vmax=np.pi/2)
         divider = make_axes_locatable(axs[1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [rad]')
 
-        im = axs[2].imshow(ds.longitude, origin='lower', cmap='twilight')
+        im = axs[2].imshow(ds.longitude % (2 * np.pi), origin='lower', cmap='twilight', vmin=0, vmax=2 * np.pi)
         divider = make_axes_locatable(axs[2])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Longitude [rad]')
@@ -130,10 +130,10 @@ class HMISphericalDataset(TensorsDataset):
 
     def __init__(self, files, seconds_per_dt, Rs_per_ds, ref_time, stokes_normalization, batch_size, work_directory,
                  **kwargs):
-        lambda_shifts = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695])  # From Phillip Scherrer
+        lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695])  # From Phillip Scherrer
         lambda_center = 6173.3433  # From Phillip Scherrer
 
-        self.lambda_grid = lambda_shifts
+        self.lambda_grid = lambda_grid
         self.lambda_config = {'lambda0': lambda_center * u.AA, 'lambda_grid': self.lambda_grid * u.AA,
                               'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.50, 'g_low': 0.0}
 
@@ -212,8 +212,9 @@ class HMISphericalDataset(TensorsDataset):
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
 
         # create observer transform
-        latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
-        pAng = -np.deg2rad(s_map.meta['CROTA2'])
+        # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
+        pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
+        latc, lonc = s_map.carrington_longitude.to_value(u.rad), s_map.carrington_latitude.to_value(u.rad)
         a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
