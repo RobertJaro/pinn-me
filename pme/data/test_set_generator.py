@@ -28,6 +28,7 @@ def convert_rt_to_xy(r, t):
 
     return int(x), int(y)
 
+
 def create_collage(image_array, rows=3, cols=6):
     """
     Creates an 8x8 collage of a 2D grayscale image.
@@ -47,6 +48,7 @@ def create_collage(image_array, rows=3, cols=6):
     collage = np.concatenate([row] * rows, axis=0)
 
     return collage
+
 
 class TestSetGenerator():
 
@@ -88,7 +90,8 @@ class TestSetGenerator():
         transformed_parameters, dummy_helioprojective_map = self._transform_parameters(parameters, obs_coord)
         # convert back to torch tensors
         transformed_parameters = {k: torch.tensor(v, dtype=torch.float32) for k, v in transformed_parameters.items()}
-        stokes_profiles = self.convert_to_profiles(**transformed_parameters)
+        input_parameters = {k: v for k, v in transformed_parameters.items() if k not in ['b_rtp', 'v_rtp']}
+        stokes_profiles = self.convert_to_profiles(**input_parameters)
         return stokes_profiles, transformed_parameters, dummy_helioprojective_map
 
     def _transform_parameters(self, input_parameters, obs_coord):
@@ -128,7 +131,8 @@ class TestSetGenerator():
         solar_semidiameter_rad = np.arcsin(constants.radius / obs_coord.radius)
         angular_radius = Angle(solar_semidiameter_rad.to(u.arcsec))
 
-        scale = angular_radius.to(u.arcsec) / (self.nx // 2 * u.pix), angular_radius.to(u.arcsec) / (self.ny // 2 * u.pix)
+        scale = angular_radius.to(u.arcsec) / (self.nx // 2 * u.pix), angular_radius.to(u.arcsec) / (
+                    self.ny // 2 * u.pix)
         dummy_data = np.zeros((self.nx, self.ny), dtype=np.float32)
         reference_coord = SkyCoord(0 * u.arcsec, 0 * u.arcsec, observer=obs_coord, frame=frames.Helioprojective)
         helioprojective_header = make_fitswcs_header(dummy_data, reference_coord, scale=u.Quantity(scale))
@@ -161,7 +165,8 @@ class TestSetGenerator():
         # create transformation matrix
         carrington_coords = helioprojective_coords.transform_to(frames.HeliographicCarrington)
         lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
-        latc, lonc = helioprojective_map.carrington_latitude.to_value(u.rad), helioprojective_map.carrington_longitude.to_value(u.rad)
+        latc, lonc = helioprojective_map.carrington_latitude.to_value(
+            u.rad), helioprojective_map.carrington_longitude.to_value(u.rad)
 
         # TODO check that CRLT_OBS is in rad units as provided by the map
         pAng = -np.deg2rad(helioprojective_map.meta.get('CROTA2', 0))
@@ -176,6 +181,7 @@ class TestSetGenerator():
         b_rtp[..., 1] *= -1
         # transform b vector to image frame
         b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)  # in image xyz
+        # b_im = (xi, eta, zeta)
         # convert to ME parameters
         b_field = np.linalg.norm(b_img, axis=-1)
         b_inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
@@ -198,6 +204,9 @@ class TestSetGenerator():
 
         transformed_parameters['vdop'] = vdop
 
+        transformed_parameters['b_rtp'] = b_rtp
+        transformed_parameters['v_rtp'] = v_rtp
+
         return transformed_parameters, helioprojective_map
 
     def convert_to_profiles(self, b0, b1, b_field, azi, damping, kl, mu, inc, vdop, vmac):
@@ -213,6 +222,10 @@ class TestSetGenerator():
         return stokes_profiles
 
     def _load_parameters(self, time_step, resolution=None):
+        # time_step = time_step / 10  # scale temporal evolution
+        # TODO: remove static
+        time_step = time_step * 0 # static frame
+
         nx = self.nx if resolution is None else resolution[0]
         ny = self.ny if resolution is None else resolution[1]
         xx, yy = np.meshgrid(np.linspace(-0.5 * nx, 0.5 * nx, nx),
@@ -269,8 +282,9 @@ def load_profiles(file_path):
     profiles = [np.load(f)['stokes_profiles'] for f in files]
     return np.stack(profiles, axis=0)  # (t, x, y, lambda, stokes)
 
+
 def load_fits_profiles(file_path):
-    stokes_profiles = {'I': [], 'Q':[], 'U': [], 'V': []}
+    stokes_profiles = {'I': [], 'Q': [], 'U': [], 'V': []}
     for stokes_id in stokes_profiles.keys():
         for wl_idx in range(6):
             # find all time steps
@@ -283,6 +297,7 @@ def load_fits_profiles(file_path):
     V_profiles = np.stack(stokes_profiles['V'], -1)
     profiles = np.stack([I_profiles, Q_profiles, U_profiles, V_profiles], -2)
     return profiles  # (t, x, y, stokes, lambda)
+
 
 def load_parameters(file_path):
     files = sorted(glob.glob(file_path))

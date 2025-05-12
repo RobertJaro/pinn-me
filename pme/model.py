@@ -122,10 +122,29 @@ class MESphericalModel(SirenModel):
     def forward(self, x):
         params = super().forward(x)
         #
-        b_scale = 1e3  # 10 ** params[..., 0:1]
+        b_scale = 1  # 10 ** params[..., 0:1]
         b_x = params[..., 1:2] * b_scale
         b_y = params[..., 2:3] * b_scale
         b_z = params[..., 3:4] * b_scale
+        # a = params[..., 0:3]
+        # jac_matrix = jacobian(a, x)
+        # dAx_dt = jac_matrix[:, 0, 0]
+        # dAx_dx = jac_matrix[:, 0, 1]
+        # dAx_dy = jac_matrix[:, 0, 2]
+        # dAx_dz = jac_matrix[:, 0, 3]
+        # dAy_dt = jac_matrix[:, 1, 0]
+        # dAy_dx = jac_matrix[:, 1, 1]
+        # dAy_dy = jac_matrix[:, 1, 2]
+        # dAy_dz = jac_matrix[:, 1, 3]
+        # dAz_dt = jac_matrix[:, 2, 0]
+        # dAz_dx = jac_matrix[:, 2, 1]
+        # dAz_dy = jac_matrix[:, 2, 2]
+        # dAz_dz = jac_matrix[:, 2, 3]
+        # rot_x = dAz_dy - dAy_dz
+        # rot_y = dAx_dz - dAz_dx
+        # rot_z = dAy_dx - dAx_dy
+        # b = torch.stack([rot_x, rot_y, rot_z], -1)
+        # b_x, b_y, b_z = b[..., 0:1], b[..., 1:2], b[..., 2:3]
         #
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1

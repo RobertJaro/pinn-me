@@ -208,13 +208,15 @@ class HMISphericalDataset(TensorsDataset):
         time = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
         cartesian_coords = np.concatenate([time, cartesian_coords], -1)
 
+        print(f'Coordinate range: {np.nanmin(cartesian_coords, axis=(0, 1))} - {np.nanmax(cartesian_coords, axis=(0, 1))}')
+
         # create rtp transform
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
 
         # create observer transform
         # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
         pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
-        latc, lonc = s_map.carrington_longitude.to_value(u.rad), s_map.carrington_latitude.to_value(u.rad)
+        latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
         a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 

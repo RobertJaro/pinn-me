@@ -15,8 +15,12 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 
 #################################################################################
 # create data set
-python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data"
+python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data" --n_time_steps 100
 
 #################################################################################
 # inversion
-python3 -m pme.inversion_spherical --config config/spherical/test_set.yaml
+python3 -m pme.inversion_spherical --config config/spherical/test_set.yaml --reload
+
+# test transformation
+#python3 -m pme.data.test_B_transform
+python3 -i -m pme.evaluation.spherical.compare_test_set --input "/glade/work/rjarolim/spinn_me/test_set_v03/inversion.pme" --output "/glade/work/rjarolim/spinn_me/test_set_v03/evaluation" --ref_maps "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data/*_I0.fits"

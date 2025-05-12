@@ -9,10 +9,10 @@ from pytorch_lightning import LightningModule
 from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
+from pme.data.differential_rotation import solar_differential_rotation_velocity_torch
 from pme.data.util import cartesian_to_spherical
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.data.differential_rotation import solar_differential_rotation_velocity_torch
-from pme.model import NormalizationModule, MESphericalModel, DisambiguationModel
+from pme.model import NormalizationModule, MESphericalModel, jacobian
 from pme.train.me_atmosphere import MEAtmosphere
 from pme.train.util import acos_safe, atan2_safe
 
@@ -30,9 +30,6 @@ class MESphericalModule(LightningModule):
         # init model
         model_config = model_config if model_config is not None else {}
         self.parameter_model = MESphericalModel(4, **model_config)
-
-        # init disambiguation model
-        # self.disambiguation_model = DisambiguationModel()
 
         self.forward_model = MEAtmosphere(**lambda_config)
         self.lr_params = lr_params
@@ -78,49 +75,60 @@ class MESphericalModule(LightningModule):
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        for k, v in output.items():
-            if torch.isnan(v).any():
-                raise ValueError(f"Encountered invalid value. {k} is NaN")
-
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform,
                                                        coords)
 
-        for k, v in transformed_output.items():
-            if torch.isnan(v).any():
-                raise ValueError(f"Encountered invalid value (transformed). {k} is NaN")
+        # compute static loss
+        br = transformed_output['b_rtp'][..., 0:1]
+        jac_matrix = jacobian(br, coords)
+        dBr_dt = jac_matrix[:, 0, 0]
+        static_loss = dBr_dt.pow(2)
 
         v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
-        chi = transformed_output['chi']
 
         forward_params = {'b_field': transformed_output['b_field'],
-                          'theta': transformed_output['theta'],
-                          'chi': chi,
+                          'inc': transformed_output['inc'],
+                          'azi': transformed_output['azi'],
                           'vdop': v_dop,
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
 
+        # normal stokes profile synthesis
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
-
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
+
+        # azimuth flipped stokes profile synthesis
+        forward_params['azi'] = forward_params['azi'] + torch.pi
+        I, Q, U, V = self.forward_model(**forward_params, mu=mu)
+        stokes_pred_flipped = torch.stack([I, Q, U, V], dim=-2)
 
         stokes_true = self.normalization(stokes_true)
         stokes_pred = self.normalization(stokes_pred)
+        stokes_pred_flipped = self.normalization(stokes_pred_flipped)
 
-        loss = self.loss_function(stokes_pred, stokes_true)
-        loss = loss.sum(-1)  # sum over wavelength axis
+        loss_normal = self.loss_function(stokes_pred, stokes_true)
+        loss_flipped = self.loss_function(stokes_pred_flipped, stokes_true)
+
+        # sum over wavelength axis
+        loss_normal = loss_normal.sum(-1)
+        loss_flipped = loss_flipped.sum(-1)
 
         # logging losses
-        I_loss, Q_loss, U_loss, V_loss = loss.mean(dim=0)
+        I_loss, Q_loss, U_loss, V_loss = loss_normal.mean(dim=0)
 
         # weighted loss - apply lambda weights for each stokes parameter
-        total_loss = loss * self.lambda_stokes[None, :]
-        total_loss = total_loss.mean()
+        loss_normal = loss_normal * self.lambda_stokes[None, :]
+        loss_flipped = loss_flipped * self.lambda_stokes[None, :]
+
+        # compute total loss (both azimuth configurations)
+        stokes_loss = (loss_normal + loss_flipped) / 2
+        total_loss = stokes_loss.mean() + static_loss.mean() * 1e-4
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
-                "U_loss": U_loss, "V_loss": V_loss}
+                "U_loss": U_loss, "V_loss": V_loss, 'static_loss': static_loss.mean()}
 
     def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
         # transform B
@@ -130,18 +138,18 @@ class MESphericalModule(LightningModule):
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
         # xi, eta, zeta
-        # (field, inclination, azimuth) = field, gamma, psi = b_field, theta, chi
+        # (field, inclination, azimuth) = field, gamma, psi = b_field, inc, azi
         # b_xi = - field * sin(gamma) * sin(psi)
         # b_eta = field * sin(gamma) * cos(psi)
         # b_zeta = field * cos(gamma)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
 
         # TODO: why is this shifted by pi?
-        # theta = torch.pi - acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        # chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2]) + torch.pi / 2
+        # inc = torch.pi - acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        # azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2]) + torch.pi / 2
 
-        theta = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        chi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+        inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
+        azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
 
         # compute differential rotation as function of latitude - (t, x, y, z)
         spherical_coords = cartesian_to_spherical(coords[..., 1:], f=torch)
@@ -156,7 +164,7 @@ class MESphericalModule(LightningModule):
 
         v_dop = v_img[..., 2:3]
 
-        return {'b_field': b_field, 'chi': chi, 'theta': theta, 'v_dop': v_dop,
+        return {'b_field': b_field, 'azi': azi, 'inc': inc, 'v_dop': v_dop,
                 'v_rtp': v_rtp, 'b_rtp': b_rtp, 'v_img': v_img, 'b_img': b_img}
 
     @torch.no_grad()
@@ -186,8 +194,8 @@ class MESphericalModule(LightningModule):
                                                        rtp_to_img_transform, coords)
 
         forward_params = {'b_field': transformed_output['b_field'],
-                          'theta': transformed_output['theta'],
-                          'chi': transformed_output['chi'],
+                          'inc': transformed_output['inc'],
+                          'azi': transformed_output['azi'],
                           'vdop': transformed_output['v_dop'],
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
@@ -218,7 +226,7 @@ class MESphericalModule(LightningModule):
                            'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff})
 
         parameters = {}
-        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
+        for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
                   'v_rtp', 'b_rtp', 'v_img', 'b_img']:
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
@@ -283,13 +291,13 @@ class MESphericalModule(LightningModule):
 
     def plot_parameter_overview(self, parameters):
         b = parameters['b_field']
-        theta = parameters['theta']
-        chi = parameters['chi']
-        # reproject vectors (theta flip with negative B)
-        b_xyz = to_cartesian(b, theta, chi)
-        b, theta, chi = to_spherical(b_xyz)
-        theta = theta % np.pi
-        chi = chi % (2 * np.pi)
+        inc = parameters['inc']
+        azi = parameters['azi']
+        # reproject vectors (inc flip with negative B)
+        b_xyz = to_cartesian(b, inc, azi)
+        b, inc, azi = to_spherical(b_xyz)
+        inc = inc % np.pi
+        azi = azi % (2 * np.pi)
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
@@ -299,14 +307,14 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(theta, cmap='seismic', vmin=0, vmax=np.pi, origin='lower')
-        ax.set_title("Theta")
+        im = ax.imshow(inc, cmap='seismic', vmin=0, vmax=np.pi, origin='lower')
+        ax.set_title("Inclination")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 2]
-        im = ax.imshow(chi, cmap='twilight', vmin=0, vmax=2 * np.pi, origin='lower')
-        ax.set_title("Chi")
+        im = ax.imshow(azi, cmap='twilight', vmin=0, vmax=2 * np.pi, origin='lower')
+        ax.set_title("Azimuth")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)

@@ -3,11 +3,13 @@ import os
 from multiprocessing import Pool
 
 import numpy as np
+from astropy import units as u
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from astropy import  units as u
+
 from pme.data.test_set_generator import TestSetGenerator, load_profiles, load_parameters
+
 
 def plot_stokes(profile, save_path):
     """
@@ -138,6 +140,44 @@ def plot_parameters(parameters, save_path):
     plt.close('all')
 
 
+def plot_brtp(brtp, save_path):
+    """
+    Plot magnetic field components in x, y, z directions
+
+    Input:
+        -- brtp: ndarray with shape [..., 3] containing Bx, By, Bz components
+        -- save_path: str, path where to save the figure
+    """
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+
+    v_max = np.nanmax(np.abs(brtp))
+
+    ax = axs[0]
+    im = ax.imshow(brtp[..., 0], cmap='RdBu_r', vmin=-v_max, vmax=v_max)
+    ax.set_title(r"$B_r$")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    ax = axs[1]
+    im = ax.imshow(brtp[..., 1], cmap='RdBu_r', vmin=-v_max, vmax=v_max)
+    ax.set_title(r"$B_\theta$")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    ax = axs[2]
+    im = ax.imshow(brtp[..., 2], cmap='RdBu_r', vmin=-v_max, vmax=v_max)
+    ax.set_title(r"$B_\phi$")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close('all')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--out_path', type=str, required=True, help='base path for the output data')
@@ -160,7 +200,6 @@ if __name__ == '__main__':
     with Pool(16) as p:
         in_data = [(t, out_path) for t in range(args.n_time_steps)]
         p.starmap(data_generator.create_time_step_file, in_data)
-
 
     profiles = load_profiles(os.path.join(out_path, 'profile_*.npz'))
     parameters = load_parameters(os.path.join(out_path, 'parameters_*.npz'))
