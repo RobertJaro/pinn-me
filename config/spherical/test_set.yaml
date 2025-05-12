@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/test_set_v03"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/test_set_v02"
+base_path: "/glade/work/rjarolim/spinn_me/test_set_v08"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/test_set_v08"
 data:
   train_config: {data_path: "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data"}
   valid_config: {data_path: "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data", sample_idx: 49}

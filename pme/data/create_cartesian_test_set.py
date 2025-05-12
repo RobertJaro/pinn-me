@@ -7,6 +7,8 @@ from astropy import units as u
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sunpy.coordinates import frames
+from sunpy.map import Map, all_coordinates_from_map
 
 from pme.data.test_set_generator import TestSetGenerator, load_profiles, load_parameters
 
@@ -177,6 +179,47 @@ def plot_brtp(brtp, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close('all')
 
+def plot_coords(f, save_path):
+    """
+    Plot Carrington coordinates (r, lat, lon) components
+
+    Input:
+        -- f: str, path to the FITS file
+        -- save_path: str, path where to save the figure
+    """
+    s_map = Map(f)
+    spherical_coords = all_coordinates_from_map(s_map)
+    carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
+    lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
+    r = np.ones_like(lon)
+
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+
+    ax = axs[0]
+    im = ax.imshow(r, cmap='viridis')
+    ax.set_title("r")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    ax = axs[1]
+    im = ax.imshow(np.rad2deg(lat), cmap='RdBu_r', vmin=-90, vmax=90)
+    ax.set_title("Latitude [deg]")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+    
+    ax = axs[2]
+    im = ax.imshow(np.rad2deg(lon) % 360, cmap='twilight', vmin=0, vmax=360)
+    ax.set_title("Longitude [deg]")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close('all')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -211,3 +254,4 @@ if __name__ == '__main__':
     for i in range(profiles.shape[0]):
         t_step_parameters = {k: v[i] for k, v in parameters.items()}
         plot_parameters(t_step_parameters, os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))
+    

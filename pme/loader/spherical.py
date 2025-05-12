@@ -208,8 +208,6 @@ class HMISphericalDataset(TensorsDataset):
         time = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
         cartesian_coords = np.concatenate([time, cartesian_coords], -1)
 
-        print(f'Coordinate range: {np.nanmin(cartesian_coords, axis=(0, 1))} - {np.nanmax(cartesian_coords, axis=(0, 1))}')
-
         # create rtp transform
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
 

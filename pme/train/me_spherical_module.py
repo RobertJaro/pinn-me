@@ -40,6 +40,10 @@ class MESphericalModule(LightningModule):
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
 
+        self.time_random_config = {'start': 10, 'end': 1e-3, 'iterations': 1e5}
+        self.time_random_scaling = nn.Parameter(torch.tensor(self.time_random_config['start'], dtype=torch.float32), requires_grad=False)
+        self.time_random_gamma = torch.tensor((self.time_random_config['end'] / self.time_random_config['start']) ** (1 / self.time_random_config['iterations']), dtype=torch.float32)
+
     def configure_optimizers(self):
         parameters = list(self.parameter_model.parameters())
         if isinstance(self.lr_params, dict):
@@ -66,10 +70,7 @@ class MESphericalModule(LightningModule):
         rtp_to_img_transform = batch['rtp_to_img_transform']
         v_obs_los = batch['v_obs_los']
 
-        # shuffle 20% time coordinates
-        # n_random = int(coords.shape[0] * 0.20)
-        # indices = torch.randperm(n_random, device=coords.device)
-        # coords[:n_random, 0] = coords[indices, 0]
+        coords[..., 0] += torch.randn_like(coords[..., 0]) * self.time_random_scaling
 
         # forward step
         coords.requires_grad = True
@@ -79,10 +80,13 @@ class MESphericalModule(LightningModule):
                                                        coords)
 
         # compute static loss
-        br = transformed_output['b_rtp'][..., 0:1]
-        jac_matrix = jacobian(br, coords)
-        dBr_dt = jac_matrix[:, 0, 0]
-        static_loss = dBr_dt.pow(2)
+        # b = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
+        # jac_matrix = jacobian(b, coords)
+        # dBx_dt = jac_matrix[:, 0, 0]
+        # dBy_dt = jac_matrix[:, 1, 0]
+        # dBz_dt = jac_matrix[:, 2, 0]
+        # dB_dt = torch.stack([dBx_dt, dBy_dt, dBz_dt], dim=-1)
+        # static_loss = dB_dt.pow(2).sum(-1)
 
         v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
 
@@ -97,38 +101,30 @@ class MESphericalModule(LightningModule):
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        # azimuth flipped stokes profile synthesis
-        forward_params['azi'] = forward_params['azi'] + torch.pi
-        I, Q, U, V = self.forward_model(**forward_params, mu=mu)
-        stokes_pred_flipped = torch.stack([I, Q, U, V], dim=-2)
-
         stokes_true = self.normalization(stokes_true)
         stokes_pred = self.normalization(stokes_pred)
-        stokes_pred_flipped = self.normalization(stokes_pred_flipped)
 
-        loss_normal = self.loss_function(stokes_pred, stokes_true)
-        loss_flipped = self.loss_function(stokes_pred_flipped, stokes_true)
+        stokes_loss = self.loss_function(stokes_pred, stokes_true)
 
         # sum over wavelength axis
-        loss_normal = loss_normal.sum(-1)
-        loss_flipped = loss_flipped.sum(-1)
+        stokes_loss = stokes_loss.sum(-1)
 
         # logging losses
-        I_loss, Q_loss, U_loss, V_loss = loss_normal.mean(dim=0)
+        I_loss, Q_loss, U_loss, V_loss = stokes_loss.mean(dim=0)
 
         # weighted loss - apply lambda weights for each stokes parameter
-        loss_normal = loss_normal * self.lambda_stokes[None, :]
-        loss_flipped = loss_flipped * self.lambda_stokes[None, :]
+        stokes_loss = stokes_loss * self.lambda_stokes[None, :]
 
         # compute total loss (both azimuth configurations)
-        stokes_loss = (loss_normal + loss_flipped) / 2
-        total_loss = stokes_loss.mean() + static_loss.mean() * 1e-4
+        total_loss = stokes_loss.mean()# + static_loss.mean() * 1e-3
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
-                "U_loss": U_loss, "V_loss": V_loss, 'static_loss': static_loss.mean()}
+                "U_loss": U_loss, "V_loss": V_loss,
+                # 'static_loss': static_loss.mean()
+                }
 
     def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
         # transform B
@@ -174,6 +170,15 @@ class MESphericalModule(LightningModule):
         if scheduler.get_last_lr()[0] > self.lr_params['end']:
             scheduler.step()
         self.log('Learning Rate', scheduler.get_last_lr()[0])
+
+
+        if self.time_random_scaling > self.time_random_config['end']:
+            new_gamma = self.time_random_scaling * self.time_random_gamma
+            self.time_random_scaling.copy_(new_gamma)
+        else:
+            new_gamma = torch.zeros_like(self.time_random_scaling)
+            self.time_random_scaling.copy_(new_gamma)
+        self.log('time_random_scaling', self.time_random_scaling)
 
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
