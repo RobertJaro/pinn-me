@@ -15,7 +15,7 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 
 #################################################################################
 # create data set
-#python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data" --n_time_steps 100
+python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data" --n_time_steps 100
 
 #################################################################################
 # inversion

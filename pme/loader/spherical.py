@@ -27,7 +27,8 @@ class SphericalDataModule(LightningDataModule):
     def __init__(self, train_config, valid_config, work_directory, seconds_per_dt=36000, Rs_per_ds=1,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
-                 batch_size=4096, num_workers=None):
+                 batch_size=65536, dataset_batch_size=4096,
+                 num_workers=None):
         super().__init__()
 
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
@@ -36,8 +37,10 @@ class SphericalDataModule(LightningDataModule):
         # train parameters
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.batch_size = batch_size * n_gpus
-        self.dataset_batch_size = batch_size // len(train_files) * n_gpus
+        self.dataset_batch_size = dataset_batch_size * n_gpus
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
+        print('Using {} GPUs'.format(n_gpus))
+        print('Using {} CPUs'.format(self.num_workers))
 
         with Pool(num_workers) as p:
             args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),

@@ -68,9 +68,7 @@ class TestSetGenerator():
         return stokes_profiles
 
     def _load_parameters(self, time_step, resolution=None):
-        # time_step = time_step / 10  # scale temporal evolution
-        # TODO: remove static
-        time_step = time_step * 0  # static frame
+        time_step = time_step / 3  # scale temporal evolution
 
         nx = self.nx if resolution is None else resolution[0]
         ny = self.ny if resolution is None else resolution[1]

@@ -56,7 +56,7 @@ class SphericalTestSetGenerator(TestSetGenerator):
         # add differential rotation
         latitudes = np.linspace(-np.pi / 2, np.pi / 2, v_r.shape[0]) * u.rad
         v_diff = solar_differential_rotation_velocity(latitudes).to_value(u.m / u.s)
-        v_phi -= v_diff[:, None]
+        v_phi += v_diff[:, None]
         # add to parameter dict
         input_parameters['v_r'] = v_r
         input_parameters['v_theta'] = v_theta
