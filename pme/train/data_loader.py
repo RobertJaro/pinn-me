@@ -9,6 +9,7 @@ from multiprocessing import Pool
 import numpy as np
 import torch
 import wandb
+import zarr
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
@@ -16,6 +17,7 @@ from astropy.io.fits import getheader
 from astropy.nddata import block_reduce
 from dateutil.parser import parse
 from matplotlib import pyplot as plt
+from numpy import dtype
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
 from sklearn.utils import shuffle
@@ -23,6 +25,7 @@ from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map, make_fitswcs_header
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
+from zarr import NestedDirectoryStore
 
 
 class CombinedDataset(Dataset):
@@ -51,10 +54,9 @@ class BatchDataset(Dataset):
         assert all(t.shape[0] == tensors[0].shape[0] for t in tensors), f'Invalid shapes: {[t.shape for t in tensors]}'
 
         self.batch_size = batch_size
-        self.n_batches = np.ceil(tensors[0].shape[0] / batch_size).astype(np.int32)
 
     def __len__(self):
-        return self.n_batches
+        return np.ceil(self.tensors[0].shape[0] / self.batch_size).astype(np.int32)
 
     def __getitem__(self, idx):
         return [t[idx * self.batch_size: (idx + 1) * self.batch_size] for t in self.tensors]
@@ -79,16 +81,16 @@ class BatchesDataset(Dataset):
         """
         self.batches_file_paths = batches_file_paths
         self.batch_size = int(batch_size)
+        self.data = {k: zarr.open(NestedDirectoryStore(bf), mode='r') for k, bf in self.batches_file_paths.items()}
 
     def __len__(self):
-        ref_file = list(self.batches_file_paths.values())[0]
-        n_batches = np.ceil(np.load(ref_file, mmap_mode='r').shape[0] / self.batch_size)
+        ref_data = list(self.data.values())[0]
+        n_batches = np.ceil(ref_data.shape[0] / self.batch_size)
         return n_batches.astype(np.int32)
 
     def __getitem__(self, idx):
         # lazy load data
-        data = {k: np.copy(np.load(bf, mmap_mode='r')[idx * self.batch_size: (idx + 1) * self.batch_size])
-                for k, bf in self.batches_file_paths.items()}
+        data = {k: torch.tensor(v[idx * self.batch_size: (idx + 1) * self.batch_size], dtype=torch.float32) for k, v in self.data.items()}
         return data
 
     def clear(self):
@@ -105,7 +107,7 @@ class BatchesDataset(Dataset):
 
 class TensorsDataset(BatchesDataset):
 
-    def __init__(self, tensors, work_directory, filter_nans=True, shuffle=True, ds_name=None, **kwargs):
+    def __init__(self, tensors, work_directory, batch_size, filter_nans=True, shuffle=True, ds_name=None, **kwargs):
         # filter nan entries
         nan_mask = np.any([np.any(np.isnan(t), axis=tuple(range(1, t.ndim))) for t in tensors.values()], axis=0)
         if nan_mask.sum() > 0 and filter_nans:
@@ -120,15 +122,19 @@ class TensorsDataset(BatchesDataset):
         ds_name = uuid.uuid4() if ds_name is None else ds_name
         batches_paths = {}
         for k, v in tensors.items():
-            coords_npy_path = os.path.join(work_directory, f'{ds_name}_{k}.npy')
-            np.save(coords_npy_path, v.astype(np.float32))
-            batches_paths[k] = coords_npy_path
+            coords_zarr_path = os.path.join(work_directory, f'{ds_name}_{k}.zarr')
+            # write data to zarr - chunks
+            store = NestedDirectoryStore(coords_zarr_path)
+            z = zarr.open(store, mode='w', shape=v.shape, chunks=(batch_size, *v.shape[1:]), dtype='float32')
+            for i in range(0, v.shape[0], batch_size):
+                z[i:i + batch_size] = v[i:i + batch_size]
+            batches_paths[k] = coords_zarr_path
 
         # cleanup memory to avoid out of memory errors when loading data
         del tensors
         gc.collect()
 
-        super().__init__(batches_paths, **kwargs)
+        super().__init__(batches_paths, batch_size=batch_size, **kwargs)
 
 
 class GenericDataModule(LightningDataModule):
@@ -670,7 +676,8 @@ def load_Hinode_files(data_dir):
 def shuffle_async(datasets, num_workers=None):
     num_workers = num_workers if num_workers is not None else os.cpu_count()
     with Pool(num_workers) as p:
-        p.map(_shuffle, datasets)
+        # parallel processing with progress bar
+        _ = [_ for _ in tqdm(p.imap(_shuffle, datasets), total=len(datasets), desc='Shuffling datasets')]
 
 
 def _shuffle(ds):

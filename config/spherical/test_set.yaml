@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/test_set_v08"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/test_set_v08"
+base_path: "/glade/work/rjarolim/spinn_me/test_set_v10"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/test_set_v09"
 data:
   train_config: {data_path: "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data"}
   valid_config: {data_path: "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data", sample_idx: 49}
@@ -15,5 +15,6 @@ logging:
 model:
   encoding: "gaussian"
 training:
-  epochs: 1000
+  epochs: 10000
   check_val_every_n_epoch: 10
+  lambda_stokes: [10, 1, 1, 1]

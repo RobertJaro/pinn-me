@@ -35,6 +35,12 @@ data_config = config['data']
 data_module_save_path = os.path.join(work_directory, 'data_module.pt')
 if os.path.exists(data_module_save_path) and not args.reload:
     data_module = torch.load(data_module_save_path)
+    # update batch settings
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    if 'batch_size' in data_config:
+        data_module.batch_size = data_config['batch_size'] * n_gpus
+    if 'dataset_batch_size' in data_config:
+        data_module.dataset_batch_size = data_config['dataset_batch_size'] * n_gpus
 else:
     data_module = SphericalDataModule(**data_config, work_directory=work_directory)
     torch.save(data_module, data_module_save_path)

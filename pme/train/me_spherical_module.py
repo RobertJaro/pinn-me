@@ -40,10 +40,6 @@ class MESphericalModule(LightningModule):
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
 
-        self.time_random_config = {'start': 10, 'end': 1e-3, 'iterations': 1e5}
-        self.time_random_scaling = nn.Parameter(torch.tensor(self.time_random_config['start'], dtype=torch.float32), requires_grad=False)
-        self.time_random_gamma = torch.tensor((self.time_random_config['end'] / self.time_random_config['start']) ** (1 / self.time_random_config['iterations']), dtype=torch.float32)
-
     def configure_optimizers(self):
         parameters = list(self.parameter_model.parameters())
         if isinstance(self.lr_params, dict):
@@ -70,8 +66,6 @@ class MESphericalModule(LightningModule):
         rtp_to_img_transform = batch['rtp_to_img_transform']
         v_obs_los = batch['v_obs_los']
 
-        coords[..., 0] += torch.randn_like(coords[..., 0]) * self.time_random_scaling
-
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
@@ -80,13 +74,13 @@ class MESphericalModule(LightningModule):
                                                        coords)
 
         # compute static loss
-        # b = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
-        # jac_matrix = jacobian(b, coords)
-        # dBx_dt = jac_matrix[:, 0, 0]
-        # dBy_dt = jac_matrix[:, 1, 0]
-        # dBz_dt = jac_matrix[:, 2, 0]
-        # dB_dt = torch.stack([dBx_dt, dBy_dt, dBz_dt], dim=-1)
-        # static_loss = dB_dt.pow(2).sum(-1)
+        b = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
+        jac_matrix = jacobian(b, coords)
+        dBx_dt = jac_matrix[:, 0, 0]
+        dBy_dt = jac_matrix[:, 1, 0]
+        dBz_dt = jac_matrix[:, 2, 0]
+        dB_dt = torch.stack([dBx_dt, dBy_dt, dBz_dt], dim=-1) / 1000 # normalize B
+        static_loss = dB_dt.pow(2).sum(-1)
 
         v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
 
@@ -116,14 +110,14 @@ class MESphericalModule(LightningModule):
         stokes_loss = stokes_loss * self.lambda_stokes[None, :]
 
         # compute total loss (both azimuth configurations)
-        total_loss = stokes_loss.mean()# + static_loss.mean() * 1e-3
+        total_loss = stokes_loss.mean() + static_loss.mean() * 1e-3
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss,
-                # 'static_loss': static_loss.mean()
+                'static_loss': static_loss.mean()
                 }
 
     def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
@@ -170,15 +164,6 @@ class MESphericalModule(LightningModule):
         if scheduler.get_last_lr()[0] > self.lr_params['end']:
             scheduler.step()
         self.log('Learning Rate', scheduler.get_last_lr()[0])
-
-
-        if self.time_random_scaling > self.time_random_config['end']:
-            new_gamma = self.time_random_scaling * self.time_random_gamma
-            self.time_random_scaling.copy_(new_gamma)
-        else:
-            new_gamma = torch.zeros_like(self.time_random_scaling)
-            self.time_random_scaling.copy_(new_gamma)
-        self.log('time_random_scaling', self.time_random_scaling)
 
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
@@ -306,7 +291,7 @@ class MESphericalModule(LightningModule):
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b, cmap='viridis', vmin=.1, origin='lower', norm='log')
+        im = ax.imshow(b, cmap='viridis', vmin=.1, vmax=max(100, b.max()), origin='lower', norm='log')
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)

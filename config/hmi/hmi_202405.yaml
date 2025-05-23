@@ -1,12 +1,13 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v01"
-work_directory: "/glade/derecho/scratch/rjarolim/pinn_me/hmi/202405_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v05"
+work_directory: "/glade/derecho/scratch/rjarolim/pinn_me/hmi/202405_v04"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 20}
   ref_time: "2024-05-01T00:00:00"
   num_workers: 16
   batch_size: 65536
+  dataset_batch_size: 8192
 logging:
   project: pinn-me-spherical
   tags: ["hmi"]
@@ -15,3 +16,4 @@ model:
   encoding: "gaussian"
 training:
   epochs: 500
+  lambda_stokes: [1, 1, 1, 1]

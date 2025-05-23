@@ -114,13 +114,54 @@ class MEModel(nn.Module):
         return output
 
 
-class MESphericalModel(SirenModel):
+class MESphericalModel(nn.Module):
 
-    def __init__(self, in_coords, dim=512, encoding='gaussian_positional', activation='sine', num_layers=8):
-        super().__init__(in_dim=in_coords, out_dim=13, dim=dim)
+    def __init__(self, in_coords, dim=256, encoding='gaussian', activation='sine', num_layers=8):
+        super().__init__()
+        # encoding layer
+        if encoding == "periodic":
+            posenc = PeriodicBoundary()
+            d_in = nn.Linear(in_coords + 2, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        if encoding == "positional":
+            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "gaussian":
+            posenc = GaussianPositionalEncoding(d_input=in_coords)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "linear":
+            self.d_in = nn.Linear(in_coords, dim)
+        else:
+            raise ValueError(f"Unknown encoding: {encoding}")
+
+        # hidden layers
+        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
+        self.linear_layers = nn.ModuleList(lin)
+
+        # output layer
+        self.d_out = nn.Linear(dim, 13)
+
+        # activation functions
+        if activation == "swish":
+            self.in_activation = Swish()
+            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+        elif activation == "sine":
+            self.in_activation = Sine()
+            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        # output activations
+        self.softplus = nn.Softplus()
+        self.register_buffer("c", torch.tensor(3e8))
 
     def forward(self, x):
-        params = super().forward(x)
+        x = self.in_activation(self.d_in(x))
+        for l, a in zip(self.linear_layers, self.activations):
+            x = a(l(x))
+        params = self.d_out(x)
         #
         b_scale = 1  # 10 ** params[..., 0:1]
         b_x = params[..., 1:2] * b_scale

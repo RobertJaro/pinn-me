@@ -33,6 +33,10 @@ class SphericalDataModule(LightningDataModule):
 
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
         train_files = self._load_files(train_config['data_path'])
+        if 'n_samples' in train_config: # apply subsampling for debugging
+            n_samples = train_config['n_samples']
+            sampling = len(train_files) // n_samples
+            train_files = train_files[::sampling]
 
         # train parameters
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
@@ -116,11 +120,14 @@ class SphericalDataModule(LightningDataModule):
     def train_dataloader(self):
         # shuffle asynchronously
         datasets = self.train_datasets
-        shuffle_async(datasets, self.num_workers)
+        # shuffle_async(datasets, self.num_workers)
+        # update batch size
+        for ds in datasets:
+            ds.batch_size = self.dataset_batch_size
         # data loader with iterations based on the largest dataset
         combined_dataset = CombinedDataset(datasets, self.batch_size // self.dataset_batch_size)
         loader = DataLoader(combined_dataset, batch_size=None, num_workers=self.num_workers,
-                            pin_memory=True, shuffle=True)
+                            pin_memory=True, shuffle=True, prefetch_factor=5, persistent_workers=True)
         return loader
 
     def val_dataloader(self):
