@@ -49,23 +49,21 @@ if __name__ == '__main__':
 
     latc, lonc = np.deg2rad(ref_map.meta['CRLT_OBS']), np.deg2rad(ref_map.meta['CRLN_OBS'])
     pAng = -np.deg2rad(ref_map.meta['CROTA2'])
-    a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
-    b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-    b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+    b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
+    # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
     b_rtp[..., 1] *= -1
 
-    v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-    v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+    v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
+    # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
     v_rtp[..., 1] *= -1
 
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
 
     fld = np.linalg.norm(b_img, axis=-1, keepdims=True)
-    # inc = np.pi - np.arccos(b_img[..., 2:3] / (fld + 1e-8))
-    # azi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2]) + np.pi / 2
     inc = np.arccos(b_img[..., 2:3] / (fld + 1e-8))
     azi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2])
 
@@ -93,7 +91,7 @@ if __name__ == '__main__':
     b_img_ref = np.stack([b_xi, b_eta, b_zeta], axis=-1)
 
     b_rtp_ref = np.einsum('...ij,...j->...i', a_matrix, b_img_ref)
-    b_rtp_ref[..., 1] *= -1
+    b_rtp_ref[..., 1] *= -1 # TODO check if this is correct
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
 
@@ -146,7 +144,7 @@ if __name__ == '__main__':
     [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
 
     # add subtitle with date
-    plt.suptitle(f'Carrington map at {target_time}', fontsize=16)
+    plt.suptitle(f'Map at {target_time}', fontsize=16)
 
     plt.tight_layout()
     plt.savefig(os.path.join(args.output, 'reference_comparison.jpg'), dpi=300)
@@ -185,49 +183,49 @@ if __name__ == '__main__':
 
     fig, axs = plt.subplots(2, 4, figsize=(15, 5), subplot_kw={'projection': ref_map})
 
-    ax = axs[0, 0]
+    ax = axs[1, 0]
     im = ax.imshow(fld_ref, cmap='viridis', origin='lower', vmin=1, vmax=2000, norm='log')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
 
-    ax = axs[0, 1]
+    ax = axs[1, 1]
     im = ax.imshow(inc_ref % 180, cmap='PiYG', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
-    ax = axs[0, 2]
+    ax = axs[1, 2]
     im = ax.imshow(azi_ref % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
-    ax = axs[0, 3]
+    ax = axs[1, 3]
     im = ax.imshow(azi_ref % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
-    ax = axs[1, 0]
+    ax = axs[0, 0]
     im = ax.imshow(fld, cmap='viridis', origin='lower', vmin=1, vmax=2000, norm='log')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
 
-    ax = axs[1, 1]
+    ax = axs[0, 1]
     im = ax.imshow(inc % 180, cmap='PiYG', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
-    ax = axs[1, 2]
+    ax = axs[0, 2]
     im = ax.imshow(azi % 180, cmap='twilight', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
-    ax = axs[1, 3]
+    ax = axs[0, 3]
     im = ax.imshow(azi % 360, cmap='twilight', origin='lower', vmin=0, vmax=360)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)

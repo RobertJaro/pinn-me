@@ -4,11 +4,13 @@ import os.path
 
 import numpy as np
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
+from tqdm import tqdm
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix
@@ -30,8 +32,16 @@ if __name__ == '__main__':
     # load reference maps
     ref_maps = sorted(glob.glob(args.ref_maps))
 
-    for i, f in enumerate(ref_maps):
+    for i, f in tqdm(enumerate(ref_maps), total=len(ref_maps)):
+        out_path = os.path.join(args.output, f'step{i:03d}.jpg')
+        # if os.path.exists(out_path):
+        #     continue
+
         ref_map = Map(f)
+        bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
+        tr = SkyCoord(500 * u.arcsec, 500 * u.arcsec, frame=ref_map.coordinate_frame)
+        ref_map = ref_map.submap(bl, top_right=tr)
+        ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 128x128 pixels
 
         # load time
         target_time = ref_map.date.to_datetime()
@@ -50,19 +60,20 @@ if __name__ == '__main__':
 
         pAng = -np.deg2rad(ref_map.meta.get('CROTA2', 0))
         latc, lonc = ref_map.carrington_latitude.to_value(u.rad), ref_map.carrington_longitude.to_value(u.rad)
-        a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
-        parameter_cube = pinnme.load_parameters(coords=coords)
-        b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-        b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-        b_rtp[..., 1] *= -1
+        parameter_cube = pinnme.load_parameters(coords=coords, progress=False)
+        b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
+        # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+        # b_rtp[..., 1] *= -1
 
-        v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-        v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-        v_rtp[..., 1] *= -1
+        v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
+        # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+        # v_rtp[..., 1] *= -1
 
         b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
+        v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
 
         b_field = np.linalg.norm(b_img, axis=-1)
         inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
@@ -71,7 +82,7 @@ if __name__ == '__main__':
         ########################################################################################################################
         # Plot subframe in B_r, B_theta, B_phi
 
-        norm = Normalize(-500, 500)
+        norm = SymLogNorm(linthresh=1, vmin=-3000, vmax=3000)#Normalize(-500, 500)
 
         fig, axs = plt.subplots(3, 3, figsize=(10, 8), subplot_kw={'projection': ref_map})
 
@@ -103,7 +114,7 @@ if __name__ == '__main__':
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
 
         ax = axs[1, 1]
-        im = ax.imshow(np.rad2deg(inc % np.pi), cmap='seismic_r', origin='lower', vmin=0, vmax=90)
+        im = ax.imshow(np.rad2deg(inc % np.pi), cmap='seismic_r', origin='lower', vmin=0, vmax=180)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
@@ -115,11 +126,11 @@ if __name__ == '__main__':
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [G]')
 
         ax = axs[2, 0]
-        im = ax.imshow(v_xyz[..., 2], cmap='seismic_r', origin='lower', vmin=-2e3, vmax=2e3)
+        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', vmin=-2e3, vmax=2e3)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{dop}$ [km/s]')
-        ax.set_title(r'$v_\text{z}$ [km/s]')
+        ax.set_title(r'$v_\text{LOS}$ [km/s]')
 
         ax = axs[2, 1]
         im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=-90, vmax=90, origin='lower')
@@ -144,5 +155,5 @@ if __name__ == '__main__':
         plt.suptitle(f'{target_time}', fontsize=16)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(args.output, f'step{i:03d}.jpg'), dpi=300)
+        plt.savefig(out_path, dpi=300)
         plt.close()

@@ -29,19 +29,7 @@ python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/h
 
 
 # 11158
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-14T00:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-14T06:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-14T12:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-14T18:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-15T00:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-15T06:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-15T12:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-15T18:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-16T00:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-16T06:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-16T12:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-16T18:00:00
-python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_6h --email robert.jarolim@uni-graz.at --t_start 2011-02-17T00:00:00
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_3h --email "robert.jarolim@uni-graz.at" --t_start "2011-02-15T15:00:00" --t_end "2011-02-20T00:00:00" --cadence "3h"
 
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/201102_test --email "robert.jarolim@uni-graz.at" --t_start "2011-02-15T00:00:00"
 

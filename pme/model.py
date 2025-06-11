@@ -114,54 +114,59 @@ class MEModel(nn.Module):
         return output
 
 
-class MESphericalModel(nn.Module):
+class GenericModel(nn.Module):
 
-    def __init__(self, in_coords, dim=256, encoding='gaussian', activation='sine', num_layers=8):
+    def __init__(self, in_dim, out_dim, dim=512, encoding='gaussian', activation='sine', n_layers=8):
         super().__init__()
         # encoding layer
         if encoding == "periodic":
             posenc = PeriodicBoundary()
-            d_in = nn.Linear(in_coords + 2, dim)
+            d_in = nn.Linear(in_dim + 2, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         if encoding == "positional":
-            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
+            posenc = PositionalEncoding(num_freqs=20, d_input=in_dim)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_coords)
+            posenc = GaussianPositionalEncoding(d_input=in_dim, num_freqs=16, scale=4)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "linear":
-            self.d_in = nn.Linear(in_coords, dim)
+            self.d_in = nn.Linear(in_dim, dim)
         else:
             raise ValueError(f"Unknown encoding: {encoding}")
 
         # hidden layers
-        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
+        lin = [nn.Linear(dim, dim) for _ in range(n_layers)]
         self.linear_layers = nn.ModuleList(lin)
 
         # output layer
-        self.d_out = nn.Linear(dim, 13)
+        self.d_out = nn.Linear(dim, out_dim)
 
         # activation functions
         if activation == "swish":
             self.in_activation = Swish()
-            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
+            self.activations = nn.ModuleList([Swish() for _ in range(n_layers)])
         elif activation == "sine":
             self.in_activation = Sine()
-            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
+            self.activations = nn.ModuleList([Sine() for _ in range(n_layers)])
         else:
             raise ValueError(f"Unknown activation: {activation}")
-
-        # output activations
-        self.softplus = nn.Softplus()
-        self.register_buffer("c", torch.tensor(3e8))
 
     def forward(self, x):
         x = self.in_activation(self.d_in(x))
         for l, a in zip(self.linear_layers, self.activations):
             x = a(l(x))
-        params = self.d_out(x)
+        out = self.d_out(x)
+        return out
+
+class MESphericalModel(GenericModel):
+
+    def __init__(self, **kwargs):
+        super().__init__(in_dim=4, out_dim=13, **kwargs)
+
+    def forward(self, x):
+        params = super().forward(x)
         #
         b_scale = 1  # 10 ** params[..., 0:1]
         b_x = params[..., 1:2] * b_scale
@@ -260,17 +265,17 @@ class NormalizationModule(nn.Module):
     def __init__(self, value_range):
         super().__init__()
         self.register_buffer("value_range", torch.tensor(value_range, dtype=torch.float32)[None, :, None, :])
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
 
     def forward(self, stokes):
         stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
-        stokes = torch.asinh(stokes * 1e2) / self.stretch
+        stokes = torch.asinh(stokes * 1e1) / self.stretch
         return stokes
 
 
-class DisambiguationModel(SirenModel):
-    def __init__(self):
-        super().__init__(4, 1, dim=64, n_layers=4)
+class DisambiguationModel(GenericModel):
+    def __init__(self, **kwargs):
+        super().__init__(4, 1, **kwargs)
 
     def forward(self, x):
         x = super().forward(x)

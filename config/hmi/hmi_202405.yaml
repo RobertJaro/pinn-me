@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v05"
-work_directory: "/glade/derecho/scratch/rjarolim/pinn_me/hmi/202405_v04"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v12"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/202405_v12"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 20}

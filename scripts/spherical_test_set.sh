@@ -19,8 +19,8 @@ python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/ra
 
 #################################################################################
 # inversion
-python3 -m pme.inversion_spherical --config config/spherical/test_set.yaml --reload
+python3 -m pme.inversion_spherical --config config/spherical/test_set.yaml
 
 # test transformation
 #python3 -m pme.data.test_B_transform
-#python3 -i -m pme.evaluation.spherical.compare_test_set --input "/glade/work/rjarolim/spinn_me/test_set_v08/inversion.pme" --output "/glade/work/rjarolim/spinn_me/test_set_v08/evaluation" --ref_maps "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data/*_I0.fits"
+#python3 -i -m pme.evaluation.spherical.compare_test_set --input "/glade/work/rjarolim/spinn_me/test_set_v12/inversion.pme" --output "/glade/work/rjarolim/spinn_me/test_set_v12/evaluation" --ref_maps "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data/*_I0.fits"

@@ -109,7 +109,7 @@ class SphericalTestSetGenerator(TestSetGenerator):
 
         # TODO check that CRLT_OBS is in rad units as provided by the map
         pAng = -np.deg2rad(helioprojective_map.meta.get('CROTA2', 0))
-        a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         # stack b vector

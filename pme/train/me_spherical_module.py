@@ -10,7 +10,7 @@ from torch import nn
 from torch.optim.lr_scheduler import ExponentialLR
 
 from pme.data.differential_rotation import solar_differential_rotation_velocity_torch
-from pme.data.util import cartesian_to_spherical
+from pme.data.util import cartesian_to_spherical, image_to_rtp
 from pme.evaluation.loader import to_spherical, to_cartesian
 from pme.model import NormalizationModule, MESphericalModel, jacobian
 from pme.train.me_atmosphere import MEAtmosphere
@@ -29,7 +29,7 @@ class MESphericalModule(LightningModule):
 
         # init model
         model_config = model_config if model_config is not None else {}
-        self.parameter_model = MESphericalModel(4, **model_config)
+        self.parameter_model = MESphericalModel(**model_config)
 
         self.forward_model = MEAtmosphere(**lambda_config)
         self.lr_params = lr_params
@@ -70,17 +70,8 @@ class MESphericalModule(LightningModule):
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform,
-                                                       coords)
-
-        # compute static loss
-        b = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
-        jac_matrix = jacobian(b, coords)
-        dBx_dt = jac_matrix[:, 0, 0]
-        dBy_dt = jac_matrix[:, 1, 0]
-        dBz_dt = jac_matrix[:, 2, 0]
-        dB_dt = torch.stack([dBx_dt, dBy_dt, dBz_dt], dim=-1) / 1000 # normalize B
-        static_loss = dB_dt.pow(2).sum(-1)
+        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
+                                                       rtp_to_img_transform, coords)
 
         v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
 
@@ -109,21 +100,42 @@ class MESphericalModule(LightningModule):
         # weighted loss - apply lambda weights for each stokes parameter
         stokes_loss = stokes_loss * self.lambda_stokes[None, :]
 
-        # compute total loss (both azimuth configurations)
-        total_loss = stokes_loss.mean() + static_loss.mean() * 1e-3
+        #################################################
+        # compute static loss -- TODO: use separate data module for this
+        # create random sampling coords
+        # rand_coords = torch.rand((1024, 4), device=coords.device, dtype=torch.float32)
+        # rand_t = rand_coords[:, 0] * (coords[..., 0].max() - coords[..., 0].min()) + coords[..., 0].min()
+        # rand_x = rand_coords[:, 1] * (coords[..., 1].max() - coords[..., 1].min()) + coords[..., 1].min()
+        # rand_y = rand_coords[:, 2] * (coords[..., 2].max() - coords[..., 2].min()) + coords[..., 2].min()
+        # rand_z = rand_coords[:, 3] * (coords[..., 3].max() - coords[..., 3].min()) + coords[..., 3].min()
+        # rand_coords = torch.stack([rand_t, rand_x, rand_y, rand_z], dim=-1)
+        # # create new leaf
+        # rand_coords = rand_coords.detach()
+        # rand_coords.requires_grad = True
+        # # compute B field at random coordinates
+        # output = self.parameter_model(rand_coords)
+        # b = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1) / 1000 # convert to kG
+        #
+        # # compute jacobian of B field with respect to coordinates
+        # jac_matrix = jacobian(b, rand_coords)
+        # dB_dt = jac_matrix[:, :, 0]
+        # static_loss = dB_dt.pow(2).sum(-1)
+
+        # compute total loss
+        total_loss = stokes_loss.mean() #+ static_loss.mean() * 1e-3
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss,
-                'static_loss': static_loss.mean()
+                # "static_loss": static_loss.mean(),
                 }
 
     def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
         # transform B
-        b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
-        b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
+        b_rtp = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
+        # b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
         b_rtp[..., 1] *= -1  # TODO do we need this? --> I think this needs to go
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
@@ -133,23 +145,23 @@ class MESphericalModule(LightningModule):
         # b_eta = field * sin(gamma) * cos(psi)
         # b_zeta = field * cos(gamma)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
-
-        # TODO: why is this shifted by pi?
-        # inc = torch.pi - acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        # azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2]) + torch.pi / 2
-
         inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
         azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
 
+        # Shift polarizer position for HMI
+        azi = azi + torch.pi / 2
+        inc = torch.pi - inc
+
         # compute differential rotation as function of latitude - (t, x, y, z)
         spherical_coords = cartesian_to_spherical(coords[..., 1:], f=torch)
+        # TODO: replace with carrington rotation velocity --> gives apparent velocity
         v_rot = solar_differential_rotation_velocity_torch(spherical_coords[..., 1])
 
         # transform V
-        v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
-        v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
+        v_rtp = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
+        # v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
         v_rtp[..., 1] *= -1  # TODO do we need this?
-        v_rtp[..., 2] += v_rot
+        # v_rtp[..., 2] += v_rot
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
 
         v_dop = v_img[..., 2:3]
@@ -175,6 +187,7 @@ class MESphericalModule(LightningModule):
         stokes_true = batch['stokes']
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
+        v_obs_los = batch['v_obs_los']
 
         # forward step
         coords.requires_grad = True
@@ -183,10 +196,12 @@ class MESphericalModule(LightningModule):
         transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
                                                        rtp_to_img_transform, coords)
 
+        v_dop = transformed_output['v_dop'] + v_obs_los  # add doppler correction - spacecraft velocity
+
         forward_params = {'b_field': transformed_output['b_field'],
                           'inc': transformed_output['inc'],
                           'azi': transformed_output['azi'],
-                          'vdop': transformed_output['v_dop'],
+                          'vdop': v_dop,
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
 
@@ -291,7 +306,7 @@ class MESphericalModule(LightningModule):
 
         fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(b, cmap='viridis', vmin=.1, vmax=max(100, b.max()), origin='lower', norm='log')
+        im = ax.imshow(b, cmap='viridis', vmin=.1, origin='lower', norm='log')
         ax.set_title("B")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)

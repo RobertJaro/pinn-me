@@ -52,7 +52,7 @@ if __name__ == '__main__':
     # create observer transform
     latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
     pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
-    a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
     ####################################################################################################################

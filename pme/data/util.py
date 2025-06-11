@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from astropy import units as u
 from astropy.constants import R_sun
 # Some documentation to be included
@@ -99,7 +100,10 @@ def los_trv_azi_to_img(b, ambiguous=False, f=np):
     b = f.stack([B_x, B_y, B_z], -1)
     return b
 
-def image_to_spherical_matrix(lon, lat, latc, lonc, pAng, sin=np.sin, cos=np.cos):
+def image_to_spherical_matrix(lon, lat, lonc, latc, pAng, f=np):
+    sin = f.sin
+    cos = f.cos
+
     a11 = -sin(latc) * sin(pAng) * sin(lon - lonc) + cos(pAng) * cos(lon - lonc)
     a12 = sin(latc) * cos(pAng) * sin(lon - lonc) + sin(pAng) * cos(lon - lonc)
     a13 = -cos(latc) * sin(lon - lonc)
@@ -147,3 +151,16 @@ def solar_differential_rotation_velocity(latitude):
     # Tangential velocity: v = R * omega * cos(latitude)
     v = R_sun * omega * np.cos(theta) / u.rad
     return v.to(u.m / u.s)
+
+def image_to_rtp(b_field, inc, azi, img_to_rtp_transform, f=np):
+    # compute B_r, B_t, B_p in carrington coordinates
+    b_xi = - b_field * f.sin(inc) * f.sin(azi)
+    b_eta = b_field * f.sin(inc) * f.cos(azi)
+    b_zeta = b_field * f.cos(inc)
+    if f == torch:
+        b_img = torch.cat([b_xi, b_eta, b_zeta], -1)
+    else:
+        b_img = np.concatenate([b_xi, b_eta, b_zeta], -1)
+
+    b_rtp = f.einsum("...ij,...j->...i", img_to_rtp_transform, b_img)
+    return b_rtp

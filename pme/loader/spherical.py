@@ -14,7 +14,7 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningDataModule
-from sunpy.coordinates import frames
+from sunpy.coordinates import frames, sun
 from sunpy.map import all_coordinates_from_map, Map
 from torch.utils.data import DataLoader
 
@@ -202,7 +202,7 @@ class HMISphericalDataset(TensorsDataset):
 
         projective_coords = spherical_coords.transform_to(frames.Helioprojective)
         radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
-        mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
+        mu = np.sqrt(1 - radial_distance ** 2)
         mu = mu.astype(np.float32)
 
         carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
@@ -225,7 +225,7 @@ class HMISphericalDataset(TensorsDataset):
         # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
         pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
         latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
-        a_matrix = image_to_spherical_matrix(lon, lat, latc, lonc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         # load observer velocity

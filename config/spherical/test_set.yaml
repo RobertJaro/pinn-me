@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/test_set_v10"
+base_path: "/glade/work/rjarolim/spinn_me/test_set_v12"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/test_set_v09"
 data:
   train_config: {data_path: "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/data"}
@@ -17,4 +17,4 @@ model:
 training:
   epochs: 10000
   check_val_every_n_epoch: 10
-  lambda_stokes: [10, 1, 1, 1]
+  lambda_stokes: [1, 1, 1, 1]
