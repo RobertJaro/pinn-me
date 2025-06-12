@@ -55,11 +55,11 @@ if __name__ == '__main__':
     parameter_cube = pinnme.load_parameters(coords=coords)
     b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
     # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-    b_rtp[..., 1] *= -1
+    # b_rtp[..., 1] *= -1
 
     v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
     # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-    v_rtp[..., 1] *= -1
+    # v_rtp[..., 1] *= -1
 
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
 

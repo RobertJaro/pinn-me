@@ -34,11 +34,6 @@ if __name__ == '__main__':
     s_map = ref_B_r
     spherical_coords = all_coordinates_from_map(s_map)
 
-    projective_coords = spherical_coords.transform_to(frames.Helioprojective)
-    radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
-    mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
-    mu = mu.astype(np.float32)
-
     carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
     r = carrington_coords.radius
@@ -62,6 +57,9 @@ if __name__ == '__main__':
     b_rtp[..., 1] *= -1
     b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
+    # b_xi = - field * sin(gamma) * sin(psi)
+    # b_eta = field * sin(gamma) * cos(psi)
+    # b_zeta = field * cos(gamma)
     b_field = np.linalg.norm(b_img, axis=-1, keepdims=True)
     theta = np.arccos(b_img[..., 2:3] / (b_field + 1e-8))
     chi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2])
