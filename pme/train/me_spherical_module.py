@@ -136,7 +136,7 @@ class MESphericalModule(LightningModule):
         # transform B
         b_rtp = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         # b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
-        # b_rtp[..., 1] *= -1  # TODO do we need this? --> I think this needs to go
+        b_rtp[..., 1] *= -1  # TODO do we need this? --> I think this needs to go
         b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
         # xi, eta, zeta
@@ -160,7 +160,7 @@ class MESphericalModule(LightningModule):
         # transform V
         v_rtp = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         # v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
-        # v_rtp[..., 1] *= -1  # TODO do we need this?
+        v_rtp[..., 1] *= -1  # TODO do we need this?
         # v_rtp[..., 2] += v_rot
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)
 
