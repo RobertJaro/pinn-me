@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v12"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_physics_v06"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/202405_v12"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
@@ -17,3 +17,4 @@ model:
 training:
   epochs: 500
   lambda_stokes: [1, 1, 1, 1]
+  lambda_induction: 1.0e-1

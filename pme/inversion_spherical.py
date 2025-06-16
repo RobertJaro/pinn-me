@@ -53,10 +53,12 @@ epochs = training_config.pop('epochs', 50)
 
 me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config=data_module.lambda_config,
                               value_range=data_module.value_range, model_config=model_config,
+                              Rs_per_ds=data_module.Rs_per_ds, seconds_per_dt=data_module.seconds_per_dt,
+                              gauss_per_dB=data_module.gauss_per_dB,
                               **training_config)
 
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
-                                      every_n_epochs=val_check_interval,
+                                      every_n_epochs=check_val_every_n_epoch,
                                       save_last=True)
 
 # save callback
@@ -68,8 +70,10 @@ def save(*args, **kwargs):
         'parameter_model': me_module.parameter_model,
         'cube_shape': data_module.image_shape, 'lambda_config': data_module.lambda_config,
         'data_range': data_module.data_range,
-        'ref_time': data_module.ref_time, 'times': data_module.times, 'seconds_per_dt': data_module.seconds_per_dt,
-        'Rs_per_ds': data_module.Rs_per_ds
+        'ref_time': data_module.ref_time, 'times': data_module.times,
+        'seconds_per_dt': data_module.seconds_per_dt,
+        'Rs_per_ds': data_module.Rs_per_ds,
+        'gauss_per_dB': data_module.gauss_per_dB,
     }, save_path)
 
 

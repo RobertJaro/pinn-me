@@ -57,17 +57,17 @@ if __name__ == '__main__':
         coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
 
         parameter_cube = pinnme.load_parameters(coords=coords, progress=False)
-        b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-        # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+        b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1) * pinnme.gauss_per_dB
+        b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
 
-        v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-        # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+        v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1) * 1e-3 * pinnme.meters_per_ds / pinnme.seconds_per_dt
+        v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
 
         ########################################################################################################################
         # Plot subframe in B_r, B_theta, B_phi
 
         b_norm = Normalize(-500, 500) # SymLogNorm(linthresh=1, vmin=-3000, vmax=3000)#
-        v_norm = SymLogNorm(linthresh=10)
+        v_norm = Normalize(vmin=-2, vmax=2)
 
         fig, axs = plt.subplots(2, 3, figsize=(10, 5))
 

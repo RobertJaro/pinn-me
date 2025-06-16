@@ -42,8 +42,6 @@ if __name__ == '__main__':
     carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
     cartesian_coords = spherical_to_cartesian(carrington_coords)
 
-    # create rtp transform
-    cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
     # create observer transform
     latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
     pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))

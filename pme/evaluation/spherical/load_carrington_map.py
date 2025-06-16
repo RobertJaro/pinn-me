@@ -4,15 +4,15 @@ from datetime import timedelta
 
 import numpy as np
 import pandas as pd
+from astropy import units as u
 from astropy.coordinates import SkyCoord
 from matplotlib import pyplot as plt
-from matplotlib.colors import SymLogNorm, Normalize
+from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 
-from pme.data.util import spherical_to_cartesian, vector_cartesian_to_spherical
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix
 from pme.evaluation.loader import PINNMEOutput
-from astropy import units as u
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -35,26 +35,28 @@ if __name__ == '__main__':
 
     longitudes = []
     for t in times:
-        coord = SkyCoord(0 *u.deg, 0 * u.deg, frame=frames.HeliographicStonyhurst, obstime=t, observer='earth')
+        coord = SkyCoord(0 * u.deg, 0 * u.deg, frame=frames.HeliographicStonyhurst, obstime=t, observer='earth')
         longitudes.append(coord.transform_to(frames.HeliographicCarrington).lon.to_value(u.deg))
 
     normalized_times = np.array([pinnme._normalize_time(t.to_pydatetime()) for t in times])
     latitudes, longitudes = np.deg2rad(latitudes), np.deg2rad(longitudes)
 
-    spherical_coords = np.stack(np.meshgrid( [1], latitudes, longitudes, indexing='ij'),
-        axis=-1)
+    spherical_coords = np.stack(np.meshgrid([1], latitudes, longitudes, indexing='ij'),
+                                axis=-1)
     spherical_coords = spherical_coords[0, :, :]
 
     cartesian_coords = spherical_to_cartesian(spherical_coords)
-    time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) *  normalized_times[None, :, None]
+    time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_times[None, :, None]
     coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
     b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-    b_rtp = vector_cartesian_to_spherical(b_xyz, spherical_coords)
+    transform = cartesian_to_spherical_matrix(spherical_coords)
+    b_rtp = np.einsum("...ij,...j->...i", transform, b_xyz)
 
     v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-    v_rtp = vector_cartesian_to_spherical(v_xyz, spherical_coords)
+    transform = cartesian_to_spherical_matrix(spherical_coords)
+    v_rtp = np.einsum("...ij,...j->...i", transform, v_xyz)
 
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
@@ -62,7 +64,7 @@ if __name__ == '__main__':
     extent = np.rad2deg(extent)
 
     v_min_max = np.max(np.abs(b_rtp))
-    norm = Normalize(-500, 500)#SymLogNorm(linthresh=1, vmin=-v_min_max, vmax=v_min_max)
+    norm = Normalize(-500, 500)  # SymLogNorm(linthresh=1, vmin=-v_min_max, vmax=v_min_max)
 
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
 

@@ -14,17 +14,18 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningDataModule
-from sunpy.coordinates import frames, sun
+from sunpy.coordinates import frames
 from sunpy.map import all_coordinates_from_map, Map
 from torch.utils.data import DataLoader
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
-from pme.train.data_loader import TensorsDataset, shuffle_async, CombinedDataset
+from pme.train.data_loader import TensorsDataset, CombinedDataset
 
 
 class SphericalDataModule(LightningDataModule):
 
-    def __init__(self, train_config, valid_config, work_directory, seconds_per_dt=36000, Rs_per_ds=1,
+    def __init__(self, train_config, valid_config, work_directory,
+                 seconds_per_dt=24 * 60 * 60, Rs_per_ds=1, gauss_per_dB=1e3,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
                  batch_size=65536, dataset_batch_size=4096,
@@ -33,7 +34,7 @@ class SphericalDataModule(LightningDataModule):
 
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
         train_files = self._load_files(train_config['data_path'])
-        if 'n_samples' in train_config: # apply subsampling for debugging
+        if 'n_samples' in train_config:  # apply subsampling for debugging
             n_samples = train_config['n_samples']
             sampling = len(train_files) // n_samples
             train_files = train_files[::sampling]
@@ -71,6 +72,7 @@ class SphericalDataModule(LightningDataModule):
         self.times = [d.time for d in self.train_datasets]
         self.seconds_per_dt = seconds_per_dt
         self.Rs_per_ds = Rs_per_ds
+        self.gauss_per_dB = gauss_per_dB
         self.image_shape = self.valid_dataset.image_shape
         self.value_range = self.valid_dataset.value_range
         self.data_range = self.valid_dataset.data_range
@@ -87,7 +89,7 @@ class SphericalDataModule(LightningDataModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Integrated V')
 
-        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic', vmin=-np.pi/2, vmax=np.pi/2)
+        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic', vmin=-np.pi / 2, vmax=np.pi / 2)
         divider = make_axes_locatable(axs[1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [rad]')
@@ -207,19 +209,20 @@ class HMISphericalDataset(TensorsDataset):
 
         carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
         lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
-        r = np.ones_like(lon) #carrington_coords.radius
+        r = np.ones_like(lon)  # carrington_coords.radius
         # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-        #
         carrington_coords = np.stack([r, lat, lon], -1)
+
+        # create rtp transform
+        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
+
         cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
+        cartesian_coords /= self.Rs_per_ds  # scale to ds
 
         # append time
         normalized_time = (s_map.date.to_datetime() - self.ref_time).total_seconds() / self.seconds_per_dt
         time = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
         cartesian_coords = np.concatenate([time, cartesian_coords], -1)
-
-        # create rtp transform
-        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
 
         # create observer transform
         # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
@@ -230,14 +233,6 @@ class HMISphericalDataset(TensorsDataset):
 
         # load observer velocity
         v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
-
-        # alternative hmi_b2ptr
-        # stonyhurst_coords = spherical_coords.transform_to(frames.HeliographicStonyhurst)
-        # phi, lam = stonyhurst_coords.lon.to(u.rad).value, stonyhurst_coords.lat.to(u.rad).value
-        # pAng = -np.deg2rad(s_map.meta['CROTA2'])
-        # b = np.deg2rad(s_map.meta['CRLT_OBS'])
-        # a_matrix = image_to_spherical_matrix(phi=phi, lam=lam, b=b, pAng=pAng)
-        # rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         I_profile = np.stack([fits.getdata(I[j]) for j in range(self.num_wl)], -1)
         Q_profile = np.stack([fits.getdata(Q[j]) for j in range(self.num_wl)], -1)
@@ -260,8 +255,9 @@ class HMISphericalDataset(TensorsDataset):
                 'obs_lon': s_map.carrington_longitude,
                 'carrington_coords': carrington_coords, 'wcs': s_map.wcs}
 
+
 def compute_v_observer(v_r, v_w, v_n, theta_p, psi):
-    return -(v_w*np.sin(theta_p)*np.sin(psi)-v_n*np.sin(theta_p)*np.cos(psi)+v_r*np.cos(theta_p))
+    return -(v_w * np.sin(theta_p) * np.sin(psi) - v_n * np.sin(theta_p) * np.cos(psi) + v_r * np.cos(theta_p))
 
 
 def load_v_observer_LOS(s_map):

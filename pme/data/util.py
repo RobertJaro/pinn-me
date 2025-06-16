@@ -4,57 +4,24 @@ from astropy import units as u
 from astropy.constants import R_sun
 # Some documentation to be included
 
-def spherical_to_cartesian_matrix(c):
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
-    sin = np.sin
-    cos = np.cos
-    #
-    matrix = np.stack([
-        np.stack([cos(t) * cos(p), sin(t) * cos(p), -sin(p)], -1),
-        np.stack([cos(t) * sin(p), sin(t) * sin(p), cos(p)], -1),
-        np.stack([sin(t), -cos(t), np.zeros_like(t)], -1)
-    ], -2)
-    #
-    return matrix
-
-
-def cartesian_to_spherical_matrix(c):
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
-    sin = np.sin
-    cos = np.cos
-    #
-    matrix = np.stack([
-        np.stack([cos(t) * cos(p), cos(t) * sin(p), sin(t)], -1),
-        np.stack([sin(t) * cos(p), sin(t) * sin(p), -cos(t)], -1),
-        np.stack([-sin(p), cos(p), np.zeros_like(p)], -1)
-    ], -2)
-    #
-    return matrix
-
-def vector_spherical_to_cartesian(v, c, f=np):
-    vr, vt, vp = v[..., 0], v[..., 1], v[..., 2]
+def spherical_to_cartesian_matrix(c, f=np):
     r, t, p = c[..., 0], c[..., 1], c[..., 2]
     sin = f.sin
     cos = f.cos
     #
-    vx = vr * cos(t) * cos(p) + vt * sin(t) * cos(p) - vp * sin(p)
-    vy = vr * cos(t) * sin(p) + vt * sin(t) * sin(p) + vp * cos(p)
-    vz = vr * sin(t) - vt * cos(t)
+    matrix = [cos(t) * cos(p), -sin(t) * cos(p), -sin(p),
+              cos(t) * sin(p), -sin(t) * sin(p), cos(p),
+              sin(t), cos(t), f.zeros_like(t)]
+    matrix = np.stack(matrix, axis=-1).reshape((*c.shape[:-1], 3, 3))
     #
-    return f.stack([vx, vy, vz], -1)
+    return matrix
 
 
-def vector_cartesian_to_spherical(v, c, f=np):
-    vx, vy, vz = v[..., 0], v[..., 1], v[..., 2]
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]  # r, lat, lon
-    sin = f.sin
-    cos = f.cos
-    #
-    vr = vx * cos(t) * cos(p) + vy * cos(t) * sin(p) + vz * sin(t)
-    vt = vx * sin(t) * cos(p) + vy * sin(t) * sin(p) - vz * cos(t)
-    vp = - vx * sin(p) + vy * cos(p)
-    #
-    return f.stack([vr, vt, vp], -1)
+def cartesian_to_spherical_matrix(c, f=np):
+    if f is torch:
+        return torch.inverse(spherical_to_cartesian_matrix(c, f))
+    else:
+        return np.linalg.inv(spherical_to_cartesian_matrix(c, f))
 
 
 def spherical_to_cartesian(v, f=np):
@@ -71,34 +38,14 @@ def cartesian_to_spherical(v, f=np):
     x, y, z = v[..., 0], v[..., 1], v[..., 2]
     xy = x ** 2 + y ** 2
 
-    r = f.sqrt(xy + z ** 2)
-    xy_sqrt = f.sqrt(xy)
+    r = (xy + z ** 2) ** 0.5
+    xy_sqrt = xy ** 0.5
     nudge = (f.abs(xy_sqrt) < 1e-6) * 1e-6  # assure numerical stability
     t = f.arctan2(z, xy_sqrt + nudge)
     nudge = (f.abs(x) < 1e-6) * 1e-6  # assure numerical stability
     p = f.arctan2(y, x + nudge)
 
     return f.stack([r, t, p], -1)
-
-
-def img_to_los_trv_azi(b, f=np):
-    b_x, b_y, b_z = b[..., 0], b[..., 1], b[..., 2]
-
-    B_los = b_z
-    B_trv = (b_x ** 2 + b_y ** 2) ** 0.5
-    azi = f.arctan2(b_x, b_y)
-
-    b = f.stack([B_los, B_trv, azi], -1)
-    return b
-
-
-def los_trv_azi_to_img(b, ambiguous=False, f=np):
-    B_los, B_trv, azi = b[..., 0], b[..., 1], b[..., 2]
-    B_x = B_trv * f.sin(azi % f.pi) if ambiguous else B_trv * f.sin(azi)
-    B_y = B_trv * f.cos(azi % f.pi) if ambiguous else B_trv * f.cos(azi)
-    B_z = B_los
-    b = f.stack([B_x, B_y, B_z], -1)
-    return b
 
 def image_to_spherical_matrix(lon, lat, lonc, latc, pAng, f=np):
     sin = f.sin
@@ -151,16 +98,3 @@ def solar_differential_rotation_velocity(latitude):
     # Tangential velocity: v = R * omega * cos(latitude)
     v = R_sun * omega * np.cos(theta) / u.rad
     return v.to(u.m / u.s)
-
-def image_to_rtp(b_field, inc, azi, img_to_rtp_transform, f=np):
-    # compute B_r, B_t, B_p in carrington coordinates
-    b_xi = - b_field * f.sin(inc) * f.sin(azi)
-    b_eta = b_field * f.sin(inc) * f.cos(azi)
-    b_zeta = b_field * f.cos(inc)
-    if f == torch:
-        b_img = torch.cat([b_xi, b_eta, b_zeta], -1)
-    else:
-        b_img = np.concatenate([b_xi, b_eta, b_zeta], -1)
-
-    b_rtp = f.einsum("...ij,...j->...i", img_to_rtp_transform, b_img)
-    return b_rtp

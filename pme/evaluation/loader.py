@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from astropy import units as u
 from torch import nn
 from tqdm import tqdm
 
@@ -26,11 +27,14 @@ class PINNMEOutput:
         self.forward_model = nn.DataParallel(self.forward_model)
         self.forward_model.eval()
 
-        self.times = state.get('times', None)
-        self.ref_time = state.get('ref_time', None)
-        self.seconds_per_dt = state.get('seconds_per_dt', None)
+        self.times = state['times']
+        self.ref_time = state['ref_time']
+        self.seconds_per_dt = state['seconds_per_dt']
+        self.Rs_per_ds = state['Rs_per_ds']
+        self.meters_per_ds = self.Rs_per_ds * (1 * u.Rsun).to_value(u.m)
+        self.gauss_per_dB = state['gauss_per_dB']
 
-    def load(self, coords, batch_size=int(2**13), mu=None, progress=True, compute_jacobian=False):
+    def load(self, coords, batch_size=int(2 ** 13), mu=None, progress=True, compute_jacobian=False):
         batch_size = batch_size * torch.cuda.device_count() if torch.cuda.is_available() else batch_size
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
@@ -44,18 +48,21 @@ class PINNMEOutput:
         for i in iter_:
             batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
             mu_batch = mu[i * batch_size:(i + 1) * batch_size].to(self.device)
+            batch.requires_grad = True
 
             pred = self.parameter_model(batch)
             # workaround to compute jacobian for all parameters
             profile_keys = ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl']
             input_tensor = torch.cat([pred[key] for key in profile_keys], dim=-1)
-            I, Q, U, V = self.forward_model(**{k: input_tensor[..., i:i+1] for i, k in enumerate(profile_keys)}, mu=mu_batch)
+            I, Q, U, V = self.forward_model(**{k: input_tensor[..., i:i + 1] for i, k in enumerate(profile_keys)},
+                                            mu=mu_batch)
 
             stokes = torch.stack([I, Q, U, V], dim=-2)
 
             if compute_jacobian:
                 flat_stokes = stokes.reshape((*stokes.shape[:-2], -1))
-                jac_params = [jacobian(flat_stokes[..., i:i+1], input_tensor).detach().cpu() for i in range(flat_stokes.shape[-1])]
+                jac_params = [jacobian(flat_stokes[..., i:i + 1], input_tensor).detach().cpu() for i in
+                              range(flat_stokes.shape[-1])]
                 jac_params = torch.cat(jac_params, -2).reshape(*stokes.shape, jac_params[0].shape[-1])
                 for i, key in enumerate(profile_keys):
                     pred[f'jacobian_{key}'] = jac_params[..., i]
@@ -87,7 +94,7 @@ class PINNMEOutput:
 
         return parameters
 
-    def load_parameters(self, coords, batch_size=int(2**13), progress=True, compute_jacobian=False):
+    def load_parameters(self, coords, batch_size=int(2 ** 13), progress=True, compute_jacobian=False):
         batch_size = batch_size * torch.cuda.device_count() if torch.cuda.is_available() else batch_size
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
@@ -98,6 +105,7 @@ class PINNMEOutput:
         iter_ = tqdm(range(n_batches)) if progress else range(n_batches)
         for i in iter_:
             batch = coords_tensor[i * batch_size:(i + 1) * batch_size].to(self.device)
+            batch.requires_grad = True
 
             pred = self.parameter_model(batch)
 
@@ -109,7 +117,6 @@ class PINNMEOutput:
 
         parameters = {key: np.concatenate(value).reshape(*coords_shape[:-1], *value[0].shape[1:])
                       for key, value in parameters.items()}
-
         return parameters
 
     def load_profiles(self, parameters):

@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_3h_v07"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/201102_3h_v06"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_physics_v02"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/201102_physics_v02"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_3h"}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_3h", sample_idx: 20}
@@ -16,5 +16,5 @@ model:
   encoding: "gaussian"
 training:
   epochs: 500
-  check_val_every_n_epoch: 1
   lambda_stokes: [1, 1, 1, 1]
+  lambda_induction: 1.0e-1

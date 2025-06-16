@@ -168,42 +168,41 @@ class MESphericalModel(GenericModel):
     def forward(self, x):
         params = super().forward(x)
         #
-        b_scale = 1  # 10 ** params[..., 0:1]
-        b_x = params[..., 1:2] * b_scale
-        b_y = params[..., 2:3] * b_scale
-        b_z = params[..., 3:4] * b_scale
-        # a = params[..., 0:3]
-        # jac_matrix = jacobian(a, x)
-        # dAx_dt = jac_matrix[:, 0, 0]
-        # dAx_dx = jac_matrix[:, 0, 1]
-        # dAx_dy = jac_matrix[:, 0, 2]
-        # dAx_dz = jac_matrix[:, 0, 3]
-        # dAy_dt = jac_matrix[:, 1, 0]
-        # dAy_dx = jac_matrix[:, 1, 1]
-        # dAy_dy = jac_matrix[:, 1, 2]
-        # dAy_dz = jac_matrix[:, 1, 3]
-        # dAz_dt = jac_matrix[:, 2, 0]
-        # dAz_dx = jac_matrix[:, 2, 1]
-        # dAz_dy = jac_matrix[:, 2, 2]
-        # dAz_dz = jac_matrix[:, 2, 3]
-        # rot_x = dAz_dy - dAy_dz
-        # rot_y = dAx_dz - dAz_dx
-        # rot_z = dAy_dx - dAx_dy
-        # b = torch.stack([rot_x, rot_y, rot_z], -1)
-        # b_x, b_y, b_z = b[..., 0:1], b[..., 1:2], b[..., 2:3]
+        a = params[..., 0:2]
+        jac_matrix = jacobian(a, x)
+        dAx_dt = jac_matrix[:, 0, 0]
+        dAx_dx = jac_matrix[:, 0, 1]
+        dAx_dy = jac_matrix[:, 0, 2]
+        dAx_dz = jac_matrix[:, 0, 3]
+        dAy_dt = jac_matrix[:, 1, 0]
+        dAy_dx = jac_matrix[:, 1, 1]
+        dAy_dy = jac_matrix[:, 1, 2]
+        dAy_dz = jac_matrix[:, 1, 3]
+        # use gauge --> Az=0
+        dAz_dt = torch.zeros_like(dAx_dt)
+        dAz_dx = 0
+        dAz_dy = 0
+        dAz_dz = 0
+        rot_x = dAz_dy - dAy_dz
+        rot_y = dAx_dz - dAz_dx
+        rot_z = dAy_dx - dAx_dy
+        b = torch.stack([rot_x, rot_y, rot_z], -1)
+        b_x, b_y, b_z = b[..., 0:1], b[..., 1:2], b[..., 2:3]
+        #
+        dA_dt = torch.stack([dAx_dt, dAy_dt, dAz_dt], -1)
         #
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
 
-        v_scale = 2e3  # 10 ** params[..., 8:9]
-        v_x = params[..., 9:10] * v_scale
-        v_y = params[..., 10:11] * v_scale
-        v_z = params[..., 11:12] * v_scale
+        v_x = params[..., 9:10]
+        v_y = params[..., 10:11]
+        v_z = params[..., 11:12]
         kl = torch.sigmoid(params[..., 12:13]) * 100
         #
         output = {
+            "dA_dt": dA_dt,
             "b_x": b_x,
             "b_y": b_y,
             "b_z": b_z,

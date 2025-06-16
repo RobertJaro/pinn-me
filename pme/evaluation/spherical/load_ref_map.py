@@ -53,12 +53,12 @@ if __name__ == '__main__':
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
-    b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-    # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+    b_xyz= np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
+    b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz) * pinnme.gauss_per_dB
     # b_rtp[..., 1] *= -1
 
-    v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-    # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+    v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
+    v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz) * pinnme.meters_per_ds / pinnme.seconds_per_dt
     # v_rtp[..., 1] *= -1
 
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
@@ -91,7 +91,6 @@ if __name__ == '__main__':
     b_img_ref = np.stack([b_xi, b_eta, b_zeta], axis=-1)
 
     b_rtp_ref = np.einsum('...ij,...j->...i', a_matrix, b_img_ref)
-    b_rtp_ref[..., 1] *= -1 # TODO check if this is correct
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
 
@@ -277,3 +276,63 @@ if __name__ == '__main__':
     fig.tight_layout(pad=0)
     fig.savefig(os.path.join(args.output, 'composite_ref.jpg'), dpi=300, transparent=True)
     plt.close()
+
+
+    # plot coordinates
+    fig, axs = plt.subplots(2, 3, figsize=(10, 5), subplot_kw={'projection': ref_map})
+
+    ax = axs[0, 0]
+    im = ax.imshow(spherical_coords[..., 0], cmap='viridis', origin='lower', vmin=0, vmax=1)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='Radius [R_s]')
+    ax.set_title('Radius')
+
+    ax = axs[0, 1]
+    im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='PiYG', origin='lower', vmin=-90, vmax=90)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [deg]')
+    ax.set_title('Latitude')
+
+    ax = axs[0, 2]
+    im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', origin='lower', vmin=0, vmax=360)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='Longitude [deg]')
+    ax.set_title('Longitude')
+
+    ax = axs[1, 0]
+    im = ax.imshow(cartesian_coords[..., 0], cmap='viridis', origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='X [R_s]')
+    ax.set_title('X')
+
+    ax = axs[1, 1]
+    im = ax.imshow(cartesian_coords[..., 1], cmap='viridis', origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='Y [R_s]')
+    ax.set_title('Y')
+
+    ax = axs[1, 2]
+    im = ax.imshow(cartesian_coords[..., 2], cmap='viridis', origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label='Z [R_s]')
+    ax.set_title('Z')
+
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    axs[0, 0].set_ylabel('Spherical Coordinates')
+    axs[1, 0].set_ylabel('Cartesian Coordinates')
+
+    [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
+    [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
+
+    fig.tight_layout()
+    plt.savefig(os.path.join(args.output, 'coordinates.jpg'), dpi=300)
+    plt.close()
+
+
