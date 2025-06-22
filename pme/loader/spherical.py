@@ -34,6 +34,9 @@ class SphericalDataModule(LightningDataModule):
 
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
         train_files = self._load_files(train_config['data_path'])
+        if 'sample_idx' in train_config:  # use a single sample for debugging
+            sample_idx = train_config['sample_idx']
+            train_files = train_files[sample_idx:sample_idx + 1]
         if 'n_samples' in train_config:  # apply subsampling for debugging
             n_samples = train_config['n_samples']
             sampling = len(train_files) // n_samples
@@ -161,6 +164,8 @@ class HMISphericalDataset(TensorsDataset):
         coords = data['coords']  # x, y, 4
         cartesian_to_spherical_transform = data['cartesian_to_spherical_transform']  # x, y, 3, 3
         rtp_to_img_transform = data['rtp_to_img_transform']  # x, y, 3, 3
+        spherical_to_cartesian_transform = data['spherical_to_cartesian_transform']  # x, y, 3, 3
+        img_to_rtp_transform = data['img_to_rtp_transform']  # x, y, 3, 3
         mu = data['mu']  # x, y
         v_obs_los = data['v_obs_los']  # x, y
         carrington_coords = data['carrington_coords']  # x, y, 3
@@ -185,9 +190,10 @@ class HMISphericalDataset(TensorsDataset):
 
         tensors = {'stokes': stokes.reshape((-1, *stokes.shape[2:])),
                    'coords': coords.reshape((-1, *coords.shape[2:])),
-                   'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape(
-                       (-1, *cartesian_to_spherical_transform.shape[2:])),
+                   'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape((-1, *cartesian_to_spherical_transform.shape[2:])),
                    'rtp_to_img_transform': rtp_to_img_transform.reshape((-1, *rtp_to_img_transform.shape[2:])),
+                   'spherical_to_cartesian_transform':  spherical_to_cartesian_transform.reshape((-1, *spherical_to_cartesian_transform.shape[2:])),
+                   'img_to_rtp_transform': img_to_rtp_transform.reshape((-1, *img_to_rtp_transform.shape[2:])),
                    'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1))}
 
         super().__init__(tensors=tensors, batch_size=batch_size, work_directory=work_directory, **kwargs)
@@ -215,6 +221,7 @@ class HMISphericalDataset(TensorsDataset):
 
         # create rtp transform
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
+        spherical_to_cartesian_transform = np.linalg.inv(cartesian_to_spherical_transform)
 
         cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
         cartesian_coords /= self.Rs_per_ds  # scale to ds
@@ -228,8 +235,8 @@ class HMISphericalDataset(TensorsDataset):
         # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
         pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
         latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
-        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
-        rtp_to_img_transform = np.linalg.inv(a_matrix)
+        img_to_rtp_transform = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+        rtp_to_img_transform = np.linalg.inv(img_to_rtp_transform)
 
         # load observer velocity
         v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
@@ -250,14 +257,12 @@ class HMISphericalDataset(TensorsDataset):
                 'coords': cartesian_coords,
                 'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
                 'rtp_to_img_transform': rtp_to_img_transform,
+                'spherical_to_cartesian_transform': spherical_to_cartesian_transform,
+                'img_to_rtp_transform': img_to_rtp_transform,
                 'mu': mu, 'v_obs_los': v_obs_los,
                 'time': s_map.date.to_datetime(), 'obs_lat': s_map.carrington_latitude,
                 'obs_lon': s_map.carrington_longitude,
                 'carrington_coords': carrington_coords, 'wcs': s_map.wcs}
-
-
-def compute_v_observer(v_r, v_w, v_n, theta_p, psi):
-    return -(v_w * np.sin(theta_p) * np.sin(psi) - v_n * np.sin(theta_p) * np.cos(psi) + v_r * np.cos(theta_p))
 
 
 def load_v_observer_LOS(s_map):
@@ -277,5 +282,7 @@ def load_v_observer_LOS(s_map):
     psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
 
     # SDO motion
-    v_obs_los = compute_v_observer(v_sdo_r, v_sdo_w, v_sdo_n, theta_p, psi)
+    v_obs_los = (v_sdo_w * np.sin(theta_p) * np.sin(psi) -
+                 v_sdo_n * np.sin(theta_p) * np.cos(psi) +
+                 v_sdo_r * np.cos(theta_p))
     return v_obs_los

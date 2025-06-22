@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_physics_v05"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_no_physics_v01"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/201102_physics_v09"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_3h"}
@@ -13,14 +13,14 @@ data:
 logging:
   project: pinn-me-spherical
   tags: ["hmi"]
-  name: "2010-02 - 3h"
+  name: "2010-02 - 3h - no physics"
 model:
   encoding: "gaussian"
 training:
   epochs: 500
-  lambda_stokes: [100, 100, 100, 100]
-  lambda_induction: 1.0e-4
-  lambda_divergence: 1.0e-4
+  lambda_stokes: [1, 1, 1, 1]
+  lambda_induction: 0.0
+  lambda_divergence: 0.0
   lambda_force_free: 0.0
   lambda_static: 0.0
 #  val_check_interval: 1000

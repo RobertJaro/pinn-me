@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_physics_v01"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_physics_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_physics_v02"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_physics_v02"
 data:
   train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 20}
@@ -17,4 +17,5 @@ model:
 training:
   epochs: 500
   lambda_stokes: [1, 1, 1, 1]
-  lambda_induction: 0.0
+  lambda_induction: 1.0e-4
+  check_val_interval: 1000

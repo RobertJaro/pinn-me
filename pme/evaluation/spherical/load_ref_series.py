@@ -20,27 +20,30 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
     parser.add_argument('--input', type=str, help='the path to the input file')
     parser.add_argument('--ref_maps', type=str, help='the path to the reference map fld')
-    parser.add_argument('--output', type=str, help='the path to the output file')
+    parser.add_argument('--output', type=str, help='the path to the output file', default=None, required=False)
     args = parser.parse_args()
 
+    in_path = args.input
+
     out_path = args.output
+    out_path = out_path if out_path is not None else os.path.join(os.path.dirname(in_path), 'evaluation', 'ref_series')
     os.makedirs(out_path, exist_ok=True)
 
     # load
-    pinnme = PINNMEOutput(args.input)
+    pinnme = PINNMEOutput(in_path)
 
     # load reference maps
     ref_maps = sorted(glob.glob(args.ref_maps))
 
     for i, f in tqdm(enumerate(ref_maps), total=len(ref_maps)):
-        out_path = os.path.join(args.output, f'step{i:03d}.jpg')
+        img_path = os.path.join(out_path, f'step{i:03d}.jpg')
         # if os.path.exists(out_path):
         #     continue
 
         ref_map = Map(f)
-        bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
-        tr = SkyCoord(500 * u.arcsec, 500 * u.arcsec, frame=ref_map.coordinate_frame)
-        ref_map = ref_map.submap(bl, top_right=tr)
+        # bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
+        # tr = SkyCoord(500 * u.arcsec, 500 * u.arcsec, frame=ref_map.coordinate_frame)
+        # ref_map = ref_map.submap(bl, top_right=tr)
         ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 128x128 pixels
 
         # load time
@@ -53,7 +56,7 @@ if __name__ == '__main__':
 
         spherical_coords = np.stack([r, lat, lon], axis=-1)
         #
-        cartesian_coords = spherical_to_cartesian(spherical_coords)  # TODO normalization
+        cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
         time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
         coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
@@ -64,13 +67,15 @@ if __name__ == '__main__':
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         parameter_cube = pinnme.load_parameters(coords=coords, progress=False)
-        b_rtp = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
-        # b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-        # b_rtp[..., 1] *= -1
+        b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
+        b_xyz *= pinnme.gauss_per_dB
+        b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+        # b_rtp[..., 1] *= -1  # flip theta component
 
-        v_rtp = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
-        # v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-        # v_rtp[..., 1] *= -1
+        v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
+        v_xyz *= pinnme.meters_per_ds / pinnme.seconds_per_dt / 1000  # convert to km/s
+        v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+        # v_rtp[..., 1] *= -1  # flip theta component
 
         b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
         v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
@@ -82,26 +87,26 @@ if __name__ == '__main__':
         ########################################################################################################################
         # Plot subframe in B_r, B_theta, B_phi
 
-        norm = SymLogNorm(linthresh=1, vmin=-3000, vmax=3000)#Normalize(-500, 500)
+        b_norm = Normalize(-500, 500)
 
-        fig, axs = plt.subplots(3, 3, figsize=(10, 8), subplot_kw={'projection': ref_map})
+        fig, axs = plt.subplots(4, 3, figsize=(10, 10), subplot_kw={'projection': ref_map})
 
         ax = axs[0, 0]
-        im = ax.imshow(b_rtp[..., 0], cmap='RdBu_r', norm=norm, origin='lower')
+        im = ax.imshow(b_rtp[..., 0], cmap='gray', norm=b_norm, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
         ax.set_title(r'$B_\text{r}$ [G]')
 
         ax = axs[0, 1]
-        im = ax.imshow(b_rtp[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
+        im = ax.imshow(b_rtp[..., 1], cmap='gray', norm=b_norm, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
         ax.set_title(r'$B_\text{t}$ [G]')
 
         ax = axs[0, 2]
-        im = ax.imshow(b_rtp[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
+        im = ax.imshow(b_rtp[..., 2], cmap='gray', norm=b_norm, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
@@ -123,23 +128,44 @@ if __name__ == '__main__':
         im = ax.imshow(np.rad2deg(azi % (2 * np.pi)), cmap='twilight', origin='lower', vmin=0, vmax=360)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [G]')
+        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
         ax = axs[2, 0]
-        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', vmin=-2e3, vmax=2e3)
+        im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r  }$ [km/s]')
+        ax.set_title(r'$v_\text{rad}$ [km/s]')
+
+        ax = axs[2, 1]
+        im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\theta$ [km/s]')
+        ax.set_title(r'$v_\theta$ [km/s]')
+
+        ax = axs[2, 2]
+        im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\phi$ [km/s]')
+        ax.set_title(r'$v_\phi$ [km/s]')
+
+        ax = axs[3, 0]
+        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{dop}$ [km/s]')
         ax.set_title(r'$v_\text{LOS}$ [km/s]')
 
-        ax = axs[2, 1]
+        ax = axs[3, 1]
         im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=-90, vmax=90, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'Latitude [deg]')
         ax.set_title(r'Latitude [deg]')
 
-        ax = axs[2, 2]
+        ax = axs[3, 2]
         im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', vmin=0, vmax=360, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
@@ -149,11 +175,11 @@ if __name__ == '__main__':
         [ax.set_xlabel(' ') for ax in axs.flatten()]
         [ax.set_ylabel(' ') for ax in axs.flatten()]
         [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
-        [ax.set_xlabel('Longitude [deg]') for ax in axs[1]]
+        [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
 
         # add subtitle with date
         plt.suptitle(f'{target_time}', fontsize=16)
 
         plt.tight_layout()
-        plt.savefig(out_path, dpi=300)
+        plt.savefig(img_path, dpi=300)
         plt.close()

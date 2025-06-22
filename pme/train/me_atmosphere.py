@@ -95,35 +95,35 @@ class MEAtmosphere(nn.Module):
         return self.zeeman_strength_lookup[z_id]
 
     # Defining the propagation matrix elements from L^2 book
-    def eta_I(self, phi_p, phi_r, phi_b, theta, kl, **kwargs):
-        eta_I = (phi_p * torch.sin(theta) ** 2 + (phi_r + phi_b) / 2 * (1 + torch.cos(theta) ** 2))
+    def eta_I(self, phi_p, phi_r, phi_b, sin_inc2, cos_inc, kl, **kwargs):
+        eta_I = (phi_p * sin_inc2 + (phi_r + phi_b) / 2 * (1 + cos_inc ** 2))
         eta_I *= kl
         return eta_I
 
-    def eta_Q(self, phi_p, phi_r, phi_b, theta, chi, kl, **kwargs):
-        eta_Q = ((phi_p - 0.5 * (phi_r + phi_b)) * torch.sin(theta) ** 2 * torch.cos(2 * chi)) * kl
+    def eta_Q(self, phi_p, phi_r, phi_b, sin_inc2, cos2azi, kl, **kwargs):
+        eta_Q = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2 * cos2azi) * kl
 
         return eta_Q
 
-    def eta_U(self, phi_p, phi_r, phi_b, theta, chi, kl, **kwargs):
-        eta_U = ((phi_p - 0.5 * (phi_r + phi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
+    def eta_U(self, phi_p, phi_r, phi_b, sin_inc2, sin2azi, kl, **kwargs):
+        eta_U = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2 * sin2azi) * kl
         return eta_U
 
-    def eta_V(self, phi_r, phi_b, theta, kl, **kwargs):
-        eta_V = (phi_r - phi_b) * torch.cos(theta) * kl
+    def eta_V(self, phi_r, phi_b, cos_inc, kl, **kwargs):
+        eta_V = (phi_r - phi_b) * cos_inc * kl
         return eta_V
 
-    def rho_Q(self, psi_p, psi_r, psi_b, theta, chi, kl, **kwargs):
-        rho_Q = ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.cos(2 * chi)) * kl
+    def rho_Q(self, psi_p, psi_r, psi_b, sin_inc2, cos2azi, kl, **kwargs):
+        rho_Q = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2 * cos2azi) * kl
         return rho_Q
 
-    def rho_U(self, psi_p, psi_r, psi_b, theta, chi, kl, **kwargs):
-        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * torch.sin(theta) ** 2 * torch.sin(2 * chi)) * kl
+    def rho_U(self, psi_p, psi_r, psi_b, sin_inc2, sin2azi, kl, **kwargs):
+        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2 * sin2azi) * kl
 
         return rho_U
 
-    def rho_V(self, psi_r, psi_b, theta, kl, **kwargs):
-        rho_V = kl * (psi_r - psi_b) * torch.cos(theta)
+    def rho_V(self, psi_r, psi_b, cos_inc, kl, **kwargs):
+        rho_V = kl * (psi_r - psi_b) * cos_inc
 
         return rho_V
 
@@ -168,9 +168,15 @@ class MEAtmosphere(nn.Module):
     def nu(self, d_lambda, **kwargs):
         return self.lambda_grid[None, :] / d_lambda
 
-    def forward(self, b_field, inc, azi, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
+    def forward(self, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
+        # sin2azi = sin(2 * azi)
+        # cos2azi = cos(2 * azi)
+        # sin_inc2 = sin(inc) ** 2
+        # cos_inc = cos(inc)
         # init state
-        state = {'b_field': b_field, 'theta': inc, 'chi': azi, 'vmac': vmac, 'damping': damping,
+        state = {'b_field': b_field,
+                 'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'cos2azi': cos2azi, 'sin2azi': sin2azi,
+                 'vmac': vmac, 'damping': damping,
                  'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl}
 
         # base profile properties

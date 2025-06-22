@@ -24,10 +24,12 @@ class MESphericalModule(LightningModule):
     def __init__(self, image_shape, lambda_config, value_range,
                  gauss_per_dB, Rs_per_ds, seconds_per_dt,
                  lr_params=None, model_config=None, normalization_config=None,
-                 lambda_stokes=None, lambda_induction=1e-4,
+                 lambda_stokes=None,
+                 lambda_induction=1e-4, lambda_divergence=1e-4, lambda_force_free=1e-4,
+                 lambda_static = 1e-4,
                  **kwargs):
         super().__init__()
-        lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
+        lr_params = lr_params if lr_params is not None else {"start": 1e-4, "end": 1e-5, "iterations": 1e5}
         lambda_stokes = lambda_stokes if lambda_stokes is not None else [1, 1, 1, 1]
 
         self.image_shape = image_shape
@@ -45,6 +47,9 @@ class MESphericalModule(LightningModule):
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
         self.lambda_induction = lambda_induction
+        self.lambda_divergence = lambda_divergence
+        self.lambda_force_free = lambda_force_free
+        self.lambda_static = lambda_static
         #
         self.gauss_per_dB = gauss_per_dB
         self.Rs_per_ds = Rs_per_ds
@@ -75,17 +80,24 @@ class MESphericalModule(LightningModule):
         stokes_true = batch['stokes']
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
+        spherical_to_cartesian_transform = batch['spherical_to_cartesian_transform']
+        img_to_rtp_transform = batch['img_to_rtp_transform']
         v_obs_los = batch['v_obs_los']
 
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
-                                                       rtp_to_img_transform, coords)
-        forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
+        disambiguation_mask = output['disambiguation_mask']
 
-        # normal stokes profile synthesis
+        transformed_output = self.transform_parameters(output,
+                                                       cartesian_to_spherical_transform, rtp_to_img_transform,
+                                                       spherical_to_cartesian_transform, img_to_rtp_transform,
+                                                       disambiguation_mask)
+
+        #################################################
+        # stokes profile synthesis
+        forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
@@ -104,18 +116,73 @@ class MESphericalModule(LightningModule):
         stokes_loss = stokes_loss * self.lambda_stokes[None, :]
 
         #################################################
-        # compute induction loss
+        # compute physics loss
+        b = transformed_output['b_xyz_disamb']
         v = transformed_output['v_xyz']
-        b = transformed_output['b_xyz']
-        dA_dt = output['dA_dt']
 
-        # compute induction loss
-        induction = dA_dt - torch.cross(v, b, dim=-1)
-        induction_loss = induction.pow(2).sum(-1)
+        jac_matrix = jacobian(b, coords)
+        dBx_dt = jac_matrix[..., 0, 0]
+        dBx_dx = jac_matrix[..., 0, 1]
+        dBx_dy = jac_matrix[..., 0, 2]
+        dBx_dz = jac_matrix[..., 0, 3]
+        dBy_dt = jac_matrix[..., 1, 0]
+        dBy_dx = jac_matrix[..., 1, 1]
+        dBy_dy = jac_matrix[..., 1, 2]
+        dBy_dz = jac_matrix[..., 1, 3]
+        dBz_dt = jac_matrix[..., 2, 0]
+        dBz_dx = jac_matrix[..., 2, 1]
+        dBz_dy = jac_matrix[..., 2, 2]
+        dBz_dz = jac_matrix[..., 2, 3]
+
+        v_jac = jacobian(v, coords)
+        dVx_dt = v_jac[:, 0, 0]
+        dVx_dx = v_jac[:, 0, 1]
+        dVx_dy = v_jac[:, 0, 2]
+        dVx_dz = v_jac[:, 0, 3]
+        dVy_dt = v_jac[:, 1, 0]
+        dVy_dx = v_jac[:, 1, 1]
+        dVy_dy = v_jac[:, 1, 2]
+        dVy_dz = v_jac[:, 1, 3]
+        dVz_dt = v_jac[:, 2, 0]
+        dVz_dx = v_jac[:, 2, 1]
+        dVz_dy = v_jac[:, 2, 2]
+        dVz_dz = v_jac[:, 2, 3]
+
+        div_V = (dVx_dx + dVy_dy + dVz_dz)[..., None]
+        dB_dt = torch.stack([dBx_dt, dBy_dt, dBz_dt], -1)
+        B_nabla_V = torch.stack([b[:, 0] * dVx_dx + b[:, 1] * dVx_dy + b[:, 2] * dVx_dz,
+                                 b[:, 0] * dVy_dx + b[:, 1] * dVy_dy + b[:, 2] * dVy_dz,
+                                 b[:, 0] * dVz_dx + b[:, 1] * dVz_dy + b[:, 2] * dVz_dz, ], -1)
+        V_nabla_B = torch.stack([v[:, 0] * dBx_dx + v[:, 1] * dBx_dy + v[:, 2] * dBx_dz,
+                                 v[:, 0] * dBy_dx + v[:, 1] * dBy_dy + v[:, 2] * dBy_dz,
+                                 v[:, 0] * dBz_dx + v[:, 1] * dBz_dy + v[:, 2] * dBz_dz, ], -1)
+
+        curl_VxB = B_nabla_V - V_nabla_B - b * div_V
+        induction_equation = dB_dt - curl_VxB
+        induction_loss = induction_equation.pow(2).sum(-1)
+
+        div_B = dBx_dx + dBy_dy + dBz_dz
+        divergence_loss = div_B.pow(2)
+
+        rot_x = dBz_dy - dBy_dz
+        rot_y = dBx_dz - dBz_dx
+        rot_z = dBy_dx - dBx_dy
+        j = torch.stack([rot_x, rot_y, rot_z], -1)
+
+        force_free = torch.cross(j, b, dim=-1) / (b.norm(dim=-1, keepdim=True) + 1e-8)
+        force_free_loss = force_free.pow(2).sum(-1)
+
+        dV_dt = torch.stack([dVx_dt, dVy_dt, dVz_dt], -1)
+        static_loss = dV_dt.pow(2).sum(-1)
 
         #################################################
         # compute total loss
-        total_loss = stokes_loss.mean() + induction_loss.mean() * self.lambda_induction
+        total_loss = (stokes_loss.mean() +
+                      induction_loss.mean() * self.lambda_induction +
+                      divergence_loss.mean() * self.lambda_divergence +
+                      force_free_loss.mean() * self.lambda_force_free +
+                      static_loss.mean() * self.lambda_static
+                      )
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
@@ -123,21 +190,31 @@ class MESphericalModule(LightningModule):
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss,
                 "induction_loss": induction_loss.mean(),
+                'divergence_loss': divergence_loss.mean(),
+                'force_free_loss': force_free_loss.mean(),
+                'static_loss': static_loss.mean(),
                 }
 
     def scale_parameters(self, output, transformed_output, v_obs_los):
         v_dop = transformed_output['v_dop'] * self.meters_per_ds / self.seconds_per_dt
-        v_dop = v_dop + v_obs_los  # add doppler correction - spacecraft velocity
+        v_dop = v_dop - v_obs_los  # add doppler correction - spacecraft velocity
 
         forward_params = {'b_field': transformed_output['b_field'] * self.gauss_per_dB,
+                          'sin_inc2': transformed_output['sin_inc2'],
+                          'cos_inc': transformed_output['cos_inc'],
                           'inc': transformed_output['inc'],
+                          'sin2azi': transformed_output['sin2azi'],
+                          'cos2azi': transformed_output['cos2azi'],
                           'azi': transformed_output['azi'],
                           'vdop': v_dop,
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
         return forward_params
 
-    def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform, coords):
+    def transform_parameters(self, output,
+                             cartesian_to_spherical_transform, rtp_to_img_transform,
+                             spherical_to_cartesian_transform, img_to_rtp_transform,
+                             disambiguation_mask):
         # transform B
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
@@ -150,16 +227,28 @@ class MESphericalModule(LightningModule):
         # b_eta = field * sin(gamma) * cos(psi)
         # b_zeta = field * cos(gamma)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
-        inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+
+        # sin(pi - x) = sin(x)
+        # cos(pi - x) = -cos(x)
+        sin_inc2 = (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2) / (b_field ** 2 + 1e-8)
+        cos_inc = -b_img[..., 2:3] / (b_field + 1e-8) # flipped inclination angle
+
+        # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
+        # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
+        # 2 * sin(x) * cos(x) = sin(2*x)
+        # sin(x)**2 - cos(x)**2 = -cos(2*x)
+        sin2azi = 2 * b_img[..., 0:1] * b_img[..., 1:2] / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
+        cos2azi = (b_img[..., 0:1] ** 2 - b_img[..., 1:2] ** 2) / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
 
         # Shift polarizer position for HMI
-        azi = azi + torch.pi / 2
+        inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
         inc = torch.pi - inc
+        azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
+        azi += torch.pi / 2 # azimuth is flipped in HMI
 
         # transform to carrington frame --> add rotation velocity
         v_rot = carrington_rotation_velocity()  # in m/s
-        v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt
+        v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt (model units)
 
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
@@ -169,9 +258,23 @@ class MESphericalModule(LightningModule):
 
         v_dop = v_img[..., 2:3]
 
-        return {'b_field': b_field, 'azi': azi, 'inc': inc, 'v_dop': v_dop,
+        # compute disambiguated bxyz
+        # b_img_flipped = torch.stack([-b_img[..., 0], -b_img[..., 1], b_img[..., 2]], dim=-1)
+        # b_rtp_flipped = torch.einsum("...ij,...j->...i", img_to_rtp_transform, b_img_flipped)
+        # b_xyz_flipped = torch.einsum("...ij,...j->...i", spherical_to_cartesian_transform, b_rtp_flipped)
+
+        # detach b vector to only optimize disambiguation mask
+        b_img_disamb = b_img #disambiguation_mask * b_img.detach() + (1 - disambiguation_mask) * b_img_flipped.detach()
+        b_rtp_disamb = b_rtp #disambiguation_mask * b_rtp.detach() + (1 - disambiguation_mask) * b_rtp_flipped.detach()
+        b_xyz_disamb = b_xyz #disambiguation_mask * b_xyz.detach() + (1 - disambiguation_mask) * b_xyz_flipped.detach()
+
+        return {'b_field': b_field,
+                'sin2azi': sin2azi, 'cos2azi': cos2azi, 'azi': azi,
+                'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'inc': inc,
+                'v_dop': v_dop,
                 'v_rtp': v_rtp, 'b_rtp': b_rtp, 'v_img': v_img, 'b_img': b_img,
-                'b_xyz': b_xyz, 'v_xyz': v_xyz, }
+                'b_xyz': b_xyz, 'v_xyz': v_xyz,
+                'b_xyz_disamb': b_xyz_disamb, 'b_rtp_disamb': b_rtp_disamb, 'b_img_disamb': b_img_disamb, }
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -191,14 +294,21 @@ class MESphericalModule(LightningModule):
         stokes_true = batch['stokes']
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
+        spherical_to_cartesian_transform = batch['spherical_to_cartesian_transform']
+        img_to_rtp_transform = batch['img_to_rtp_transform']
         v_obs_los = batch['v_obs_los']
 
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform,
-                                                       rtp_to_img_transform, coords)
+        disambiguation_mask = output['disambiguation_mask']
+        binary_disambiguation_mask = torch.round(disambiguation_mask)  # discretize mask to 0 or 1
+
+        transformed_output = self.transform_parameters(output,
+                                                       cartesian_to_spherical_transform, rtp_to_img_transform,
+                                                       spherical_to_cartesian_transform, img_to_rtp_transform,
+                                                       binary_disambiguation_mask)
         forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
 
         I, Q, U, V = self.forward_model(**forward_params, mu=mu)
@@ -212,10 +322,11 @@ class MESphericalModule(LightningModule):
 
         return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
                 **forward_params,
-                'b_rtp': transformed_output['b_rtp'] * self.gauss_per_dB,
+                'b_rtp': transformed_output['b_rtp_disamb'] * self.gauss_per_dB,
                 'v_rtp': transformed_output['v_rtp'] * self.meters_per_ds / self.seconds_per_dt,
-                'b_img': transformed_output['b_img'] * self.gauss_per_dB,
-                'v_img': transformed_output['v_img'] * self.meters_per_ds / self.seconds_per_dt
+                'b_img': transformed_output['b_img_disamb'] * self.gauss_per_dB,
+                'v_img': transformed_output['v_img'] * self.meters_per_ds / self.seconds_per_dt,
+                'disambiguation_mask': disambiguation_mask.detach(),
                 }
 
     def validation_epoch_end(self, outputs_list):
@@ -232,7 +343,7 @@ class MESphericalModule(LightningModule):
 
         parameters = {}
         for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
-                  'v_rtp', 'b_rtp', 'v_img', 'b_img']:
+                  'v_rtp', 'b_rtp', 'v_img', 'b_img', 'disambiguation_mask']:
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
 
@@ -312,13 +423,13 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 1]
-        im = ax.imshow(inc, cmap='seismic', vmin=0, vmax=np.pi, origin='lower')
+        im = ax.imshow(inc % np.pi, cmap='seismic', vmin=0, vmax=np.pi, origin='lower')
         ax.set_title("Inclination")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[0, 2]
-        im = ax.imshow(azi, cmap='twilight', vmin=0, vmax=2 * np.pi, origin='lower')
+        im = ax.imshow(azi % (2 * np.pi), cmap='twilight', vmin=0, vmax=2 * np.pi, origin='lower')
         ax.set_title("Azimuth")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -348,8 +459,11 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 2]
-        ax.set_axis_off()
-
+        im = ax.imshow(parameters['disambiguation_mask'], vmin=0, vmax=1, origin='lower', cmap='PuOr')
+        ax.set_title("Disambiguation Mask")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
         ax = axs[1, 3]
         vdop_max = np.nanmax(np.abs(parameters['vdop']))
         im = ax.imshow(parameters['vdop'], cmap='seismic_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')

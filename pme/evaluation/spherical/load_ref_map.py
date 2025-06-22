@@ -20,14 +20,17 @@ if __name__ == '__main__':
     parser.add_argument('--ref_map_inc', type=str, help='the path to the reference map inc')
     parser.add_argument('--ref_map_azi', type=str, help='the path to the reference map azi')
     parser.add_argument('--ref_map_disambig', type=str, help='the path to the reference map disambig')
-    parser.add_argument('--output', type=str, help='the path to the output file')
+    parser.add_argument('--output', type=str, help='the path to the output file', default=None)
     args = parser.parse_args()
 
+    in_path = args.input
+
     out_path = args.output
+    out_path = out_path if out_path is not None else os.path.join(os.path.dirname(in_path), 'evaluation')
     os.makedirs(out_path, exist_ok=True)
 
     # load
-    pinnme = PINNMEOutput(args.input)
+    pinnme = PINNMEOutput(in_path)
 
     # load reference maps
     ref_map = Map(args.ref_map_fld)
@@ -103,41 +106,47 @@ if __name__ == '__main__':
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('PINN ME $B_r$')
 
     ax = axs[0, 1]
     im = ax.imshow(b_rtp[..., 1], cmap='gray', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('PINN ME $B_t$')
 
     ax = axs[0, 2]
     im = ax.imshow(b_rtp[..., 2], cmap='gray', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('PINN ME $B_p$')
 
     ax = axs[1, 0]
     im = ax.imshow(b_rtp_ref[..., 0], cmap='gray', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('Reference $B_r$')
 
     ax = axs[1, 1]
     im = ax.imshow(b_rtp_ref[..., 1], cmap='gray', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('Reference $B_t$')
 
     ax = axs[1, 2]
     im = ax.imshow(b_rtp_ref[..., 2], cmap='gray', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('Reference $B_p$')
 
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
-    [ax.set_xlabel('Longitude [deg]') for ax in axs[1]]
+    [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
 
     [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
     [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
@@ -146,7 +155,7 @@ if __name__ == '__main__':
     plt.suptitle(f'Map at {target_time}', fontsize=16)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(args.output, 'reference_comparison.jpg'), dpi=300)
+    plt.savefig(os.path.join(out_path, 'reference_comparison.jpg'), dpi=300)
     plt.close()
 
     ########################################################################################################################
@@ -174,7 +183,7 @@ if __name__ == '__main__':
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     fig.tight_layout()
-    plt.savefig(os.path.join(args.output, 'field_strength_comparison.jpg'), dpi=300)
+    plt.savefig(os.path.join(out_path, 'field_strength_comparison.jpg'), dpi=300)
     plt.close()
 
     ########################################################################################################################
@@ -240,7 +249,7 @@ if __name__ == '__main__':
     axs[1, 0].set_ylabel('PINN ME')
 
     fig.tight_layout()
-    plt.savefig(os.path.join(args.output, 'fld_inc_azi_comparison.jpg'), dpi=300)
+    plt.savefig(os.path.join(out_path, 'fld_inc_azi_comparison.jpg'), dpi=300)
     plt.close()
 
     ########################################################################################################################
@@ -258,7 +267,7 @@ if __name__ == '__main__':
 
     [ax.set_axis_off() for ax in axs]
     fig.tight_layout(pad=0)
-    fig.savefig(os.path.join(args.output, 'composite_pinnme.jpg'), dpi=300, transparent=True)
+    fig.savefig(os.path.join(out_path, 'composite_pinnme.jpg'), dpi=300, transparent=True)
     plt.close()
 
     #
@@ -274,7 +283,7 @@ if __name__ == '__main__':
 
     [ax.set_axis_off() for ax in axs]
     fig.tight_layout(pad=0)
-    fig.savefig(os.path.join(args.output, 'composite_ref.jpg'), dpi=300, transparent=True)
+    fig.savefig(os.path.join(out_path, 'composite_ref.jpg'), dpi=300, transparent=True)
     plt.close()
 
 
@@ -332,7 +341,7 @@ if __name__ == '__main__':
     [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
 
     fig.tight_layout()
-    plt.savefig(os.path.join(args.output, 'coordinates.jpg'), dpi=300)
+    plt.savefig(os.path.join(out_path, 'coordinates.jpg'), dpi=300)
     plt.close()
 
 

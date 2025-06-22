@@ -4,7 +4,8 @@ from matplotlib import pyplot as plt
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
 
-from pme.data.util import image_to_spherical_matrix, spherical_to_cartesian, cartesian_to_spherical_matrix
+from pme.data.util import image_to_spherical_matrix, spherical_to_cartesian, cartesian_to_spherical_matrix, \
+    spherical_to_cartesian_matrix
 
 if __name__ == '__main__':
     ####################################################################################################################
@@ -32,9 +33,9 @@ if __name__ == '__main__':
     ####################################################################################################################
     # prepare transformation matrix
     s_map = ref_B_r
-    spherical_coords = all_coordinates_from_map(s_map)
+    map_coords = all_coordinates_from_map(s_map)
 
-    carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
+    carrington_coords = map_coords.transform_to(frames.HeliographicCarrington)
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
     r = carrington_coords.radius
 
@@ -48,11 +49,14 @@ if __name__ == '__main__':
     a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
+    # create xyz transform
+    rtp_to_xyz_transform = spherical_to_cartesian_matrix(carrington_coords)
+
     ####################################################################################################################
-    # apply transformation
+    # apply img transformation
 
     b_rtp = np.stack([ref_B_r.data, ref_B_t.data, ref_B_p.data], -1)
-    b_rtp[..., 1] *= -1
+    b_rtp[..., 1] *= -1 # HMI vector field convention
     b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
     # b_xi = - field * sin(gamma) * sin(psi)
@@ -61,6 +65,51 @@ if __name__ == '__main__':
     b_field = np.linalg.norm(b_img, axis=-1, keepdims=True)
     theta = np.arccos(b_img[..., 2:3] / (b_field + 1e-8))
     chi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2])
+
+    ####################################################################################################################
+    # apply xyz transformation
+
+    b_xyz = np.einsum("...ij,...j->...i", rtp_to_xyz_transform, b_rtp)
+
+    ####################################################################################################################
+    # plot rtp B with coordinates
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_rtp[..., 0], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_r')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_rtp[..., 1], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_t')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_rtp[..., 2], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_p')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 0]
+    im = ax.imshow(carrington_coords[..., 0], cmap='viridis', vmin=0, vmax=1)
+    ax.set_title('R')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 1]
+    im = ax.imshow(np.rad2deg(carrington_coords[..., 1]), cmap='PiYG', vmin=-90, vmax=90)
+    ax.set_title('Latitude')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 2]
+    im = ax.imshow(np.rad2deg(carrington_coords[..., 2]), cmap='twilight', vmin=0, vmax=360)
+    ax.set_title('Longitude')
+    plt.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison_rtp.jpg', dpi=300)
+    plt.close(fig)
+
 
     ####################################################################################################################
     # plot comparison
@@ -99,4 +148,43 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison.jpg', dpi=300)
+    plt.close(fig)
+
+    ####################################################################################################################
+    # plot xyz comparison
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_xyz[..., 0], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_x')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_xyz[..., 1], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_y')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_xyz[..., 2], cmap='gray', vmin=-500, vmax=500)
+    ax.set_title('B_z')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 0]
+    im = ax.imshow(cartesian_coords[..., 0], cmap='viridis', vmin=-1, vmax=1)
+    ax.set_title('X')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 1]
+    im = ax.imshow(cartesian_coords[..., 1], cmap='viridis', vmin=-1, vmax=1)
+    ax.set_title('Y')
+    plt.colorbar(im, ax=ax)
+
+    ax = axs[1, 2]
+    im = ax.imshow(cartesian_coords[..., 2], cmap='viridis', vmin=-1, vmax=1)
+    ax.set_title('Z')
+    plt.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison_xyz.jpg', dpi=300)
     plt.close(fig)
