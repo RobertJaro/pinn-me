@@ -24,23 +24,13 @@ from pme.train.data_loader import TensorsDataset, CombinedDataset
 
 class SphericalDataModule(LightningDataModule):
 
-    def __init__(self, train_config, valid_config, work_directory,
+    def __init__(self, train_configs, valid_config, work_directory,
                  seconds_per_dt=24 * 60 * 60, Rs_per_ds=1, gauss_per_dB=1e3,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
                  batch_size=65536, dataset_batch_size=4096,
                  num_workers=None):
         super().__init__()
-
-        ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
-        train_files = self._load_files(train_config['data_path'])
-        if 'sample_idx' in train_config:  # use a single sample for debugging
-            sample_idx = train_config['sample_idx']
-            train_files = train_files[sample_idx:sample_idx + 1]
-        if 'n_samples' in train_config:  # apply subsampling for debugging
-            n_samples = train_config['n_samples']
-            sampling = len(train_files) // n_samples
-            train_files = train_files[::sampling]
 
         # train parameters
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
@@ -50,10 +40,23 @@ class SphericalDataModule(LightningDataModule):
         print('Using {} GPUs'.format(n_gpus))
         print('Using {} CPUs'.format(self.num_workers))
 
-        with Pool(num_workers) as p:
-            args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
-                       repeat(stokes_normalization), repeat(self.dataset_batch_size), repeat(work_directory))
-            train_datasets = p.starmap(HMISphericalDataset, args)
+        ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
+        train_configs = train_configs if isinstance(train_configs, list) else [train_configs]
+        train_datasets = []
+        for train_config in train_configs:
+            train_files = self._load_files(train_config['data_path'])
+            if 'sample_idx' in train_config:  # use a single sample for debugging
+                sample_idx = train_config['sample_idx']
+                train_files = train_files[sample_idx:sample_idx + 1]
+            if 'n_samples' in train_config:  # apply subsampling for debugging
+                n_samples = train_config['n_samples']
+                sampling = len(train_files) // n_samples
+                train_files = train_files[::sampling]
+            with Pool(num_workers) as p:
+                args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
+                           repeat(stokes_normalization), repeat(self.dataset_batch_size), repeat(work_directory))
+                tds = p.starmap(HMISphericalDataset, args)
+            train_datasets += tds # append all datasets
 
         self.train_datasets = train_datasets
 
@@ -136,6 +139,7 @@ class SphericalDataModule(LightningDataModule):
         return loader
 
     def val_dataloader(self):
+        self.valid_dataset.batch_size = self.dataset_batch_size
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
                                  pin_memory=True, shuffle=False)
         return data_loader

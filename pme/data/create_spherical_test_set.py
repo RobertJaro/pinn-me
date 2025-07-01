@@ -29,7 +29,7 @@ class SphericalTestSetGenerator(TestSetGenerator):
         transformed_parameters, dummy_helioprojective_map = self._transform_parameters(parameters, obs_coord)
         # convert back to torch tensors
         transformed_parameters = {k: torch.tensor(v, dtype=torch.float32) for k, v in transformed_parameters.items()}
-        input_parameters = {k: v for k, v in transformed_parameters.items() if k not in ['b_rtp', 'v_rtp']}
+        input_parameters = {k: v for k, v in transformed_parameters.items() if k not in ['b_rtp', 'v_rtp', 'azi', 'inc']}
         stokes_profiles = self.convert_to_profiles(**input_parameters)
         return stokes_profiles, transformed_parameters, dummy_helioprojective_map
 
@@ -107,7 +107,6 @@ class SphericalTestSetGenerator(TestSetGenerator):
         latc, lonc = helioprojective_map.carrington_latitude.to_value(
             u.rad), helioprojective_map.carrington_longitude.to_value(u.rad)
 
-        # TODO check that CRLT_OBS is in rad units as provided by the map
         pAng = -np.deg2rad(helioprojective_map.meta.get('CROTA2', 0))
         a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
@@ -117,29 +116,50 @@ class SphericalTestSetGenerator(TestSetGenerator):
         b_theta = transformed_parameters.pop('b_theta')
         b_phi = transformed_parameters.pop('b_phi')
         b_rtp = np.stack([b_r, b_theta, b_phi], -1)
-        b_rtp[..., 1] *= -1
+
         # transform b vector to image frame
         b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)  # in image xyz
-        # b_im = (xi, eta, zeta)
-        # convert to ME parameters
+
         b_field = np.linalg.norm(b_img, axis=-1)
-        b_inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
-        b_azi = np.arctan2(-b_img[..., 0], b_img[..., 1])
+
+        # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
+        # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
+        # 2 * sin(x) * cos(x) = sin(2*x)
+        # sin(x)**2 - cos(x)**2 = -cos(2*x)
+        sin2azi = 2 * b_img[..., 0] * b_img[..., 1] / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
+        cos2azi = (b_img[..., 0] ** 2 - b_img[..., 1] ** 2) / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
+
+        # sin(pi - x) = sin(x)
+        # cos(pi - x) = -cos(x)
+        sin_inc2 = (b_img[..., 0] ** 2 + b_img[..., 1] ** 2) / (b_field ** 2 + 1e-8)
+        cos_inc = -b_img[..., 2] / (b_field + 1e-8)  # flipped inclination angle
+
+
+        # Shift polarizer position for HMI
+        inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
+        inc = torch.pi - inc
+        azi = np.arctan2(-b_img[..., 0], b_img[..., 1])
+        azi += torch.pi / 2  # azimuth is flipped in HMI
 
         # stack v vector
         v_r = transformed_parameters.pop('v_r')
         v_theta = transformed_parameters.pop('v_theta')
         v_phi = transformed_parameters.pop('v_phi')
         v_rtp = np.stack([v_r, v_theta, v_phi], -1)
-        v_rtp[..., 1] *= -1
+
         # transform b vector to image frame
         v_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)  # in image xyz
         # convert to ME parameters
         vdop = v_img[..., 2]
 
         transformed_parameters['b_field'] = b_field
-        transformed_parameters['inc'] = b_inc
-        transformed_parameters['azi'] = b_azi
+
+        transformed_parameters['sin2azi'] = sin2azi
+        transformed_parameters['cos2azi'] = cos2azi
+        transformed_parameters['azi'] = azi
+        transformed_parameters['sin_inc2'] = sin_inc2
+        transformed_parameters['cos_inc'] = cos_inc
+        transformed_parameters['inc'] = inc
 
         transformed_parameters['vdop'] = vdop
 
@@ -189,13 +209,15 @@ if __name__ == '__main__':
     parser.add_argument('--out_path', type=str, required=True, help='base path for the output data')
     parser.add_argument('--resolution', type=int, nargs=2, default=[256, 256], help='resolution of the images')
     parser.add_argument('--n_time_steps', type=int, default=100, help='number of time steps to generate')
+    parser.add_argument('--obs_lon', type=float, default=0.0, help='observer longitude in degrees')
+    parser.add_argument('--obs_lat', type=float, default=0.0, help='observer latitude in degrees')
     args = parser.parse_args()
 
     out_path = args.out_path
     os.makedirs(out_path, exist_ok=True)
 
-    obs_lon = 0 * u.deg
-    obs_lat = 0 * u.deg
+    obs_lon = args.obs_lon * u.deg
+    obs_lat = args.obs_lat * u.deg
     observer_distance = 1 * u.AU
 
     t_start = datetime(2025, 1, 1, )
