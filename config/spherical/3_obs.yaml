@@ -22,7 +22,7 @@ model:
   encoding: "default"
   w0_initial: 100
 training:
-  epochs: 500
+  epochs: 2000
   check_val_every_n_epoch: 10
   lambda_stokes: [1, 1, 1, 1]
   lambda_induction: 0.0

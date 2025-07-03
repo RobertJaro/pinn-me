@@ -183,7 +183,7 @@ class SphericalTestSetGenerator(TestSetGenerator):
         np.savez(os.path.join(base_path, f'parameters_{t_step:03d}.npz'), **parameters)
 
 
-def create_collage(image_array, rows=3, cols=6):
+def create_collage(image_array, rows=12, cols=24):
     """
     Creates an 8x8 collage of a 2D grayscale image.
 

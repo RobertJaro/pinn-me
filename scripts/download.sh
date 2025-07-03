@@ -23,9 +23,8 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 
 # test data
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test --email "robert.jarolim@uni-graz.at" --t_start "2024-05-01T00:00:00"
-
-
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-08T00:00:00"
+python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_05_09 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-09T01:00:00"
 
 
 # 11158
@@ -38,3 +37,13 @@ python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/h
 python download_hmi.py --download_dir "/home/memolnar/Data/PINN-ME/HMI/20240505" --email "momchil.molnar@gmail.com" --t_start "2024/05/05 12:00:00" --t_end "2024/05/05 13:00:00"
 
 python download_hmi.py --download_dir "/home/memolnar/Data/PINN-ME/HMI/20151109_135s/" --email "momchil.molnar@gmail.com" --t_start "2015/11/09 11:00:00" --t_end "2015/11/09 12:00:00" --series 'S_135s'
+
+# 90s cadence
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/202405_90s --email robert.jarolim@uni-graz.at --t_start 2024-05-09T00:00:00 --t_end 2024-05-09T06:00:00 --series 'S_90s' --cadence '90s'
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/202405_90s --email robert.jarolim@uni-graz.at --t_start 2024-05-09T06:00:00 --t_end 2024-05-09T12:00:00 --series 'S_90s' --cadence '90s'
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/202405_90s --email robert.jarolim@uni-graz.at --t_start 2024-05-09T12:00:00 --t_end 2024-05-09T18:00:00 --series 'S_90s' --cadence '90s'
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/202405_90s --email robert.jarolim@uni-graz.at --t_start 2024-05-09T18:00:00 --t_end 2024-05-10T00:00:00 --series 'S_90s' --cadence '90s'
+
+
+# 90s cadence
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240410_90s --email robert.jarolim@uni-graz.at --t_start 2024-04-10T00:00:00 --t_end 2024-04-10T02:00:00 --series 'S_90s' --cadence '90s'

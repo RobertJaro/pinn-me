@@ -4,7 +4,7 @@ import os.path
 import numpy as np
 from astropy import units as u
 from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
@@ -22,6 +22,11 @@ if __name__ == '__main__':
     parser.add_argument('--ref_map_disambig', type=str, help='the path to the reference map disambig')
     parser.add_argument('--output', type=str, help='the path to the output file', default=None)
     args = parser.parse_args()
+
+    y_min = 2048
+    y_max = y_min + 1024
+    x_min = 2048 - 1050
+    x_max = x_min + 1024
 
     in_path = args.input
 
@@ -148,8 +153,8 @@ if __name__ == '__main__':
     [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
     [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
 
-    [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
-    [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
+    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
+    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
 
     # add subtitle with date
     plt.suptitle(f'Map at {target_time}', fontsize=16)
@@ -240,8 +245,8 @@ if __name__ == '__main__':
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
 
-    [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
-    [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
+    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
+    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
 
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
@@ -251,41 +256,6 @@ if __name__ == '__main__':
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'fld_inc_azi_comparison.jpg'), dpi=300)
     plt.close()
-
-    ########################################################################################################################
-    # plot composite of fld, inc, azi and comparison
-    h = 120
-    h_start = 1050
-    w = 2048
-
-    fig, axs = plt.subplots(3, 1, figsize=(15, 2))
-
-    fld_im = axs[0].imshow(fld[h_start:h_start + h, :w], cmap='viridis', origin='upper', vmin=1, vmax=3000, norm='log')
-    inc_im = axs[1].imshow((inc % 180)[h_start + h:h_start + h * 2, :w], cmap='PiYG', origin='upper', vmin=0, vmax=180)
-    azi_im = axs[2].imshow((azi % 180)[h_start + h * 2:h_start + h * 3, :w], cmap='twilight', origin='upper', vmin=0,
-                           vmax=180)
-
-    [ax.set_axis_off() for ax in axs]
-    fig.tight_layout(pad=0)
-    fig.savefig(os.path.join(out_path, 'composite_pinnme.jpg'), dpi=300, transparent=True)
-    plt.close()
-
-    #
-    fig, axs = plt.subplots(3, 1, figsize=(15, 2))
-
-    fld_im = axs[0].imshow(fld_ref[h_start:h_start + h, :w], cmap='viridis', origin='upper', vmin=1, vmax=3000,
-                           norm='log')
-    inc_im = axs[1].imshow((inc_ref % 180)[h_start + h:h_start + h * 2, :w], cmap='PiYG', origin='upper', vmin=0,
-                           vmax=180)
-    azi_im = axs[2].imshow((azi_ref % 180)[h_start + h * 2:h_start + h * 3, :w], cmap='twilight', origin='upper',
-                           vmin=0,
-                           vmax=180)
-
-    [ax.set_axis_off() for ax in axs]
-    fig.tight_layout(pad=0)
-    fig.savefig(os.path.join(out_path, 'composite_ref.jpg'), dpi=300, transparent=True)
-    plt.close()
-
 
     # plot coordinates
     fig, axs = plt.subplots(2, 3, figsize=(10, 5), subplot_kw={'projection': ref_map})
@@ -337,11 +307,68 @@ if __name__ == '__main__':
     axs[0, 0].set_ylabel('Spherical Coordinates')
     axs[1, 0].set_ylabel('Cartesian Coordinates')
 
-    [ax.set_xlim(2048 - 512 - 256, 2048 + 256) for ax in axs.flatten()]
-    [ax.set_ylim(2048, 2048 + 1024) for ax in axs.flatten()]
+    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
+    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
 
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'coordinates.jpg'), dpi=300)
     plt.close()
 
+    ########################################################################################################################
+    # plot velocity
+    v_norm = Normalize(vmin=-2000, vmax=2000)
+
+    fig, axs = plt.subplots(2, 3, figsize=(10, 5), subplot_kw={'projection': ref_map})
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_rtp[..., 0], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('PINN ME $B_r$')
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_rtp[..., 1], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('PINN ME $B_t$')
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_rtp[..., 2], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('PINN ME $B_p$')
+
+    ax = axs[1, 0]
+    im = ax.imshow(v_rtp[..., 0], cmap='RdBu', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r}$ [m/s]')
+    ax.set_title('PINN ME $v_r$')
+
+    ax = axs[1, 1]
+    im = ax.imshow(v_rtp[..., 1], cmap='RdBu', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{t}$ [m/s]')
+    ax.set_title('PINN ME $v_t$')
+
+    ax = axs[1, 2]
+    im = ax.imshow(v_rtp[..., 2], cmap='RdBu', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{p}$ [m/s]')
+    ax.set_title('PINN ME $v_p$')
+
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
+    [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
+    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
+    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
+    fig.tight_layout()
+    plt.savefig(os.path.join(out_path, 'velocity.jpg'), dpi=300)
+    plt.close()
 

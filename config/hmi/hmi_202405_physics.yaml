@@ -1,9 +1,9 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v03"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/202405_v01"
 data:
   train_configs:
-   - {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
+   - {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", first_n_samples: 40}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 20}
   ref_time: "2024-05-01T00:00:00"
   num_workers: 16
@@ -21,7 +21,8 @@ model:
 training:
   epochs: 500
   lambda_stokes: [1, 1, 1, 1]
-  lambda_induction: 1.0e-4
-  lambda_divergence: 1.0e-4
-  lambda_force_free: 0.0
-  lambda_static: 0.0
+  lambda_induction: 1.0e-6
+  lambda_divergence: 1.0e-6
+  lambda_currents: 0.0
+  lambda_static: 1.0e-6
+#  val_check_interval: 2000

@@ -2,7 +2,7 @@
 
 #PBS -N pinn-me
 #PBS -A P22100000
-#PBS -q casper
+#PBS -q main
 #PBS -l job_priority=economy
 #PBS -l select=1:ncpus=16:ngpus=4:mem=64gb
 #PBS -l walltime=12:00:00
@@ -15,14 +15,14 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 
 #################################################################################
 # create data set
-python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_000" --n_time_steps 100 --obs_lon 0.0
-python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_060" --n_time_steps 100 --obs_lon 60.0
-python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_120" --n_time_steps 100 --obs_lon 120.0
+#python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_000" --n_time_steps 100 --obs_lon 0.0
+#python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_060" --n_time_steps 100 --obs_lon 60.0
+#python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_120" --n_time_steps 100 --obs_lon 120.0
 
 
 #################################################################################
 # inversion
-python3 -m pme.inversion_spherical --config config/spherical/3_obs.yaml
+python3 -m pme.inversion_spherical --config config/spherical/2_obs.yaml
 
 # test transformation
 #python3 -m pme.data.test_B_transform

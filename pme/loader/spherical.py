@@ -52,7 +52,11 @@ class SphericalDataModule(LightningDataModule):
                 n_samples = train_config['n_samples']
                 sampling = len(train_files) // n_samples
                 train_files = train_files[::sampling]
+            if 'first_n_samples' in train_config:  # apply subsampling for debugging
+                first_n_samples = train_config['first_n_samples']
+                train_files = train_files[:first_n_samples]
             with Pool(num_workers) as p:
+                print(f'Processing {len(train_files)} training files with {num_workers} workers...')
                 args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
                            repeat(stokes_normalization), repeat(self.dataset_batch_size), repeat(work_directory))
                 tds = p.starmap(HMISphericalDataset, args)
@@ -139,7 +143,7 @@ class SphericalDataModule(LightningDataModule):
         return loader
 
     def val_dataloader(self):
-        self.valid_dataset.batch_size = self.dataset_batch_size
+        self.valid_dataset.batch_size = self.batch_size
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
                                  pin_memory=True, shuffle=False)
         return data_loader
@@ -168,8 +172,6 @@ class HMISphericalDataset(TensorsDataset):
         coords = data['coords']  # x, y, 4
         cartesian_to_spherical_transform = data['cartesian_to_spherical_transform']  # x, y, 3, 3
         rtp_to_img_transform = data['rtp_to_img_transform']  # x, y, 3, 3
-        spherical_to_cartesian_transform = data['spherical_to_cartesian_transform']  # x, y, 3, 3
-        img_to_rtp_transform = data['img_to_rtp_transform']  # x, y, 3, 3
         mu = data['mu']  # x, y
         v_obs_los = data['v_obs_los']  # x, y
         carrington_coords = data['carrington_coords']  # x, y, 3
@@ -196,8 +198,6 @@ class HMISphericalDataset(TensorsDataset):
                    'coords': coords.reshape((-1, *coords.shape[2:])),
                    'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape((-1, *cartesian_to_spherical_transform.shape[2:])),
                    'rtp_to_img_transform': rtp_to_img_transform.reshape((-1, *rtp_to_img_transform.shape[2:])),
-                   'spherical_to_cartesian_transform':  spherical_to_cartesian_transform.reshape((-1, *spherical_to_cartesian_transform.shape[2:])),
-                   'img_to_rtp_transform': img_to_rtp_transform.reshape((-1, *img_to_rtp_transform.shape[2:])),
                    'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1))}
 
         super().__init__(tensors=tensors, batch_size=batch_size, work_directory=work_directory, **kwargs)
@@ -225,7 +225,6 @@ class HMISphericalDataset(TensorsDataset):
 
         # create rtp transform
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
-        spherical_to_cartesian_transform = np.linalg.inv(cartesian_to_spherical_transform)
 
         cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
         cartesian_coords /= self.Rs_per_ds  # scale to ds
@@ -261,8 +260,6 @@ class HMISphericalDataset(TensorsDataset):
                 'coords': cartesian_coords,
                 'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
                 'rtp_to_img_transform': rtp_to_img_transform,
-                'spherical_to_cartesian_transform': spherical_to_cartesian_transform,
-                'img_to_rtp_transform': img_to_rtp_transform,
                 'mu': mu, 'v_obs_los': v_obs_los,
                 'time': s_map.date.to_datetime(), 'obs_lat': s_map.carrington_latitude,
                 'obs_lon': s_map.carrington_longitude,
