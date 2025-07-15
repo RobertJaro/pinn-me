@@ -55,10 +55,12 @@ class TestSetGenerator():
 
         return {'stokes_profiles': stokes_profiles}, parameters
 
-    def convert_to_profiles(self, b0, b1, b_field, azi, damping, kl, mu, inc, vdop, vmac):
+    def convert_to_profiles(self, b0, b1, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, damping, kl, mu, vdop, vmac):
         atmos = MEAtmosphere(self.lambda0, self.jUp, self.jLow, self.gUp, self.gLow, self.lambda_grid)
         # flatten and forward
-        I, Q, U, V = atmos.forward(b_field.reshape(-1, 1), inc.reshape(-1, 1), azi.reshape(-1, 1),
+        I, Q, U, V = atmos.forward(b_field.reshape(-1, 1),
+                                   cos2azi.reshape(-1, 1), sin2azi.reshape(-1, 1),
+                                   sin_inc2.reshape(-1, 1), cos_inc.reshape(-1, 1),
                                    vmac.reshape(-1, 1), damping.reshape(-1, 1),
                                    b0.reshape(-1, 1), b1.reshape(-1, 1), mu.reshape(-1, 1),
                                    vdop.reshape(-1, 1), kl.reshape(-1, 1))

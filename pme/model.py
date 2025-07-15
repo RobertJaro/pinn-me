@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 from torch import nn
-from torch.distributions import Normal
 
+from pme.encoding import PeriodicBoundary, GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding
 from pme.train.siren import SirenModel
 
 
@@ -23,21 +23,6 @@ class Sine(nn.Module):
 
     def forward(self, x):
         return torch.sin(self.w0 * x)
-
-
-class PeriodicBoundary(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, coord):
-        scaled_x = coord[..., 0:1] * torch.pi  # - pi to pi
-        scaled_y = coord[..., 1:2] * torch.pi  # - pi to pi
-        encoded_coord = torch.cat([
-            torch.sin(scaled_x), torch.cos(scaled_x),
-            torch.sin(scaled_y), torch.cos(scaled_y),
-            coord[..., 2:]], -1)
-        return encoded_coord
 
 
 class MEModel(nn.Module):
@@ -119,6 +104,7 @@ class GenericModel(nn.Module):
     def __init__(self, in_dim, out_dim, dim=512, encoding='gaussian', activation='sine', n_layers=8):
         super().__init__()
         # encoding layer
+        self.posenc = None
         if encoding == "periodic":
             posenc = PeriodicBoundary()
             d_in = nn.Linear(in_dim + 2, dim)
@@ -128,8 +114,13 @@ class GenericModel(nn.Module):
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_dim) #, num_freqs=16, scale=4)
+            posenc = GaussianPositionalEncoding(d_input=in_dim, scale=64)#, scale=8)
             d_in = nn.Linear(posenc.d_output, dim)
+            self.d_in = nn.Sequential(posenc, d_in)
+        elif encoding == "progressive_fourier":
+            posenc = ProgressiveFourierEncoding(d_input=in_dim)
+            d_in = nn.Linear(posenc.d_output, dim)
+            self.posenc = posenc
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "linear":
             self.d_in = nn.Linear(in_dim, dim)
@@ -153,6 +144,10 @@ class GenericModel(nn.Module):
         else:
             raise ValueError(f"Unknown activation: {activation}")
 
+    def step(self, global_step):
+        if self.posenc is not None:
+            self.posenc.step(global_step)
+
     def forward(self, x):
         x = self.in_activation(self.d_in(x))
         for l, a in zip(self.linear_layers, self.activations):
@@ -168,33 +163,9 @@ class MESphericalModel(SirenModel):
     def forward(self, x):
         params = super().forward(x)
         #
-        # a = params[..., 0:2]
-        # jac_matrix = jacobian(a, x)
-        # dAx_dt = jac_matrix[:, 0, 0]
-        # dAx_dx = jac_matrix[:, 0, 1]
-        # dAx_dy = jac_matrix[:, 0, 2]
-        # dAx_dz = jac_matrix[:, 0, 3]
-        # dAy_dt = jac_matrix[:, 1, 0]
-        # dAy_dx = jac_matrix[:, 1, 1]
-        # dAy_dy = jac_matrix[:, 1, 2]
-        # dAy_dz = jac_matrix[:, 1, 3]
-        # # use gauge --> Az=0
-        # dAz_dt = torch.zeros_like(dAx_dt)
-        # dAz_dx = 0
-        # dAz_dy = 0
-        # dAz_dz = 0
-        # rot_x = dAz_dy - dAy_dz
-        # rot_y = dAx_dz - dAz_dx
-        # rot_z = dAy_dx - dAx_dy
-        # b = torch.stack([rot_x, rot_y, rot_z], -1)
-        # b_x, b_y, b_z = b[..., 0:1], b[..., 1:2], b[..., 2:3]
-        #
-        # dA_dt = torch.stack([dAx_dt, dAy_dt, dAz_dt], -1)
         b_x = params[..., 0:1]
         b_y = params[..., 1:2]
         b_z = params[..., 2:3]
-        #
-        disambiguation_mask = torch.sigmoid(params[..., 3:4])  # 0 or 1
         #
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
@@ -207,7 +178,6 @@ class MESphericalModel(SirenModel):
         kl = torch.sigmoid(params[..., 12:13]) * 100
         #
         output = {
-            # "dA_dt": dA_dt,
             "b_x": b_x,
             "b_y": b_y,
             "b_z": b_z,
@@ -219,41 +189,9 @@ class MESphericalModel(SirenModel):
             "v_y": v_y,
             "v_z": v_z,
             "kl": kl,
-            "disambiguation_mask": disambiguation_mask
         }
 
         return output
-
-
-class GaussianPositionalEncoding(nn.Module):
-
-    def __init__(self, d_input, num_freqs=128, scale=64):
-        super().__init__()
-        dist = Normal(loc=0, scale=scale)
-        frequencies = dist.sample([num_freqs, d_input])
-        self.frequencies = nn.Parameter(2 * torch.pi * frequencies, requires_grad=False)
-        self.d_output = d_input * (num_freqs * 2 + 1)
-
-    def forward(self, x):
-        encoded = torch.einsum('...j,ij->...ij', x, self.frequencies)
-        encoded = encoded.reshape(*x.shape[:-1], -1)
-        encoded = torch.cat([x, torch.sin(encoded), torch.cos(encoded)], -1)
-        return encoded
-
-
-class PositionalEncoding(nn.Module):
-
-    def __init__(self, num_freqs, d_input, max_freq=8):
-        super().__init__()
-        frequencies = 2 ** torch.linspace(0, max_freq, num_freqs)
-        self.frequencies = nn.Parameter(frequencies[None, :, None], requires_grad=False)
-        self.d_output = d_input * (num_freqs * 2)
-
-    def forward(self, x):
-        encoded = x[:, None, :] * torch.pi * self.frequencies
-        encoded = encoded.reshape(x.shape[0], -1)
-        encoded = torch.cat([torch.sin(encoded), torch.cos(encoded)], -1)
-        return encoded
 
 
 def jacobian(output, coords):
@@ -278,11 +216,12 @@ class NormalizationModule(nn.Module):
         return stokes
 
 
-class DisambiguationModel(GenericModel):
-    def __init__(self, **kwargs):
-        super().__init__(4, 1, **kwargs)
+class ProjectionModel(SirenModel):
+    def __init__(self, Mm_per_ds, max_shift_Mm = 1, **kwargs):
+        super().__init__(4, 1, dim=32, n_layers=4, **kwargs)
+        self.max_shift = max_shift_Mm / Mm_per_ds  # convert to model units
 
     def forward(self, x):
         x = super().forward(x)
-        x = torch.tanh(x)
+        x = torch.tanh(x) * self.max_shift
         return x

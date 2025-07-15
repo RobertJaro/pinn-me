@@ -1,21 +1,28 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_physics_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_physics_v02"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_v03"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/202405_v01"
 data:
-  train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405"}
+  train_configs:
+   - {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", first_n_samples: 40}
   valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405", sample_idx: 20}
   ref_time: "2024-05-01T00:00:00"
   num_workers: 16
-  batch_size: 65536
+  batch_size: 32768
   dataset_batch_size: 8192
+  seconds_per_dt: 864000 # 10 days
+  gauss_per_dB: 1000
 logging:
   project: pinn-me-spherical
   tags: ["hmi"]
   name: "2024-05"
 model:
-  encoding: "gaussian"
+  encoding: "default"
+  w0_initial: 100
 training:
   epochs: 500
   lambda_stokes: [1, 1, 1, 1]
-  lambda_induction: 1.0e-4
-  check_val_interval: 1000
+  lambda_induction: 1.0e-6
+  lambda_divergence: 1.0e-6
+  lambda_currents: 0.0
+  lambda_static: 1.0e-6
+#  val_check_interval: 2000
