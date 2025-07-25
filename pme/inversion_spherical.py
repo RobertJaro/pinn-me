@@ -50,9 +50,11 @@ training_config = config['training'] if 'training' in config else {}
 check_val_every_n_epoch = training_config.pop('check_val_every_n_epoch', None)
 val_check_interval = training_config.pop('val_check_interval', None)
 epochs = training_config.pop('epochs', 50)
+instrument_config = config['instrument'] if 'instrument' in config else {}
 
 me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config=data_module.lambda_config,
-                              value_range=data_module.value_range, model_config=model_config,
+                              model_config=model_config,
+                              instrument_config=instrument_config,
                               Rs_per_ds=data_module.Rs_per_ds, seconds_per_dt=data_module.seconds_per_dt,
                               gauss_per_dB=data_module.gauss_per_dB,
                               **training_config)
@@ -81,7 +83,7 @@ save_callback = LambdaCallback(on_validation_epoch_end=save)
 
 torch.set_float32_matmul_precision('medium')  # for A100 GPUs
 n_gpus = torch.cuda.device_count()
-trainer = Trainer(max_epochs=epochs,
+trainer = Trainer(max_epochs=int(epochs),
                   logger=wandb_logger,
                   devices=n_gpus if n_gpus > 0 else None,
                   accelerator='gpu' if n_gpus >= 1 else None,

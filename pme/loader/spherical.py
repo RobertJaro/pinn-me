@@ -18,6 +18,7 @@ from sunpy.coordinates import frames
 from sunpy.map import all_coordinates_from_map, Map
 from torch.utils.data import DataLoader
 
+from pme.data.phi_util import load_fix_phi_header
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
 from pme.train.data_loader import TensorsDataset, CombinedDataset
 
@@ -43,8 +44,20 @@ class SphericalDataModule(LightningDataModule):
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
         train_configs = train_configs if isinstance(train_configs, list) else [train_configs]
         train_datasets = []
-        for train_config in train_configs:
-            train_files = self._load_files(train_config['data_path'])
+        for i, train_config in enumerate(train_configs):
+            ds_type = train_config['type'].lower()
+            if ds_type == 'hmi':
+                train_files = self._load_files(train_config['data_path'])
+                ds_class = HMISphericalDataset
+            elif ds_type == 'phi-hrt':
+                train_files = sorted(glob.glob(train_config['data_path']))
+                ds_class = PHIHRTSphericalDataset
+            elif ds_type == 'phi-fdt':
+                train_files = sorted(glob.glob(train_config['data_path']))
+                ds_class = PHIFDTSphericalDataset
+            else:
+                raise ValueError(f'Unknown dataset type: {ds_type}')
+
             if 'sample_idx' in train_config:  # use a single sample for debugging
                 sample_idx = train_config['sample_idx']
                 train_files = train_files[sample_idx:sample_idx + 1]
@@ -57,26 +70,68 @@ class SphericalDataModule(LightningDataModule):
                 train_files = train_files[:first_n_samples]
             with Pool(num_workers) as p:
                 print(f'Processing {len(train_files)} training files with {num_workers} workers...')
-                args = zip(train_files, repeat(seconds_per_dt), repeat(Rs_per_ds), repeat(ref_time),
-                           repeat(stokes_normalization), repeat(self.dataset_batch_size), repeat(work_directory))
-                tds = p.starmap(HMISphericalDataset, args)
-            train_datasets += tds # append all datasets
+                ds_ids = [f'train_{i:02d}_{j:03d}' for j in range(len(train_files))]
+                ds_normalization = train_config.get('stokes_normalization', stokes_normalization)
+                instrument_id = train_config['instrument_id']
+                oversample_factor = train_config.get('oversample_factor', 1)
+                args = zip(train_files, ds_ids, repeat(instrument_id), repeat(seconds_per_dt), repeat(Rs_per_ds),
+                           repeat(ref_time),
+                           repeat(ds_normalization), repeat(self.dataset_batch_size), repeat(work_directory),
+                           repeat(oversample_factor))
+                tds = p.starmap(ds_class, args)
+            train_datasets += tds  # append all datasets
 
         self.train_datasets = train_datasets
+
+        # add lambda configuration for each instrument
+        # only use the first dataset for each instrument to define the lambda configuration
+        # assumes that lambda0 is the same for all datasets of the same instrument
+        lambda_config = {}
+        for ds in train_datasets:
+            instrument_id = ds.instrument_id
+            if instrument_id not in lambda_config:
+                lambda_config[instrument_id] = ds.lambda_config
+        self.lambda_config = lambda_config
 
         max_samples = 10
         sample_step = max(1, len(train_datasets) // max_samples)
         for ds in train_datasets[::sample_step]:
             self.plot_dataset(ds)
 
-        valid_files = self._load_files(valid_config['data_path'])
-        sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
-        self.valid_dataset = HMISphericalDataset(valid_files[sample_idx],
-                                                 seconds_per_dt=seconds_per_dt,
-                                                 Rs_per_ds=Rs_per_ds, ref_time=ref_time,
-                                                 stokes_normalization=stokes_normalization,
-                                                 batch_size=self.batch_size, work_directory=work_directory,
-                                                 filter_nans=False, shuffle=False)
+        valid_ds_type = valid_config['type'].lower()
+        if valid_ds_type == 'hmi':
+            valid_files = self._load_files(valid_config['data_path'])
+            sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
+            ds_normalization = valid_config.get('stokes_normalization', stokes_normalization)
+            self.valid_dataset = HMISphericalDataset(valid_files[sample_idx],
+                                                     ds_id='valid', instrument_id=valid_config['instrument_id'],
+                                                     seconds_per_dt=seconds_per_dt,
+                                                     Rs_per_ds=Rs_per_ds, ref_time=ref_time,
+                                                     stokes_normalization=ds_normalization,
+                                                     batch_size=self.batch_size, work_directory=work_directory,
+                                                     filter_nans=False, shuffle=False)
+        elif valid_ds_type == 'phi-hrt':
+            valid_files = sorted(glob.glob(valid_config['data_path']))
+            sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
+            self.valid_dataset = PHIHRTSphericalDataset(valid_files[sample_idx],
+                                                        ds_id='valid', instrument_id=valid_config['instrument_id'],
+                                                        seconds_per_dt=seconds_per_dt,
+                                                        Rs_per_ds=Rs_per_ds, ref_time=ref_time,
+                                                        stokes_normalization=stokes_normalization,
+                                                        batch_size=self.batch_size, work_directory=work_directory,
+                                                        filter_nans=False, shuffle=False)
+        elif valid_ds_type == 'phi-fdt':
+            valid_files = sorted(glob.glob(valid_config['data_path']))
+            sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
+            self.valid_dataset = PHIFDTSphericalDataset(valid_files[sample_idx],
+                                                        ds_id='valid', instrument_id=valid_config['instrument_id'],
+                                                        seconds_per_dt=seconds_per_dt,
+                                                        Rs_per_ds=Rs_per_ds, ref_time=ref_time,
+                                                        stokes_normalization=stokes_normalization,
+                                                        batch_size=self.batch_size, work_directory=work_directory,
+                                                        filter_nans=False, shuffle=False)
+        else:
+            raise ValueError(f'Unknown validation dataset type: {valid_ds_type}')
 
         self.ref_time = ref_time
         self.times = [d.time for d in self.train_datasets]
@@ -87,12 +142,8 @@ class SphericalDataModule(LightningDataModule):
         self.value_range = self.valid_dataset.value_range
         self.data_range = self.valid_dataset.data_range
 
-        # centered at lambda0
-        self.lambda_grid = self.valid_dataset.lambda_grid
-        self.lambda_config = self.valid_dataset.lambda_config
-
     def plot_dataset(self, ds):
-        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axs = plt.subplots(1, 4, figsize=(15, 5))
 
         im = axs[0].imshow(ds.integrated_V, cmap='gray', origin='lower', norm='log')
         divider = make_axes_locatable(axs[0])
@@ -108,6 +159,12 @@ class SphericalDataModule(LightningDataModule):
         divider = make_axes_locatable(axs[2])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Longitude [rad]')
+
+        v_min_max = np.nanmax(np.abs(ds.v_obs_los))
+        im = axs[3].imshow(ds.v_obs_los, origin='lower', cmap='coolwarm_r', vmin=-v_min_max, vmax=v_min_max)
+        divider = make_axes_locatable(axs[3])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        fig.colorbar(im, cax=cax, orientation='vertical', label='Observer LOS Velocity [m/s]')
 
         axs[0].set_title(
             f'Time: {ds.time.isoformat(" ", timespec="hours")} - lat:{ds.obs_lat.to_value(u.deg):.1f}°, lon:{ds.obs_lon.to_value(u.deg):.1f}°')
@@ -149,128 +206,85 @@ class SphericalDataModule(LightningDataModule):
         return data_loader
 
 
-class HMISphericalDataset(TensorsDataset):
+class SphericalDataset(TensorsDataset):
 
-    def __init__(self, files, seconds_per_dt, Rs_per_ds, ref_time, stokes_normalization, batch_size, work_directory,
-                 **kwargs):
-        lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695])  # From Phillip Scherrer
-        lambda_center = 6173.3433  # From Phillip Scherrer
+    def __init__(self, stokes, map_data, lambda_config, ds_id, instrument_id, seconds_per_dt, Rs_per_ds, ref_time,
+                 stokes_normalization, batch_size, work_directory, oversample_factor=1, **kwargs):
+        self.ds_id = ds_id
+        self.instrument_id = instrument_id
+        self.oversample_factor = oversample_factor
 
-        self.lambda_grid = lambda_grid
-        self.lambda_config = {'lambda0': lambda_center * u.AA, 'lambda_grid': self.lambda_grid * u.AA,
-                              'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.50, 'g_low': 0.0}
+        self.lambda_config = lambda_config  # lambda grid and reference wavelength
 
         # load coordinates
-        self.num_wl = files.shape[1]
+        self.num_wl = stokes.shape[-1]
         self.Rs_per_ds = Rs_per_ds
         self.seconds_per_dt = seconds_per_dt
         self.ref_time = ref_time
 
-        data = self._load_data(files)
+        stokes = stokes  # x, y, stokes, wl
+        coords = map_data['cartesian_coords']  # x, y, 3
+        coords /= Rs_per_ds  # normalize to solar radius
+        # append time
+        time = map_data['time']  # datetime
+        normalized_time = (time - ref_time).total_seconds() / seconds_per_dt
+        normalized_time = np.ones((*coords.shape[:-1], 1), dtype=np.float32) * normalized_time
+        coords = np.concatenate([normalized_time, coords], -1)
 
-        stokes = data['stokes']  # x, y, stokes, wl
-        coords = data['coords']  # x, y, 4
-        cartesian_to_spherical_transform = data['cartesian_to_spherical_transform']  # x, y, 3, 3
-        rtp_to_img_transform = data['rtp_to_img_transform']  # x, y, 3, 3
-        mu = data['mu']  # x, y
-        v_obs_los = data['v_obs_los']  # x, y
-        carrington_coords = data['carrington_coords']  # x, y, 3
+        cartesian_to_spherical_transform = map_data['cartesian_to_spherical_transform']  # x, y, 3, 3
+        rtp_to_img_transform = map_data['rtp_to_img_transform']  # x, y, 3, 3
+        mu = map_data['mu']  # x, y
+        v_obs_los = map_data['v_obs_los']  # x, y
+        carrington_coords = map_data['carrington_coords']  # x, y, 3
+
+        # apply mask filter - coordinates + stokes for normalization
+        coords[(mu < 1e-2) | np.isnan(mu)] = np.nan
+        stokes[(mu < 1e-2) | np.isnan(mu)] = np.nan
 
         # Plot Data Overview
         self.integrated_V = block_reduce(np.abs(stokes[:, :, -1]).sum(-1), (8, 8), np.mean)
         self.latitude = block_reduce(carrington_coords[..., 1], (8, 8), np.mean)
         self.longitude = block_reduce(carrington_coords[..., 2], (8, 8), np.mean)
-        self.obs_lat = data['obs_lat']
-        self.obs_lon = data['obs_lon']
+        self.v_obs_los = block_reduce(v_obs_los, (8, 8), np.mean)
+        self.obs_lat = map_data['obs_lat']
+        self.obs_lon = map_data['obs_lon']
 
         # normalize stokes vector
         stokes /= stokes_normalization
 
-        self.time = data['time']
+        self.time = map_data['time']
         self.value_range = np.stack([np.nanmin(stokes, (0, 1, -1)), np.nanmax(stokes, (0, 1, -1))], -1)
         self.image_shape = stokes.shape[:2]  # x, y
-        self.wcs = data['wcs']
+        self.wcs = map_data['wcs']
 
         self.data_range = np.array(
             [[np.nanmin(carrington_coords[..., i]), np.nanmax(carrington_coords[..., i])] for i in range(3)])
 
+        lambda_grid = lambda_config['lambda_grid'].to_value(u.m)
+        lambda_grid = np.ones_like(coords[..., 0:1]) * lambda_grid.reshape((1, 1, -1))  # x, y, wl
+
         tensors = {'stokes': stokes.reshape((-1, *stokes.shape[2:])),
                    'coords': coords.reshape((-1, *coords.shape[2:])),
-                   'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape((-1, *cartesian_to_spherical_transform.shape[2:])),
+                   'cartesian_to_spherical_transform': cartesian_to_spherical_transform.reshape(
+                       (-1, *cartesian_to_spherical_transform.shape[2:])),
                    'rtp_to_img_transform': rtp_to_img_transform.reshape((-1, *rtp_to_img_transform.shape[2:])),
-                   'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1))}
+                   'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1)),
+                   'lambda_grid': lambda_grid.reshape((-1, *lambda_grid.shape[2:])),
+                   }
 
         super().__init__(tensors=tensors, batch_size=batch_size, work_directory=work_directory, **kwargs)
 
-    def _load_data(self, files):
-        I, Q, U, V = files
-        ref_file = I[0]
-
-        s_map = Map(ref_file)
-        print(f'Loading data: {s_map.date.to_datetime().isoformat(" ")}')
-
-        # convert world coordinates to cartesian
-        spherical_coords = all_coordinates_from_map(s_map)
-
-        projective_coords = spherical_coords.transform_to(frames.Helioprojective)
-        radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
-        mu = np.sqrt(1 - radial_distance ** 2)
-        mu = mu.astype(np.float32)
-
-        carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
-        lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
-        r = np.ones_like(lon)  # carrington_coords.radius
-        # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-        carrington_coords = np.stack([r, lat, lon], -1)
-
-        # create rtp transform
-        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
-
-        cartesian_coords = spherical_to_cartesian(carrington_coords) / self.Rs_per_ds
-        cartesian_coords /= self.Rs_per_ds  # scale to ds
-
-        # append time
-        normalized_time = (s_map.date.to_datetime() - self.ref_time).total_seconds() / self.seconds_per_dt
-        time = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
-        cartesian_coords = np.concatenate([time, cartesian_coords], -1)
-
-        # create observer transform
-        # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
-        pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
-        latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
-        img_to_rtp_transform = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
-        rtp_to_img_transform = np.linalg.inv(img_to_rtp_transform)
-
-        # load observer velocity
-        v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
-
-        I_profile = np.stack([fits.getdata(I[j]) for j in range(self.num_wl)], -1)
-        Q_profile = np.stack([fits.getdata(Q[j]) for j in range(self.num_wl)], -1)
-        U_profile = np.stack([fits.getdata(U[j]) for j in range(self.num_wl)], -1)
-        V_profile = np.stack([fits.getdata(V[j]) for j in range(self.num_wl)], -1)
-
-        stokes = np.stack([I_profile, Q_profile, U_profile, V_profile], -2)
-
-        # apply mask filter - coordinates + stokes for normalization
-        radius_mask = radial_distance > 0.99
-        cartesian_coords[radius_mask] = np.nan
-        stokes[radius_mask] = np.nan
-
-        return {'stokes': stokes,
-                'coords': cartesian_coords,
-                'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
-                'rtp_to_img_transform': rtp_to_img_transform,
-                'mu': mu, 'v_obs_los': v_obs_los,
-                'time': s_map.date.to_datetime(), 'obs_lat': s_map.carrington_latitude,
-                'obs_lon': s_map.carrington_longitude,
-                'carrington_coords': carrington_coords, 'wcs': s_map.wcs}
+    def __getitem__(self, *args):
+        out = super().__getitem__(*args)
+        out['instrument_id'] = self.instrument_id  # add instrument id to output
+        return out
 
 
 def load_v_observer_LOS(s_map):
     hgc_out = all_coordinates_from_map(s_map)
     hpc_out = hgc_out.transform_to(frame=frames.Helioprojective)
 
-    # Components of the SDO satellite velocity
+    # Components of the satellite velocity
     v_sdo_r = s_map.meta['OBS_VR']
     v_sdo_w = s_map.meta['OBS_VW']
     v_sdo_n = s_map.meta['OBS_VN']
@@ -282,8 +296,138 @@ def load_v_observer_LOS(s_map):
                          np.cos(theta_y) * np.cos(theta_x))
     psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
 
-    # SDO motion
+    # satellite motion
     v_obs_los = (v_sdo_w * np.sin(theta_p) * np.sin(psi) -
                  v_sdo_n * np.sin(theta_p) * np.cos(psi) +
                  v_sdo_r * np.cos(theta_p))
     return v_obs_los
+
+
+class HMISphericalDataset(SphericalDataset):
+
+    def __init__(self, files, *args, **kwargs):
+        lambda0 = 6173.3433 * u.AA
+        lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA  # From Phillip Scherrer
+        lambda_config = {'lambda_grid': lambda_grid, 'lambda0': lambda0}
+
+        I, Q, U, V = files
+        ref_file = I[0]
+        s_map = Map(ref_file)
+        map_data = load_map_data(s_map)
+        stokes = load_stokes_data(files)
+
+        super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
+
+
+class PHIHRTSphericalDataset(SphericalDataset):
+
+    def __init__(self, file, *args, **kwargs):
+        # wave_axis, voltagesData, tunning_constant, cpos, ref_wavelength = fits_get_sampling(file)
+        # wave_axis = wave_axis * u.AA  # convert to angstroms
+        # ref_wavelength = ref_wavelength * u.AA  # convert to angstroms
+        # lambda_center = ref_wavelength
+        # lambda_grid = wave_axis - lambda_center
+        header = fits.getheader(file)
+        lambda_center = header['WAVELNTH'] * u.AA  # reference wavelength from header
+        lambda_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)]) * u.AA
+        lambda_grid = lambda_grid - lambda_center  # center the grid at the reference wavelength
+        lambda_config = {'lambda_grid': lambda_grid, 'lambda0': lambda_center}
+
+        # set Earth corrected observation time
+        header['DATE-OBS'] = header['DATE_EAR']
+
+        # (wl, stokes, x, y)
+        data = fits.getdata(file)
+        # --> (x, y, stokes, wl)
+        stokes = np.transpose(data, (2, 3, 1, 0))
+        stokes[stokes[:, :, 0, :].sum(-1) <= 1e-3] = np.nan  # mask out stokes I < 1e-3
+        ref_map = Map(data, header)  # use the first wavelength as reference map
+        map_data = load_map_data(ref_map)
+
+        super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
+
+
+class PHIFDTSphericalDataset(SphericalDataset):
+
+    def __init__(self, file, *args, **kwargs):
+        # wave_axis, voltagesData, tunning_constant, cpos, ref_wavelength = fits_get_sampling(file)
+        # wave_axis = wave_axis * u.AA  # convert to angstroms
+        # ref_wavelength = ref_wavelength * u.AA  # convert to angstroms
+        # lambda_center = ref_wavelength
+        # lambda_grid = wave_axis - lambda_center
+        header = load_fix_phi_header(file)
+        lambda_center = header['WAVELNTH'] * u.AA  # reference wavelength from header
+        lambda_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)]) * u.AA
+        lambda_grid = lambda_grid - lambda_center  # center the grid at the reference wavelength
+        lambda_config = {'lambda_grid': lambda_grid, 'lambda0': lambda_center}
+
+        # set Earth corrected observation time
+        header['DATE-OBS'] = header['DATE_EAR']
+
+        # (wl, stokes, x, y)
+        data = fits.getdata(file)
+        # --> (x, y, stokes, wl)
+        stokes = np.transpose(data, (2, 3, 1, 0))
+        ref_map = Map(data, header)
+        map_data = load_map_data(ref_map)
+
+        super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
+
+
+def load_stokes_data(files):
+    I, Q, U, V = files
+    num_wl = len(I)
+
+    I_profile = np.stack([fits.getdata(I[j]) for j in range(num_wl)], -1)
+    Q_profile = np.stack([fits.getdata(Q[j]) for j in range(num_wl)], -1)
+    U_profile = np.stack([fits.getdata(U[j]) for j in range(num_wl)], -1)
+    V_profile = np.stack([fits.getdata(V[j]) for j in range(num_wl)], -1)
+
+    stokes = np.stack([I_profile, Q_profile, U_profile, V_profile], -2)
+
+    return stokes
+
+
+def load_map_data(s_map):
+    time = s_map.date.to_datetime()
+
+    # convert world coordinates to cartesian
+    spherical_coords = all_coordinates_from_map(s_map)
+
+    projective_coords = spherical_coords.transform_to(frames.Helioprojective)
+    radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
+    mu = np.sqrt(1 - radial_distance ** 2)
+    mu = mu.astype(np.float32)
+
+    carrington_coords = spherical_coords.transform_to(frames.HeliographicCarrington)
+    lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
+    r = np.ones_like(lon)  # carrington_coords.radius
+    # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
+    carrington_coords = np.stack([r, lat, lon], -1)
+
+    # create rtp transform
+    cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
+
+    cartesian_coords = spherical_to_cartesian(carrington_coords)
+
+    # create observer transform
+    # latc, lonc = np.deg2rad(s_map.meta['CRLT_OBS']), np.deg2rad(s_map.meta['CRLN_OBS'])
+    pAng = s_map.meta.get('CROTA2', s_map.meta.get('CROTA', 0)) * u.deg
+    pAng *= -1  # negative pAng
+    pAng = pAng.to_value(u.rad)
+    obs_lat = s_map.carrington_latitude
+    obs_lon = s_map.carrington_longitude
+    latc, lonc = obs_lat.to_value(u.rad), obs_lon.to_value(u.rad)
+    img_to_rtp_transform = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+    rtp_to_img_transform = np.linalg.inv(img_to_rtp_transform)
+
+    # load observer velocity
+    v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
+
+    return {'cartesian_to_spherical_transform': cartesian_to_spherical_transform,
+            'rtp_to_img_transform': rtp_to_img_transform,
+            'mu': mu, 'v_obs_los': v_obs_los,
+            'time': time,
+            'obs_lat': obs_lat, 'obs_lon': obs_lon,
+            'cartesian_coords': cartesian_coords,
+            'carrington_coords': carrington_coords, 'wcs': s_map.wcs}

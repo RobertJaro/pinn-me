@@ -34,10 +34,13 @@ if __name__ == '__main__':
     # load reference maps
     times = pinnme.times
 
-    resolution = 0.05 # degrees
+    # resolution = 0.05 # degrees
 
-    latitude_range = [-30, -10]
-    longitude_range = [25, 45]
+    # latitude_range = [-30, -10]
+    # longitude_range = [25, 45]
+    resolution = 1
+    latitude_range = [-90, 90]
+    longitude_range = [0, 360]
 
     latitude = np.deg2rad(np.linspace(latitude_range[0], latitude_range[1], int((latitude_range[1] - latitude_range[0] + 1) // resolution)))
     longitude = np.deg2rad(np.linspace(longitude_range[0], longitude_range[1], int((longitude_range[1] - longitude_range[0] + 1) // resolution)))

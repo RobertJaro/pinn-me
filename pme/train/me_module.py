@@ -180,7 +180,7 @@ class MEModule(LightningModule):
         output = {k: v[:, center[0], center[1], :] for k, v in output.items()}  # select center pixel
 
         return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
-                **output}
+                **output, 'mu': mu.detach()}
 
     def validation_epoch_end(self, outputs_list):
         if len(outputs_list) == 0 or any([len(o) == 0 for o in outputs_list]):
@@ -195,7 +195,7 @@ class MEModule(LightningModule):
                            'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff})
 
         parameters = {}
-        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl']:
+        for k in ['b_field', 'theta', 'chi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl', 'mu']:
             field = outputs[k].reshape(*self.cube_shape[1:3]).cpu().numpy()
             parameters[k] = field
 
@@ -322,8 +322,11 @@ class MEModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 2]
-        ax.set_axis_off()
-
+        im = ax.imshow(parameters['mu'], origin='lower', vmin=0, vmax=1, cmap='cividis')
+        ax.set_title("Mu")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
         ax = axs[1, 3]
         vdop_max = np.abs(parameters['vdop']).max()
         im = ax.imshow(parameters['vdop'], cmap='RdBu_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')

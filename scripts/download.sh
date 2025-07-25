@@ -25,6 +25,9 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test --email "robert.jarolim@uni-graz.at" --t_start "2024-05-01T00:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-08T00:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_05_09 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-09T01:00:00"
+python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_03_24 --email "robert.jarolim@uni-graz.at" --t_start "2024-03-24T01:00:00"
+python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_03_15 --email "robert.jarolim@uni-graz.at" --t_start "2024-03-15T06:00:00"
+python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_03_27 --email "robert.jarolim@uni-graz.at" --t_start "2024-03-27T06:00:00"
 
 
 # 11158
@@ -47,3 +50,13 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 
 # 90s cadence
 python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240410_90s --email robert.jarolim@uni-graz.at --t_start 2024-04-10T00:00:00 --t_end 2024-04-10T02:00:00 --series 'S_90s' --cadence '90s'
+
+
+# 2024-03-23
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240323_720s --email robert.jarolim@uni-graz.at --t_start 2024-03-23T22:15:00 --t_end 2024-03-24T02:15:00 --series 'S_720s' --cadence '720s'
+
+# 2024-03-15
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240315_720s --email robert.jarolim@uni-graz.at --t_start 2024-03-15T00:00:00 --t_end 2024-03-15T18:00:00 --series 'S_720s' --cadence '720s'
+
+# 2024-03-27
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240327_720s --email robert.jarolim@uni-graz.at --t_start 2024-03-27T00:00:00 --t_end 2024-03-28T00:00:00 --series 'S_720s' --cadence '6h'

@@ -62,8 +62,7 @@ def solar_differential_rotation_velocity_torch(latitude_rad: torch.Tensor) -> to
     v = R_sun * omega_rad_per_sec * torch.cos(latitude_rad)
     return v  # in m/s
 
-def carrington_rotation_velocity():
+def carrington_rotation_velocity(latitude):
     R_sun = 6.957e8  # Solar radius in meters
-    rotation_rate = 2 * np.pi / (27.2753 * 24 * 3600) # rad/s
-    v = R_sun * rotation_rate # m/s
-    return v
+    rotation_rate = 2 * torch.pi / (27.2753 * 24 * 3600) # rad/s
+    return R_sun * rotation_rate * torch.cos(latitude)  # in m/s

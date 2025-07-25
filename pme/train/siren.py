@@ -84,7 +84,7 @@ class SirenModel(nn.Module):
         return x
 
     def step(self, global_step):
-        if isinstance(self.posenc, ProgressiveFourierEncoding):
+        if hasattr(self.posenc, 'step'):
             self.posenc.step(global_step)
 
 

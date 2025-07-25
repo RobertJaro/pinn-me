@@ -23,10 +23,11 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=str, help='the path to the output file', default=None)
     args = parser.parse_args()
 
-    y_min = 2048
-    y_max = y_min + 1024
-    x_min = 2048 - 1050
-    x_max = x_min + 1024
+    # y_min = 2048 - 1024
+    # y_max = y_min + 2048
+    # x_min = 2048 - 1024
+    # x_max = x_min + 2048
+    x_min = x_max = y_min = y_max = None
 
     in_path = args.input
 
@@ -250,8 +251,8 @@ if __name__ == '__main__':
 
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
-    axs[0, 0].set_ylabel('Reference')
-    axs[1, 0].set_ylabel('PINN ME')
+    axs[0, 0].set_ylabel('PINN ME')
+    axs[1, 0].set_ylabel('Reference')
 
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'fld_inc_azi_comparison.jpg'), dpi=300)

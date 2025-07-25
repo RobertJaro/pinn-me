@@ -215,6 +215,18 @@ class NormalizationModule(nn.Module):
         stokes = torch.asinh(stokes * 1e1) / self.stretch
         return stokes
 
+class INormalizationModule(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
+
+    def forward(self, stokes):
+        # total_intensity = stokes[..., 0:1, :].sum(-1, keepdim=True) + 1e-6  # avoid division by zero
+        # normalized_stokes = stokes / total_intensity  # normalize by total intensity
+        normalized_stokes = torch.asinh(stokes * 1e1) / self.stretch
+        return normalized_stokes
+
 
 class ProjectionModel(SirenModel):
     def __init__(self, Mm_per_ds, max_shift_Mm = 1, **kwargs):

@@ -1,0 +1,40 @@
+---
+base_path: "/glade/work/rjarolim/spinn_me/hmi/combined_fd_20240327_v05"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/combined_fd_20240327_v05"
+data:
+  train_configs:
+    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240327_720s", stokes_normalization: 5.0e+4, instrument_id: 'HMI'}
+    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI', oversample_factor: 4 }
+  valid_config: { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", sample_idx: 1, stokes_normalization: 1.0, instrument_id: 'PHI' }
+  ref_time: "2024-03-27T00:00:00"
+  num_workers: 16
+  batch_size: 32768
+  dataset_batch_size: 4096
+  seconds_per_dt: 86400 # 1 day
+  gauss_per_dB: 1000
+  stokes_normalization: 1.0
+
+instrument:
+  - type: 'phi'
+    instrument_id: 'PHI'
+    scaling_config: {value: 0.0, learnable: false}
+  - type: 'hmi'
+    instrument_id: 'HMI'
+    scaling_config: {value: 0.0, learnable: true}
+
+logging:
+  project: pinn-me-spherical
+  tags: [ "hmi" ]
+  name: "2024-04-27 combined full-disk"
+model:
+  encoding: "default"
+  w0_initial: 100
+training:
+  epochs: 500
+  lambda_stokes: [ 1, 1, 1, 1 ]
+  lambda_induction: 0.0
+  lambda_divergence: 0.0
+  lambda_force_free: 0
+  lambda_static: 0.0
+  check_val_every_n_epoch: 5
+#  val_check_interval: 2000

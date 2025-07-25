@@ -4,24 +4,21 @@ from astropy import units as u
 from astropy.constants import R_sun
 # Some documentation to be included
 
-def spherical_to_cartesian_matrix(c, f=np):
+def spherical_to_cartesian_matrix(c):
     r, t, p = c[..., 0], c[..., 1], c[..., 2]
-    sin = f.sin
-    cos = f.cos
+    sin = np.sin
+    cos = np.cos
     #
-    matrix = [cos(t) * cos(p), -sin(t) * cos(p), -sin(p),
-              cos(t) * sin(p), -sin(t) * sin(p), cos(p),
-              sin(t), cos(t), f.zeros_like(t)]
+    matrix = [cos(t) * cos(p), - sin(t) * cos(p), - sin(p),
+              cos(t) * sin(p), - sin(t) * sin(p), cos(p),
+              sin(t), cos(t), np.zeros_like(t)]
     matrix = np.stack(matrix, axis=-1).reshape((*c.shape[:-1], 3, 3))
     #
     return matrix
 
 
-def cartesian_to_spherical_matrix(c, f=np):
-    if f is torch:
-        return torch.inverse(spherical_to_cartesian_matrix(c, f))
-    else:
-        return np.linalg.inv(spherical_to_cartesian_matrix(c, f))
+def cartesian_to_spherical_matrix(c):
+    return np.linalg.inv(spherical_to_cartesian_matrix(c))
 
 
 def spherical_to_cartesian(v, f=np):
@@ -36,12 +33,10 @@ def spherical_to_cartesian(v, f=np):
 
 def cartesian_to_spherical(v, f=np):
     x, y, z = v[..., 0], v[..., 1], v[..., 2]
-    xy = x ** 2 + y ** 2
 
-    r = (xy + z ** 2) ** 0.5
-    xy_sqrt = xy ** 0.5
-    nudge = (f.abs(xy_sqrt) < 1e-6) * 1e-6  # assure numerical stability
-    t = f.arctan2(z, xy_sqrt + nudge)
+    r = (x ** 2 + y ** 2 + z ** 2) ** 0.5
+    nudge = (f.abs(r) < 1e-6) * 1e-6  # assure numerical stability
+    t = f.arcsin(z / (r + nudge))
     nudge = (f.abs(x) < 1e-6) * 1e-6  # assure numerical stability
     p = f.arctan2(y, x + nudge)
 

@@ -15,15 +15,16 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import cartesian_to_spherical, spherical_to_cartesian
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import NormalizationModule, MESphericalModel, jacobian
-from pme.train.me_atmosphere import MEAtmosphere
+from pme.model import MESphericalModel, jacobian, INormalizationModule
+from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
 from pme.train.util import acos_safe, atan2_safe
 
 
 class MESphericalModule(LightningModule):
 
-    def __init__(self, image_shape, lambda_config, value_range,
+    def __init__(self, image_shape, lambda_config,
                  gauss_per_dB, Rs_per_ds, seconds_per_dt,
+                 instrument_config,
                  lr_params=None, model_config=None, normalization_config=None,
                  lambda_stokes=None,
                  lambda_induction=0.0, lambda_divergence=0.0, lambda_force_free=0.0,
@@ -39,18 +40,41 @@ class MESphericalModule(LightningModule):
         model_config = model_config if model_config is not None else {}
         self.parameter_model = MESphericalModel(**model_config)
 
-        self.forward_model = MEAtmosphere(**lambda_config)
+        # init instrument models
+        forward_models = {}
+        for instrument in instrument_config:
+            instrument_id = instrument.pop('instrument_id')
+            instrument_type = instrument.pop('type')
+            lambda0 = lambda_config[instrument_id]['lambda0']
+            if instrument_type == 'hmi':
+                forward_models[instrument_id] = HMIMEAtmosphere(lambda0 = lambda0, **instrument)
+            elif instrument_type == 'phi':
+                forward_models[instrument_id] = PHIMEAtmosphere(lambda0 = lambda0, **instrument)
+            else:
+                raise ValueError(f"Unknown instrument type: {instrument_type}")
+        self.forward_models = nn.ModuleDict(forward_models)
+
         self.lr_params = lr_params
 
         self.validation_outputs = {}
         normalization_config = normalization_config if normalization_config is not None else {}
-        self.normalization = NormalizationModule(value_range, **normalization_config)
+        self.normalization = INormalizationModule(**normalization_config)
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
-        self.lambda_induction = lambda_induction
-        self.lambda_divergence = lambda_divergence
-        self.lambda_force_free = lambda_force_free
         self.lambda_static = lambda_static
+        #
+        scheduled_lambda_config = {}
+        lambdas = {}
+        for k, v in [('induction', lambda_induction), ('divergence', lambda_divergence),
+                     ('force_free', lambda_force_free)]:
+            if isinstance(v, dict):
+                gamma = (v['end'] / v['start']) ** (1 / v['iterations'])
+                scheduled_lambda_config[k] = {'end': v['end'], 'gamma': gamma}
+                lambdas[k] = nn.Parameter(torch.tensor(v['start'], dtype=torch.float32), requires_grad=False)
+            else:
+                lambdas[k] = nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
+        self.scheduled_lambda_config = scheduled_lambda_config
+        self.lambdas = nn.ParameterDict(lambdas)
         #
         self.gauss_per_dB = gauss_per_dB
         self.Rs_per_ds = Rs_per_ds
@@ -58,7 +82,8 @@ class MESphericalModule(LightningModule):
         self.seconds_per_dt = seconds_per_dt
 
     def configure_optimizers(self):
-        parameters = list(self.parameter_model.parameters())
+        parameters = (list(self.parameter_model.parameters()) +
+                      list(self.forward_models.parameters()))
         if isinstance(self.lr_params, dict):
             lr_start = self.lr_params['start']
             lr_end = self.lr_params['end']
@@ -76,29 +101,48 @@ class MESphericalModule(LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_nb):
-        coords = batch['coords']
-        mu = batch['mu']
-        stokes_true = batch['stokes']
-        cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
-        rtp_to_img_transform = batch['rtp_to_img_transform']
-        v_obs_los = batch['v_obs_los']
+        instrument_ids = list(batch.keys())
+
+        coords = torch.cat([batch[k]['coords'] for k in instrument_ids])
+        cartesian_to_spherical_transform = torch.cat([batch[k]['cartesian_to_spherical_transform'] for k in instrument_ids])
+        rtp_to_img_transform = torch.cat([batch[k]['rtp_to_img_transform'] for k in instrument_ids])
+        v_obs_los = torch.cat([batch[k]['v_obs_los'] for k in instrument_ids])
+        ds_lengths = {k: batch[k]['coords'].shape[0] for k in instrument_ids}
+
+        # apply random shift to time coordinate
+        # time_shift = torch.randn_like(coords[..., 0:1]) * 0.01  # small random shift
+        # coords = torch.cat([coords[..., 0:1] + time_shift, coords[..., 1:]], dim=-1)
 
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
+        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform, rtp_to_img_transform)
 
         #################################################
         # stokes profile synthesis
         forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
-        I, Q, U, V = self.forward_model(**forward_params, mu=mu)
-        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
+        current_idx = 0
+        stokes_pred_normalized = []
+        stokes_true_normalized = []
+        for ds_id, n_samples in ds_lengths.items():
+            ds_forward_params = {k: v[current_idx:current_idx + n_samples] for k, v in forward_params.items()}
+            ds_mu = batch[ds_id]['mu']
+            ds_lambda_grid = batch[ds_id]['lambda_grid']
+            current_idx += n_samples
+            I, Q, U, V = self.forward_models[ds_id](**ds_forward_params, lambda_grid=ds_lambda_grid, mu=ds_mu)
 
-        stokes_true = self.normalization(stokes_true / mu[..., None])
-        stokes_pred = self.normalization(stokes_pred / mu[..., None])
+            ds_stokes_pred = torch.stack([I, Q, U, V], dim=-2)
+            ds_stokes_true = batch[ds_id]['stokes']
 
-        stokes_loss = self.loss_function(stokes_pred, stokes_true)
+            stokes_true_normalized.append(self.normalization(ds_stokes_true / ds_mu[..., None]))
+            stokes_pred_normalized.append(self.normalization(ds_stokes_pred / ds_mu[..., None]))
+
+        #################################################
+        # compute stokes loss
+        stokes_pred_normalized = torch.cat(stokes_pred_normalized, dim=0)
+        stokes_true_normalized = torch.cat(stokes_true_normalized, dim=0)
+        stokes_loss = self.loss_function(stokes_pred_normalized, stokes_true_normalized)
 
         # sum over wavelength axis
         stokes_loss = stokes_loss.sum(-1)
@@ -111,7 +155,7 @@ class MESphericalModule(LightningModule):
 
         #################################################
         # compute physics losses
-        if self.lambda_induction == 0 and self.lambda_divergence == 0 and self.lambda_force_free == 0:
+        if all(v == 0 for v in self.lambdas.values()):
             # skip physics losses if not required
             physics_losses = {'induction': torch.zeros_like(stokes_loss[..., 0]),
                               'divergence': torch.zeros_like(stokes_loss[..., 0]),
@@ -120,7 +164,7 @@ class MESphericalModule(LightningModule):
             spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
             # get coordinate range for sampling points
             min_t, max_t = torch.min(coords[..., 0]), torch.max(coords[..., 0])
-            min_r, max_r = 0.997, 1.003  # define a shell of 0.04 Rs around the sun
+            min_r, max_r = 1.0, 1.01  # define a shell of 0.01 Rs around the sun
             min_th, max_th = torch.min(spherical_coords[..., 1]), torch.max(spherical_coords[..., 1])
             min_phi, max_phi = torch.min(spherical_coords[..., 2]), torch.max(spherical_coords[..., 2])
 
@@ -147,14 +191,14 @@ class MESphericalModule(LightningModule):
             # compute physics losses
             physics_losses = self.compute_physics_losses(b, v, random_coords)
 
-        static_loss = transformed_output['v_rtp'][..., 0:1].pow(2).sum(-1)
+        static_loss = transformed_output['v_rtp'].pow(2).sum(-1) + transformed_output['b_rtp'].pow(2).sum(-1)
 
         #################################################
         # compute total loss
         total_loss = (stokes_loss.mean() +
-                      self.lambda_induction * physics_losses['induction'].mean() +
-                      self.lambda_divergence * physics_losses['divergence'].mean() +
-                      self.lambda_force_free * physics_losses['force_free'].mean() +
+                      self.lambdas['induction'] * physics_losses['induction'].mean() +
+                      self.lambdas['divergence'] * physics_losses['divergence'].mean() +
+                      self.lambdas['force_free'] * physics_losses['force_free'].mean() +
                       self.lambda_static * static_loss.mean())
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
@@ -236,9 +280,9 @@ class MESphericalModule(LightningModule):
         dBz_dr = dBz_dx * dx_dr + dBz_dy * dy_dr + dBz_dz * dz_dr
         dB_dr = torch.stack([dBx_dr, dBy_dr, dBz_dr], -1)
 
-        return {'divergence':(divergence_loss + 1e-8).pow(1/6),
-                'force_free': (force_free_loss+ 1e-8).pow(1/6),
-                'induction': (induction_loss+ 1e-8).pow(1/6),
+        return {'divergence':(divergence_loss + 1e-8).pow(0.5),
+                'force_free': (force_free_loss+ 1e-8).pow(0.5),
+                'induction': (induction_loss+ 1e-8).pow(0.5),
                 'dB_dt': dB_dt.pow(2).sum(-1).pow(0.5),
                 'curl_VxB': induction_rhs.pow(2).sum(-1).pow(0.5),
                 'dB_dr': dB_dr.pow(2).sum(-1).pow(0.5),
@@ -247,6 +291,7 @@ class MESphericalModule(LightningModule):
     def scale_parameters(self, output, transformed_output, v_obs_los):
         v_dop = transformed_output['v_dop'] * self.meters_per_ds / self.seconds_per_dt
         v_dop = v_dop - v_obs_los  # add doppler correction - spacecraft velocity
+
 
         forward_params = {'b_field': transformed_output['b_field'] * self.gauss_per_dB,
                           'sin_inc2': transformed_output['sin_inc2'],
@@ -260,7 +305,7 @@ class MESphericalModule(LightningModule):
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
         return forward_params
 
-    def transform_parameters(self, output, cartesian_to_spherical_transform, rtp_to_img_transform):
+    def transform_parameters(self, output, coords, cartesian_to_spherical_transform, rtp_to_img_transform):
         # transform B
         b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
         b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
@@ -273,17 +318,13 @@ class MESphericalModule(LightningModule):
         # b_zeta = field * cos(gamma)
         b_field = torch.norm(b_img, dim=-1, keepdim=True)
 
-        # sin(pi - x) = sin(x)
-        # cos(pi - x) = -cos(x)
         sin_inc2 = (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2) / (b_field ** 2 + 1e-8)
-        cos_inc = -b_img[..., 2:3] / (b_field + 1e-8)  # flipped inclination angle
+        cos_inc = b_img[..., 2:3] / (b_field + 1e-8)
 
-        # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
-        # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
         # 2 * sin(x) * cos(x) = sin(2*x)
         # sin(x)**2 - cos(x)**2 = -cos(2*x)
-        sin2azi = 2 * b_img[..., 0:1] * b_img[..., 1:2] / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
-        cos2azi = (b_img[..., 0:1] ** 2 - b_img[..., 1:2] ** 2) / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
+        sin2azi = -2 * b_img[..., 0:1] * b_img[..., 1:2] / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
+        cos2azi = -(b_img[..., 0:1] ** 2 - b_img[..., 1:2] ** 2) / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
 
         # Shift polarizer position for HMI
         inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
@@ -292,7 +333,9 @@ class MESphericalModule(LightningModule):
         azi += torch.pi / 2  # azimuth is flipped in HMI
 
         # transform to carrington frame --> add rotation velocity
-        v_rot = carrington_rotation_velocity()  # in m/s
+        spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
+        latitude = spherical_coords[..., 1]  # theta in spherical coordinates
+        v_rot = carrington_rotation_velocity(latitude)  # in m/s
         v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt (model units)
 
         # transform V
@@ -320,6 +363,19 @@ class MESphericalModule(LightningModule):
 
         self.parameter_model.step(self.global_step)
 
+        for k in self.scheduled_lambda_config.keys():
+            value = self.lambdas[k]
+            if value > self.scheduled_lambda_config[k]['end']:
+                # update lambda value
+                gamma = self.scheduled_lambda_config[k]['gamma']
+                new_value = value * gamma
+                self.lambdas[k].copy_(new_value)
+            wandb.log({f"lambda.{k}": self.lambdas[k].item()})
+
+        # log scaling parameters
+        for k in self.forward_models.keys():
+            wandb.log({f"scaling.{k}": self.forward_models[k].scaling.item()})
+
         # log results to WANDB
         self.log("train", {k: v.mean() for k, v in outputs.items()})
 
@@ -331,28 +387,31 @@ class MESphericalModule(LightningModule):
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
         v_obs_los = batch['v_obs_los']
+        lambda_grid = batch['lambda_grid']
+        instrument_id = batch['instrument_id']
+
 
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, cartesian_to_spherical_transform, rtp_to_img_transform)
+        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform, rtp_to_img_transform)
         forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
 
-        I, Q, U, V = self.forward_model(**forward_params, mu=mu)
-
+        I, Q, U, V = self.forward_models[instrument_id](**forward_params, mu=mu, lambda_grid=lambda_grid)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        stokes_true = self.normalization(stokes_true / mu[..., None])
-        stokes_pred = self.normalization(stokes_pred / mu[..., None])
+        stokes_true_normalized = self.normalization(stokes_true / mu[..., None])
+        stokes_pred_normalized = self.normalization(stokes_pred / mu[..., None])
 
-        diff = torch.abs(stokes_true - stokes_pred)
+        diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
 
         b = transformed_output['b_xyz']
         v = transformed_output['v_xyz']
         physics_losses = self.compute_physics_losses(b, v, coords)
 
-        return {'diff': diff.detach(), 'stokes_true': stokes_true.detach(), 'stokes_pred': stokes_pred.detach(),
+        return {'diff': diff.detach(),
+                'stokes_true': stokes_true_normalized.detach(), 'stokes_pred': stokes_pred_normalized.detach(),
                 **forward_params,
                 'b_rtp': transformed_output['b_rtp'] * self.gauss_per_dB,
                 'v_rtp': transformed_output['v_rtp'] * self.meters_per_ds / self.seconds_per_dt,
@@ -364,6 +423,7 @@ class MESphericalModule(LightningModule):
                 'divergence': physics_losses['divergence'].detach(),
                 'force_free': physics_losses['force_free'].detach(),
                 'dB_dr': physics_losses['dB_dr'].detach(),
+                'mu': mu.detach(), 'v_obs_los': v_obs_los.detach()
                 }
 
     def validation_epoch_end(self, outputs_list):
@@ -389,7 +449,7 @@ class MESphericalModule(LightningModule):
         parameters = {}
         for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
                   'v_rtp', 'b_rtp', 'v_img', 'b_img',
-                  'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr']:
+                  'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr', 'mu', 'v_obs_los']:
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
 
@@ -404,8 +464,6 @@ class MESphericalModule(LightningModule):
 
         self.plot_stokes(stokes_pred, stokes_true)
 
-        # self.plot_profile(stokes_pred, stokes_true)
-
     def plot_physics_losses(self, parameters):
         induction = parameters['induction']
         dB_dt = parameters['dB_dt']
@@ -415,35 +473,35 @@ class MESphericalModule(LightningModule):
 
         fig, axs = plt.subplots(3, 3, figsize=(10, 6), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(induction, origin='lower')
+        im = ax.imshow(induction, origin='lower', norm='log')
         ax.set_title("Induction")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[0, 1]
-        im = ax.imshow(dB_dt, origin='lower')
+        im = ax.imshow(dB_dt, origin='lower', norm='log')
         ax.set_title("dB/dt")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[0, 2]
-        im = ax.imshow(curl_VxB, origin='lower')
+        im = ax.imshow(curl_VxB, origin='lower', norm='log')
         ax.set_title("Curl VxB")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 0]
-        im = ax.imshow(divergence, origin='lower')
+        im = ax.imshow(divergence, origin='lower', norm='log')
         ax.set_title("Divergence")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 1]
-        im = ax.imshow(dB_dr, origin='lower')
+        im = ax.imshow(dB_dr, origin='lower', norm='log')
         ax.set_title("dB/dr")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -453,7 +511,7 @@ class MESphericalModule(LightningModule):
         ax.set_axis_off()
 
         ax = axs[2, 0]
-        im = ax.imshow(parameters['force_free'], origin='lower')
+        im = ax.imshow(parameters['force_free'], origin='lower', norm='log')
         ax.set_title("force_free")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -569,7 +627,11 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 2]
-        ax.set_axis_off()
+        im = ax.imshow(parameters['mu'], origin='lower', vmin=0, vmax=1, cmap='cividis')
+        ax.set_title("Mu")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
         ax = axs[1, 3]
         vdop_max = np.nanmax(np.abs(parameters['vdop']))
         im = ax.imshow(parameters['vdop'], cmap='seismic_r', vmin=-vdop_max, vmax=vdop_max, origin='lower')
@@ -591,8 +653,7 @@ class MESphericalModule(LightningModule):
         b_rtp = parameters['b_rtp']
         b_img = parameters['b_img']
 
-        b_rtp_min_max = np.nanmax(np.abs(b_rtp))
-        norm = SymLogNorm(linthresh=1, vmin=-b_rtp_min_max, vmax=b_rtp_min_max)
+        norm = SymLogNorm(linthresh=10, vmin=-5000, vmax=5000)
 
         fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
 
@@ -681,7 +742,7 @@ class MESphericalModule(LightningModule):
         v_min_max = max(np.nanmax(np.abs(v_img)), np.nanmax(np.abs(v_rtp)))
         norm = Normalize(vmin=-v_min_max, vmax=v_min_max)
 
-        fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
+        fig, axs = plt.subplots(3, 3, figsize=(10, 7), dpi=150)
         ax = axs[0, 0]
         im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=norm)
         ax.set_title("$v_r$")
@@ -724,6 +785,19 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
+        ax = axs[2, 0]
+        im = ax.imshow(parameters['v_obs_los'], cmap='seismic_r', origin='lower', norm=norm)
+        ax.set_title("V_obs_los")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[2, 1]
+        ax.set_axis_off()
+
+        ax = axs[2, 2]
+        ax.set_axis_off()
+
         plt.tight_layout()
         wandb.log({"v": fig})
         plt.close('all')
@@ -731,3 +805,27 @@ class MESphericalModule(LightningModule):
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         # replace checkpoint lambda with the current lambda
         checkpoint['state_dict']['lambda_stokes'] = self.lambda_stokes.detach().cpu()
+
+        state_dict = checkpoint['state_dict']
+        # keep new lambdas
+        for k, v in self.lambdas.items():
+            if f"lambdas.{k}" not in state_dict:
+                print(f'Add lambda {k}: {v.data}')
+                state_dict[f'lambdas.{k}'] = v
+                continue
+            checkpoint_v = state_dict[f"lambdas.{k}"]
+            if k in self.scheduled_lambda_config or checkpoint_v == v:  # skip scheduled lambdas or same values
+                print(checkpoint_v, v.data)
+                continue
+            print(f'Update lambda {k}: {checkpoint_v} --> {v.data}')
+            state_dict[f'lambdas.{k}'] = v
+        # remove old lambdas
+        remove_keys = []
+        for k, v in state_dict.items():
+            if 'lambdas' in k and k.split('.')[1] not in self.lambdas.keys():
+                print(f'Remove lambda: {k}')
+                remove_keys.append(k)
+        [state_dict.pop(k) for k in remove_keys]
+
+        self.load_state_dict(state_dict, strict=False)
+        self.validation_outputs = {}  # reset validation outputs

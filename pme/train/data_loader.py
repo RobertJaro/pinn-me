@@ -17,7 +17,6 @@ from astropy.io.fits import getheader
 from astropy.nddata import block_reduce
 from dateutil.parser import parse
 from matplotlib import pyplot as plt
-from numpy import dtype
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
 from sklearn.utils import shuffle
@@ -33,18 +32,39 @@ class CombinedDataset(Dataset):
     def __init__(self, datasets, n_samples):
         super().__init__()
         self.datasets = datasets
-        self.sample_indices = shuffle([(i, j) for i, d in enumerate(datasets) for j in range(len(d))])
+        sample_indices = []
+        for i, d in enumerate(datasets):
+            indices = [(i, j) for j in range(len(d))] * d.oversample_factor
+            sample_indices += indices
+        self.sample_indices = shuffle(sample_indices)
         self.n_samples = n_samples
 
     def __len__(self):
         return len(self.sample_indices) // self.n_samples
 
     def __getitem__(self, idx):
-        batch = []
+        # get the samples for the current batch
+        batch = {}
         for i, j in self.sample_indices[idx * self.n_samples: (idx + 1) * self.n_samples]:
-            batch.append(self.datasets[i][j])
-        keys = list(batch[0].keys())
-        return {k: np.concatenate([b[k] for b in batch], 0) for k in keys}
+            instrument_id = self.datasets[i][j]['instrument_id']
+            if instrument_id not in batch:
+                batch[instrument_id] = {}
+            for tensor_key, tensor_value in self.datasets[i][j].items():
+                if tensor_key == 'instrument_id':
+                    continue
+                if tensor_key not in batch[instrument_id]:
+                    batch[instrument_id][tensor_key] = []
+                batch[instrument_id][tensor_key].append(tensor_value)
+
+        # concatenate tensors in the batch
+        concatenated_batch = {}
+        for ds_key, ds_value in batch.items():
+            # use the first instrument_id per dataset
+            value = {tensor_key: torch.cat(tensor_value)
+                     for tensor_key, tensor_value in ds_value.items()}
+            concatenated_batch[ds_key] = value
+        return concatenated_batch
+
 
 class BatchDataset(Dataset):
 
@@ -90,7 +110,8 @@ class BatchesDataset(Dataset):
 
     def __getitem__(self, idx):
         # lazy load data
-        data = {k: torch.tensor(v[idx * self.batch_size: (idx + 1) * self.batch_size], dtype=torch.float32) for k, v in self.data.items()}
+        data = {k: torch.tensor(v[idx * self.batch_size: (idx + 1) * self.batch_size], dtype=torch.float32) for k, v in
+                self.data.items()}
         return data
 
     def clear(self):

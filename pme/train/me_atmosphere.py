@@ -18,7 +18,7 @@ from pme.train.profile_functions import Voigt, FaradayVoigt
 class MEAtmosphere(nn.Module):
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, j_up, j_low, g_up, g_low, lambda_grid):
+    def __init__(self, lambda0, j_up, j_low, g_up, g_low, scaling_config=None):
         super().__init__()
 
         self.voigt = Voigt()
@@ -31,13 +31,14 @@ class MEAtmosphere(nn.Module):
         self.register_buffer('g_up', torch.tensor(g_up, dtype=torch.float32))  # Lande factor for upper level
         self.register_buffer('g_low', torch.tensor(g_low, dtype=torch.float32))
 
-        lambda_grid = torch.tensor(lambda_grid.to_value(u.m), dtype=torch.float32)
-        self.lambda_grid = nn.Parameter(lambda_grid, requires_grad=False)
-
         zeeman_strength_lookup = load_zeeman_lookup(j_up, j_low)
         zeeman_strength_lookup = {k: nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
                                   for k, v in zeeman_strength_lookup.items()}
         self.zeeman_strength_lookup = nn.ParameterDict(zeeman_strength_lookup)
+
+        scaling_config = {'value': 0.0, 'learnable': False} if scaling_config is None else scaling_config
+        self.scaling = nn.Parameter(torch.tensor(scaling_config['value'], dtype=torch.float32),
+                                    requires_grad=scaling_config['learnable'])
 
     def calculate_voigt_faraday_profiles(self, nu, nu_m, damping, lambda_dop, **kwargs):
         gamma = torch.ones_like(nu) * damping  # [batch, n_lambda]
@@ -165,10 +166,10 @@ class MEAtmosphere(nn.Module):
     def d_lambda(self, vmac, **kwargs):
         return self.lambda0 * vmac / self.c
 
-    def nu(self, d_lambda, **kwargs):
-        return self.lambda_grid[None, :] / d_lambda
+    def nu(self, d_lambda, lambda_grid, **kwargs):
+        return lambda_grid / d_lambda
 
-    def forward(self, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
+    def forward(self, lambda_grid, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
         # sin2azi = sin(2 * azi)
         # cos2azi = cos(2 * azi)
         # sin_inc2 = sin(inc) ** 2
@@ -177,7 +178,8 @@ class MEAtmosphere(nn.Module):
         state = {'b_field': b_field,
                  'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'cos2azi': cos2azi, 'sin2azi': sin2azi,
                  'vmac': vmac, 'damping': damping,
-                 'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl}
+                 'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl,
+                 'lambda_grid': lambda_grid}
 
         # base profile properties
         state['d_lambda'] = self.d_lambda(**state)
@@ -203,4 +205,47 @@ class MEAtmosphere(nn.Module):
         Q = self.compute_Q(**state)
         U = self.compute_U(**state)
         V = self.compute_V(**state)
+
+        # apply instrument scaling
+        scaling = 10 ** self.scaling
+        I = I * scaling
+        Q = Q * scaling
+        U = U * scaling
+        V = V * scaling
+        # return the Stokes parameters
         return I, Q, U, V
+
+
+class HMIMEAtmosphere(MEAtmosphere):
+    ''' Class to contain the HMI ME atmosphere properties'''
+
+    def __init__(self, **kwargs):
+        j_up = 1.0
+        j_low = 0.0
+        g_up = 2.50
+        g_low = 0.0
+        super().__init__(j_up=j_up, j_low=j_low, g_up=g_up, g_low=g_low, **kwargs)
+
+    def forward(self, cos_inc, sin2azi, cos2azi, **kwargs):
+        # apply angle transformation to the HMI polarizer
+        # sin(pi - x) = sin(x)
+        # cos(pi - x) = -cos(x)
+        cos_inc = -cos_inc
+        # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
+        # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
+        sin2azi = -sin2azi
+        cos2azi = -cos2azi
+        return super().forward(cos_inc=cos_inc, sin2azi=sin2azi, cos2azi=cos2azi, **kwargs)
+
+class PHIMEAtmosphere(MEAtmosphere):
+    ''' Class to contain the PHI ME atmosphere properties'''
+
+    def __init__(self, **kwargs):
+        j_up = 1.0
+        j_low = 0.0
+        g_up = 2.50
+        g_low = 0.0
+        super().__init__(j_up=j_up, j_low=j_low, g_up=g_up, g_low=g_low, **kwargs)
+
+    def forward(self, **kwargs):
+        return super().forward(**kwargs)
