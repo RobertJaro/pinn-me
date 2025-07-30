@@ -20,20 +20,20 @@ instrument:
     scaling_config: {value: 0.0, learnable: false}
   - type: 'hmi'
     instrument_id: 'HMI'
-    scaling_config: {value: 0.0, learnable: true}
+    scaling_config: {value: 0.03677, learnable: true}
 
 logging:
   project: pinn-me-spherical
   tags: [ "hmi" ]
   name: "2024-04-27 physics full-disk"
 model:
-  encoding: "progressive_fourier"
+  encoding: "default"
   w0_initial: 100
 training:
   epochs: 500
   lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0.0
-  lambda_divergence: 0.0
+  lambda_induction: 1.0e-3
+  lambda_divergence: 1.0e-3
   lambda_force_free: 0.0
   lambda_static: 0.0
   check_val_every_n_epoch: 1

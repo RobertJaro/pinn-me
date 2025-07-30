@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/combined_fd_20240327_v05"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/combined_fd_20240327_v05"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/combined_fd_20240327_v06"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/combined_fd_20240327_v06"
 data:
   train_configs:
     - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240327_720s", stokes_normalization: 5.0e+4, instrument_id: 'HMI'}

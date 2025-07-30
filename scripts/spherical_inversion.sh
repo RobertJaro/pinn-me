@@ -2,7 +2,7 @@
 
 #PBS -N pinn-me
 #PBS -A P22100000
-#PBS -q main
+#PBS -q casper
 #PBS -l job_priority=economy
 #PBS -l select=1:ncpus=32:ngpus=4:mem=256gb
 #PBS -l walltime=12:00:00

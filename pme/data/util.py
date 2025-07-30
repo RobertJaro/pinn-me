@@ -18,7 +18,16 @@ def spherical_to_cartesian_matrix(c):
 
 
 def cartesian_to_spherical_matrix(c):
-    return np.linalg.inv(spherical_to_cartesian_matrix(c))
+    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    sin = np.sin
+    cos = np.cos
+    #
+    matrix = [cos(t) * cos(p), cos(t) * sin(p), sin(t),
+              -sin(t) * cos(p), -sin(t) * sin(p), cos(t),
+              -sin(p), cos(p), np.zeros_like(p)]
+    matrix = np.stack(matrix, axis=-1).reshape((*c.shape[:-1], 3, 3))
+    #
+    return matrix
 
 
 def spherical_to_cartesian(v, f=np):

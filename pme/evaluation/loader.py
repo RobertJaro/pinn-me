@@ -23,9 +23,10 @@ class PINNMEOutput:
         self.lambda_config = state['lambda_config']
         self.data_range = state['data_range']
 
-        self.forward_model = MEAtmosphere(**self.lambda_config).to(self.device)
-        self.forward_model = nn.DataParallel(self.forward_model)
-        self.forward_model.eval()
+        lambda_config = list(self.lambda_config.values())[0] # use first instrument as default
+        # self.forward_model = MEAtmosphere(**lambda_config).to(self.device)
+        # self.forward_model = nn.DataParallel(self.forward_model)
+        # self.forward_model.eval()
 
         self.times = state['times']
         self.ref_time = state['ref_time']

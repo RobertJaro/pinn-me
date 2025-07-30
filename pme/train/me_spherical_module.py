@@ -191,7 +191,7 @@ class MESphericalModule(LightningModule):
             # compute physics losses
             physics_losses = self.compute_physics_losses(b, v, random_coords)
 
-        static_loss = transformed_output['v_rtp'].pow(2).sum(-1) + transformed_output['b_rtp'].pow(2).sum(-1)
+        static_loss = transformed_output['v_rtp'][..., 0:1].pow(2).sum(-1)
 
         #################################################
         # compute total loss
@@ -280,9 +280,9 @@ class MESphericalModule(LightningModule):
         dBz_dr = dBz_dx * dx_dr + dBz_dy * dy_dr + dBz_dz * dz_dr
         dB_dr = torch.stack([dBx_dr, dBy_dr, dBz_dr], -1)
 
-        return {'divergence':(divergence_loss + 1e-8).pow(0.5),
-                'force_free': (force_free_loss+ 1e-8).pow(0.5),
-                'induction': (induction_loss+ 1e-8).pow(0.5),
+        return {'divergence':divergence_loss,
+                'force_free': force_free_loss,
+                'induction': induction_loss,
                 'dB_dt': dB_dt.pow(2).sum(-1).pow(0.5),
                 'curl_VxB': induction_rhs.pow(2).sum(-1).pow(0.5),
                 'dB_dr': dB_dr.pow(2).sum(-1).pow(0.5),
