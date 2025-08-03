@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_no_physics_v03"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_VP_v01"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/201102_physics_v01"
 data:
   train_configs:
@@ -7,7 +7,7 @@ data:
   valid_config: {type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/201102_3h", sample_idx: 20, stokes_normalization: 5.0e+4, instrument_id: 'HMI'}
   ref_time: "2011-02-10T00:00:00"
   num_workers: 16
-  batch_size: 32768
+  batch_size: 16384
   dataset_batch_size: 8192
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
@@ -19,14 +19,16 @@ instrument:
 logging:
   project: pinn-me-spherical
   tags: ["hmi"]
-  name: "2010-02 - 3h - no physics"
+  name: "2010-02 - 3h - VP"
 model:
   encoding: "default"
   w0_initial: 100
+  vector_potential: true
 training:
   epochs: 500
+  lr_params: {start: 1.0e-4, end: 1.0e-5, iterations: 1.0e+5}
   lambda_stokes: [ 1, 1, 1, 1 ]
   lambda_induction: 0.0
   lambda_divergence: 0.0
-  lambda_force_free: 0.0
+  lambda_force_free: 0.0 #{ start: 1.0e-1, end: 1.0e-4, iterations: 5.0e+4 }
   lambda_static: 0.0

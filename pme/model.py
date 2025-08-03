@@ -114,7 +114,7 @@ class GenericModel(nn.Module):
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_dim, scale=64)#, scale=8)
+            posenc = GaussianPositionalEncoding(d_input=in_dim, scale=64)
             d_in = nn.Linear(posenc.d_output, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "progressive_fourier":
@@ -155,18 +155,34 @@ class GenericModel(nn.Module):
         out = self.d_out(x)
         return out
 
+
 class MESphericalModel(SirenModel):
 
-    def __init__(self, **kwargs):
+    def __init__(self, vector_potential=False, **kwargs):
         super().__init__(in_dim=4, out_dim=13, **kwargs)
+        self.vector_potential = vector_potential
 
     def forward(self, x):
         params = super().forward(x)
         #
-        b_x = params[..., 0:1]
-        b_y = params[..., 1:2]
-        b_z = params[..., 2:3]
-        #
+        if self.vector_potential:
+            a = params[..., 0:3]
+            jac_matrix = jacobian(a, x)
+            dAy_dx = jac_matrix[:, 1, 1]
+            dAz_dx = jac_matrix[:, 2, 1]
+            dAx_dy = jac_matrix[:, 0, 2]
+            dAz_dy = jac_matrix[:, 2, 2]
+            dAx_dz = jac_matrix[:, 0, 3]
+            dAy_dz = jac_matrix[:, 1, 3]
+            # B = curl(A)
+            b_x = (dAz_dy - dAy_dz)[..., None]
+            b_y = (dAx_dz - dAz_dx)[..., None]
+            b_z = (dAy_dx - dAx_dy)[..., None]
+        else:
+            b_x = params[..., 0:1]
+            b_y = params[..., 1:2]
+            b_z = params[..., 2:3]
+
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
@@ -215,6 +231,7 @@ class NormalizationModule(nn.Module):
         stokes = torch.asinh(stokes * 1e1) / self.stretch
         return stokes
 
+
 class INormalizationModule(nn.Module):
 
     def __init__(self):
@@ -229,7 +246,7 @@ class INormalizationModule(nn.Module):
 
 
 class ProjectionModel(SirenModel):
-    def __init__(self, Mm_per_ds, max_shift_Mm = 1, **kwargs):
+    def __init__(self, Mm_per_ds, max_shift_Mm=1, **kwargs):
         super().__init__(4, 1, dim=32, n_layers=4, **kwargs)
         self.max_shift = max_shift_Mm / Mm_per_ds  # convert to model units
 

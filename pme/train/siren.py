@@ -57,6 +57,9 @@ class SirenModel(nn.Module):
         elif encoding == "default":
             self.posenc = SirenLayer(in_dim=in_dim, out_dim=dim, w0=w0_initial, is_first=True)
             posenc_dim = dim
+        elif encoding == "time_split":
+            self.posenc = TimeSplitEncoding(in_dim=in_dim, dim=dim, w0=w0_initial)
+            posenc_dim = self.posenc.d_output
         else:
             raise ValueError(f"Unknown encoding: {encoding}")
 
@@ -95,3 +98,17 @@ class Sine(nn.Module):
 
     def forward(self, x):
         return torch.sin(self.w0 * x)
+
+
+class TimeSplitEncoding(nn.Module):
+    def __init__(self, in_dim, dim, w0=100.0):
+        super().__init__()
+        self.layer = SirenLayer(in_dim=in_dim - 1, out_dim=dim, w0=w0, is_first=True)
+        self.d_output = dim + 1
+
+    def forward(self, x):
+        time = x[..., :1]
+        spatial = x[..., 1:]
+        encoded = self.layer(spatial)
+        encoded = torch.cat([time, encoded], -1)
+        return encoded

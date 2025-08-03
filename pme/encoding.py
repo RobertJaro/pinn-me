@@ -64,8 +64,8 @@ class ProgressiveFourierEncoding(nn.Module):
 
         sin = torch.sin(freqs) * self.weights[..., :, None]  # [..., n_freqs, in_dim]
         cos = torch.cos(freqs) * self.weights[..., :, None]  # [..., n_freqs, in_dim]
-        sin = sin.view(*sin.shape[:-2], -1) # [..., n_freqs * in_dim]
-        cos = cos.view(*cos.shape[:-2], -1) # [..., n_freqs * in_dim]
+        sin = sin.view(*sin.shape[:-2], -1)  # [..., n_freqs * in_dim]
+        cos = cos.view(*cos.shape[:-2], -1)  # [..., n_freqs * in_dim]
         feat = torch.cat([coords, sin, cos], dim=-1)  # [..., (2 * n_freqs + 1) * in_dim]
 
         return feat  # [B, out_dim]

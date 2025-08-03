@@ -135,8 +135,8 @@ class MESphericalModule(LightningModule):
             ds_stokes_pred = torch.stack([I, Q, U, V], dim=-2)
             ds_stokes_true = batch[ds_id]['stokes']
 
-            stokes_true_normalized.append(self.normalization(ds_stokes_true / ds_mu[..., None]))
-            stokes_pred_normalized.append(self.normalization(ds_stokes_pred / ds_mu[..., None]))
+            stokes_true_normalized.append(self.normalization(ds_stokes_true))
+            stokes_pred_normalized.append(self.normalization(ds_stokes_pred))
 
         #################################################
         # compute stokes loss
@@ -272,9 +272,9 @@ class MESphericalModule(LightningModule):
         # y = r * cos(t) * sin(p)
         # z = r * sin(t)
         spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
-        dx_dr = torch.cos(spherical_coords[..., 1]) * torch.cos(spherical_coords[..., 2])
-        dy_dr = torch.cos(spherical_coords[..., 1]) * torch.sin(spherical_coords[..., 2])
-        dz_dr = torch.sin(spherical_coords[..., 1])
+        dx_dr = torch.sin(spherical_coords[..., 1]) * torch.cos(spherical_coords[..., 2])
+        dy_dr = torch.sin(spherical_coords[..., 1]) * torch.sin(spherical_coords[..., 2])
+        dz_dr = torch.cos(spherical_coords[..., 1])
         dBx_dr = dBx_dx * dx_dr + dBx_dy * dy_dr + dBx_dz * dz_dr
         dBy_dr = dBy_dx * dx_dr + dBy_dy * dy_dr + dBy_dz * dz_dr
         dBz_dr = dBz_dx * dx_dr + dBz_dy * dy_dr + dBz_dz * dz_dr
@@ -334,7 +334,8 @@ class MESphericalModule(LightningModule):
 
         # transform to carrington frame --> add rotation velocity
         spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
-        latitude = spherical_coords[..., 1]  # theta in spherical coordinates
+        colatitude = spherical_coords[..., 1]  # theta in spherical coordinates
+        latitude = torch.pi / 2 - colatitude  # convert to latitude
         v_rot = carrington_rotation_velocity(latitude)  # in m/s
         v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt (model units)
 
@@ -401,8 +402,8 @@ class MESphericalModule(LightningModule):
         I, Q, U, V = self.forward_models[instrument_id](**forward_params, mu=mu, lambda_grid=lambda_grid)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        stokes_true_normalized = self.normalization(stokes_true / mu[..., None])
-        stokes_pred_normalized = self.normalization(stokes_pred / mu[..., None])
+        stokes_true_normalized = self.normalization(stokes_true)
+        stokes_pred_normalized = self.normalization(stokes_pred)
 
         diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
 

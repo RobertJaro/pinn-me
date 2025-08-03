@@ -36,15 +36,16 @@ if __name__ == '__main__':
 
     # resolution = 0.05 # degrees
 
-    # latitude_range = [-30, -10]
-    # longitude_range = [25, 45]
-    resolution = 1
-    latitude_range = [-90, 90]
-    longitude_range = [0, 360]
+    latitude_range = [-30, -10]
+    longitude_range = [25, 45]
+    # latitude_range = [-90, 90]
+    # longitude_range = [0, 360]
+    resolution = 0.1
 
     latitude = np.deg2rad(np.linspace(latitude_range[0], latitude_range[1], int((latitude_range[1] - latitude_range[0] + 1) // resolution)))
+    colatitude = np.pi / 2 - latitude  # convert to colatitude
     longitude = np.deg2rad(np.linspace(longitude_range[0], longitude_range[1], int((longitude_range[1] - longitude_range[0] + 1) // resolution)))
-    spherical_coords = np.stack(np.meshgrid([1], latitude, longitude, indexing='ij'), -1)  # r, theta, phi
+    spherical_coords = np.stack(np.meshgrid([1], colatitude, longitude, indexing='ij'), -1)  # r, theta, phi
     spherical_coords = spherical_coords.squeeze(0)
     cartesian_coords = spherical_to_cartesian(spherical_coords)
 

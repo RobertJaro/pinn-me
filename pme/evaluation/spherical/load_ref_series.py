@@ -52,9 +52,10 @@ if __name__ == '__main__':
 
         coords = all_coordinates_from_map(ref_map).transform_to(frames.HeliographicCarrington)
         lat, lon = coords.lat.to_value(u.rad), coords.lon.to_value(u.rad)
+        colat = np.pi / 2 - lat  # convert to colatitude
         r = np.ones_like(lat)  # coords.radius.to_value(u.solRad)
 
-        spherical_coords = np.stack([r, lat, lon], axis=-1)
+        spherical_coords = np.stack([r, colat, lon], axis=-1)
         #
         cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
         time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
@@ -70,12 +71,10 @@ if __name__ == '__main__':
         b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1)
         b_xyz *= pinnme.gauss_per_dB
         b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-        # b_rtp[..., 1] *= -1  # flip theta component
 
         v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1)
         v_xyz *= pinnme.meters_per_ds / pinnme.seconds_per_dt / 1000  # convert to km/s
         v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-        # v_rtp[..., 1] *= -1  # flip theta component
 
         b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
         v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
@@ -159,11 +158,11 @@ if __name__ == '__main__':
         ax.set_title(r'$v_\text{LOS}$ [km/s]')
 
         ax = axs[3, 1]
-        im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=-90, vmax=90, origin='lower')
+        im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=0, vmax=180, origin='lower')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'Latitude [deg]')
-        ax.set_title(r'Latitude [deg]')
+        fig.colorbar(im, cax=cax, orientation='vertical', label=r'Colatitude [deg]')
+        ax.set_title(r'Colatitude [deg]')
 
         ax = axs[3, 2]
         im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', vmin=0, vmax=360, origin='lower')

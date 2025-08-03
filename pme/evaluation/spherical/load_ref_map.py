@@ -10,7 +10,7 @@ from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
-    image_to_spherical_matrix
+    image_to_spherical_matrix, spherical_to_cartesian_matrix
 from pme.evaluation.loader import PINNMEOutput
 
 if __name__ == '__main__':
@@ -49,7 +49,7 @@ if __name__ == '__main__':
     lat, lon = coords.lat.to_value(u.rad), coords.lon.to_value(u.rad)
     r = np.ones_like(lat)  # coords.radius.to_value(u.solRad)
 
-    spherical_coords = np.stack([r, lat, lon], axis=-1)
+    spherical_coords = np.stack([r, np.pi / 2 - lat, lon], axis=-1)
     #
     cartesian_coords = spherical_to_cartesian(spherical_coords)
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
@@ -98,7 +98,7 @@ if __name__ == '__main__':
     b_img_ref = np.stack([b_xi, b_eta, b_zeta], axis=-1)
 
     b_rtp_ref = np.einsum('...ij,...j->...i', a_matrix, b_img_ref)
-    spherical_to_cartesian_matrix = np.linalg.inv(cartesian_to_spherical_transform)
+    spherical_to_cartesian_matrix = spherical_to_cartesian_matrix(spherical_coords)
     b_xyz_ref = np.einsum('...ij,...j->...i', spherical_to_cartesian_matrix, b_rtp_ref)
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
@@ -270,7 +270,7 @@ if __name__ == '__main__':
     ax.set_title('Radius')
 
     ax = axs[0, 1]
-    im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='PiYG', origin='lower', vmin=-90, vmax=90)
+    im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='PiYG', origin='lower', vmin=0, vmax=180)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [deg]')

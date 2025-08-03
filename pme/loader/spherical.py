@@ -150,7 +150,7 @@ class SphericalDataModule(LightningDataModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Integrated V')
 
-        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic', vmin=-np.pi / 2, vmax=np.pi / 2)
+        im = axs[1].imshow(ds.latitude, origin='lower', cmap='seismic', vmin=0, vmax=np.pi)
         divider = make_axes_locatable(axs[1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [rad]')
@@ -403,7 +403,8 @@ def load_map_data(s_map):
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
     r = np.ones_like(lon)  # carrington_coords.radius
     # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-    carrington_coords = np.stack([r, lat, lon], -1)
+    # convert latitude to colatitude
+    carrington_coords = np.stack([r,  np.pi / 2 - lat, lon], -1)
 
     # create rtp transform
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)
