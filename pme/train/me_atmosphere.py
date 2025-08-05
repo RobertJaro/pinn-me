@@ -226,7 +226,7 @@ class HMIMEAtmosphere(MEAtmosphere):
         g_low = 0.0
         super().__init__(j_up=j_up, j_low=j_low, g_up=g_up, g_low=g_low, **kwargs)
 
-    def forward(self, cos_inc, sin2azi, cos2azi, **kwargs):
+    def forward(self, cos_inc, sin2azi, cos2azi, vdop, **kwargs):
         # apply angle transformation to the HMI polarizer
         # sin(pi - x) = sin(x)
         # cos(pi - x) = -cos(x)
@@ -235,7 +235,9 @@ class HMIMEAtmosphere(MEAtmosphere):
         # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
         sin2azi = -sin2azi
         cos2azi = -cos2azi
-        return super().forward(cos_inc=cos_inc, sin2azi=sin2azi, cos2azi=cos2azi, **kwargs)
+        # flip the vdop sign, analogous to inclination angle
+        vdop = -vdop
+        return super().forward(cos_inc=cos_inc, sin2azi=sin2azi, cos2azi=cos2azi, vdop=vdop, **kwargs)
 
 class PHIMEAtmosphere(MEAtmosphere):
     ''' Class to contain the PHI ME atmosphere properties'''

@@ -4,9 +4,8 @@ import os.path
 
 import numpy as np
 from astropy import units as u
-from astropy.coordinates import SkyCoord
 from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize, SymLogNorm
+from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map

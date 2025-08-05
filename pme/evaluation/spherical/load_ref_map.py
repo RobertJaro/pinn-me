@@ -3,15 +3,18 @@ import os.path
 
 import numpy as np
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize, SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
 
+from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix, spherical_to_cartesian_matrix
 from pme.evaluation.loader import PINNMEOutput
+from pme.loader.spherical import load_v_observer_LOS
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -20,14 +23,10 @@ if __name__ == '__main__':
     parser.add_argument('--ref_map_inc', type=str, help='the path to the reference map inc')
     parser.add_argument('--ref_map_azi', type=str, help='the path to the reference map azi')
     parser.add_argument('--ref_map_disambig', type=str, help='the path to the reference map disambig')
+    parser.add_argument('--ref_map_vlos_mag', type=str, help='the path to the reference map vlos_mag')
     parser.add_argument('--output', type=str, help='the path to the output file', default=None)
+    parser.add_argument('--hpc_range', type=float, nargs=4, default=None, required=False)
     args = parser.parse_args()
-
-    # y_min = 2048 - 1024
-    # y_max = y_min + 2048
-    # x_min = 2048 - 1024
-    # x_max = x_min + 2048
-    x_min = x_max = y_min = y_max = None
 
     in_path = args.input
 
@@ -40,6 +39,13 @@ if __name__ == '__main__':
 
     # load reference maps
     ref_map = Map(args.ref_map_fld)
+
+    # convert HPC min/max to world pixel coordinates
+    if args.hpc_range is not None:
+        min_hpc_x, max_hpc_x, min_hpc_y, max_hpc_y = args.hpc_range
+        bl_coord = SkyCoord(Tx=min_hpc_x * u.arcsec, Ty=min_hpc_y * u.arcsec, frame=ref_map.coordinate_frame)
+        tr_coord = SkyCoord(Tx=max_hpc_x * u.arcsec, Ty=max_hpc_y * u.arcsec, frame=ref_map.coordinate_frame)
+        ref_map = ref_map.submap(bottom_left=bl_coord, top_right=tr_coord)
 
     # load time
     target_time = ref_map.date.to_datetime()
@@ -64,10 +70,6 @@ if __name__ == '__main__':
     parameter_cube = pinnme.load_parameters(coords=coords)
     b_xyz= np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1) * pinnme.gauss_per_dB
     b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-
-    v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1) * pinnme.meters_per_ds / pinnme.seconds_per_dt
-    v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-
     b_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, b_rtp)
 
     fld = np.linalg.norm(b_img, axis=-1, keepdims=True)
@@ -77,12 +79,28 @@ if __name__ == '__main__':
     inc = np.rad2deg(inc)
     azi = np.rad2deg(azi)
 
+    v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1) * pinnme.meters_per_ds / pinnme.seconds_per_dt
+    v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+    v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
+
     ########################################################################################################################
     # load reference map
-    fld_ref = Map(args.ref_map_fld).data
-    inc_ref = Map(args.ref_map_inc).data
-    azi_ref = Map(args.ref_map_azi).data
-    amb_ref = Map(args.ref_map_disambig).data
+    fld_ref = Map(args.ref_map_fld).reproject_to(ref_map.wcs).data
+    inc_ref = Map(args.ref_map_inc).reproject_to(ref_map.wcs).data
+    azi_ref = Map(args.ref_map_azi).reproject_to(ref_map.wcs).data
+    amb_ref = Map(args.ref_map_disambig).reproject_to(ref_map.wcs).data
+    vlos_ref = Map(args.ref_map_vlos_mag).reproject_to(ref_map.wcs).data
+    vlos_ref = vlos_ref / 100  # convert cm/s to m/s
+
+    # correct for observer LOS
+    v_obs_los = load_v_observer_LOS(ref_map)
+    vlos_ref = vlos_ref - v_obs_los
+
+    # correct for carrington rotation
+    v_carr = carrington_rotation_velocity(latitude=lat, f=np)
+    v_carr_rtp = np.stack([np.zeros_like(v_carr), np.zeros_like(v_carr), v_carr], axis=-1)
+    v_carr_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_carr_rtp)
+    vlos_ref = vlos_ref + v_carr_img[..., 2]  # subtract LOS component of carrington rotation velocity
 
     # disambiguate
     amb_weak = 2
@@ -153,9 +171,6 @@ if __name__ == '__main__':
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
     [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
-
-    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
-    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
 
     # add subtitle with date
     plt.suptitle(f'Map at {target_time}', fontsize=16)
@@ -246,9 +261,6 @@ if __name__ == '__main__':
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
 
 
-    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
-    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
-
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     axs[0, 0].set_ylabel('PINN ME')
@@ -308,9 +320,6 @@ if __name__ == '__main__':
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     axs[0, 0].set_ylabel('Spherical Coordinates')
     axs[1, 0].set_ylabel('Cartesian Coordinates')
-
-    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
-    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
 
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'coordinates.jpg'), dpi=300)
@@ -388,9 +397,6 @@ if __name__ == '__main__':
     axs[0, 0].set_ylabel('Spherical Coordinates')
     axs[1, 0].set_ylabel('Cartesian Coordinates')
 
-    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
-    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
-
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'cartesian.jpg'), dpi=300)
     plt.close()
@@ -399,56 +405,64 @@ if __name__ == '__main__':
     # plot velocity
     v_norm = Normalize(vmin=-2000, vmax=2000)
 
-    fig, axs = plt.subplots(2, 3, figsize=(10, 5), subplot_kw={'projection': ref_map})
+    fig, axs = plt.subplots(3, 3, figsize=(12, 8), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
-    im = ax.imshow(b_rtp[..., 0], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
-    ax.set_title('PINN ME $B_r$')
-
-    ax = axs[0, 1]
-    im = ax.imshow(b_rtp[..., 1], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
-    ax.set_title('PINN ME $B_t$')
-
-    ax = axs[0, 2]
-    im = ax.imshow(b_rtp[..., 2], cmap='gray', origin='lower', vmin=-1000, vmax=1000)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
-    ax.set_title('PINN ME $B_p$')
-
-    ax = axs[1, 0]
-    im = ax.imshow(v_rtp[..., 0], cmap='RdBu', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 0], cmap='seismic', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r}$ [m/s]')
     ax.set_title('PINN ME $v_r$')
 
-    ax = axs[1, 1]
-    im = ax.imshow(v_rtp[..., 1], cmap='RdBu', origin='lower', norm=v_norm)
+    ax = axs[0, 1]
+    im = ax.imshow(v_rtp[..., 1], cmap='seismic', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{t}$ [m/s]')
     ax.set_title('PINN ME $v_t$')
 
-    ax = axs[1, 2]
-    im = ax.imshow(v_rtp[..., 2], cmap='RdBu', origin='lower', norm=v_norm)
+    ax = axs[0, 2]
+    im = ax.imshow(v_rtp[..., 2], cmap='seismic', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{p}$ [m/s]')
     ax.set_title('PINN ME $v_p$')
 
+    ax = axs[1, 0]
+    im = ax.imshow(v_img[..., 0], cmap='seismic', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_x$ [m/s]')
+    ax.set_title('PINN ME $v_x$')
+
+    ax = axs[1, 1]
+    im = ax.imshow(v_img[..., 1], cmap='seismic', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_y$ [m/s]')
+    ax.set_title('PINN ME $v_y$')
+
+    ax = axs[1, 2]
+    im = ax.imshow(v_img[..., 2], cmap='seismic', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_z$ [m/s]')
+    ax.set_title('PINN ME $v_z$')
+
+    axs[2, 0].axis('off')
+    axs[2, 1].axis('off')
+
+    ax = axs[2, 2]
+    im = ax.imshow(vlos_ref, cmap='seismic', origin='lower', norm=v_norm)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{los}$ [m/s]')
+    ax.set_title(r'Reference $v_\text{LOS}$')
+
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
     [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
-    [ax.set_xlim(x_min, x_max) for ax in axs.flatten()]
-    [ax.set_ylim(y_min, y_max) for ax in axs.flatten()]
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'velocity.jpg'), dpi=300)
     plt.close()

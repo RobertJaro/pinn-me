@@ -151,7 +151,7 @@ class MESphericalModule(LightningModule):
         I_loss, Q_loss, U_loss, V_loss = stokes_loss.mean(dim=0)
 
         # weighted loss - apply lambda weights for each stokes parameter
-        stokes_loss = stokes_loss * self.lambda_stokes[None, :]
+        stokes_loss = (stokes_loss * self.lambda_stokes[None, :]).sum(-1)
 
         #################################################
         # compute physics losses
@@ -206,6 +206,7 @@ class MESphericalModule(LightningModule):
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss,
+                "stokes_loss": stokes_loss,
                 "induction_loss": physics_losses['induction'].mean(),
                 "divergence_loss": physics_losses['divergence'].mean(),
                 "force_free_loss": physics_losses['force_free'].mean(),
@@ -290,8 +291,7 @@ class MESphericalModule(LightningModule):
 
     def scale_parameters(self, output, transformed_output, v_obs_los):
         v_dop = transformed_output['v_dop'] * self.meters_per_ds / self.seconds_per_dt
-        v_dop = v_dop - v_obs_los  # add doppler correction - spacecraft velocity
-
+        v_dop = v_dop + v_obs_los  # add doppler correction - spacecraft velocity
 
         forward_params = {'b_field': transformed_output['b_field'] * self.gauss_per_dB,
                           'sin_inc2': transformed_output['sin_inc2'],
@@ -342,7 +342,7 @@ class MESphericalModule(LightningModule):
         # transform V
         v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
         v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
-        v_rtp_alt = torch.stack([v_rtp[..., 0], v_rtp[..., 1], v_rtp[..., 2] + v_rot], dim=-1)
+        v_rtp_alt = torch.stack([v_rtp[..., 0], v_rtp[..., 1], v_rtp[..., 2] - v_rot], dim=-1)
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp_alt)
 
         v_dop = v_img[..., 2:3]
@@ -739,55 +739,56 @@ class MESphericalModule(LightningModule):
     def plot_v_rtp(self, parameters):
         v_rtp = parameters['v_rtp']
         v_img = parameters['v_img']
+        v_cmap = 'seismic'
 
         v_min_max = max(np.nanmax(np.abs(v_img)), np.nanmax(np.abs(v_rtp)))
         norm = Normalize(vmin=-v_min_max, vmax=v_min_max)
 
         fig, axs = plt.subplots(3, 3, figsize=(10, 7), dpi=150)
         ax = axs[0, 0]
-        im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_rtp[..., 0], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title("$v_r$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[0, 1]
-        im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_rtp[..., 1], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title("$v_t$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[0, 2]
-        im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_rtp[..., 2], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title("$v_p$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 0]
-        im = ax.imshow(v_img[..., 0], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 0], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title(r"$v_\text{xi}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 1]
-        im = ax.imshow(v_img[..., 1], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 1], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title(r"$v_\text{eta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 2]
-        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 2], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title(r"$v_\text{zeta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[2, 0]
-        im = ax.imshow(parameters['v_obs_los'], cmap='seismic_r', origin='lower', norm=norm)
+        im = ax.imshow(parameters['v_obs_los'], cmap=v_cmap, origin='lower', norm=norm)
         ax.set_title("V_obs_los")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)

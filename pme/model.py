@@ -224,11 +224,11 @@ class NormalizationModule(nn.Module):
     def __init__(self, value_range):
         super().__init__()
         self.register_buffer("value_range", torch.tensor(value_range, dtype=torch.float32)[None, :, None, :])
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e3), dtype=torch.float32))
 
     def forward(self, stokes):
         stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
-        stokes = torch.asinh(stokes * 1e1) / self.stretch
+        stokes = torch.asinh(stokes * 1e3) / self.stretch
         return stokes
 
 

@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 from itertools import repeat
 from multiprocessing import Pool
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -47,13 +48,13 @@ class SphericalDataModule(LightningDataModule):
         for i, train_config in enumerate(train_configs):
             ds_type = train_config['type'].lower()
             if ds_type == 'hmi':
-                train_files = self._load_files(train_config['data_path'])
+                train_files = self._load_IQUV_files(train_config['data_path'])
                 ds_class = HMISphericalDataset
             elif ds_type == 'phi-hrt':
-                train_files = sorted(glob.glob(train_config['data_path']))
+                train_files = self._load_all_files(train_config['data_path'])
                 ds_class = PHIHRTSphericalDataset
             elif ds_type == 'phi-fdt':
-                train_files = sorted(glob.glob(train_config['data_path']))
+                train_files = self._load_all_files(train_config['data_path'])
                 ds_class = PHIFDTSphericalDataset
             else:
                 raise ValueError(f'Unknown dataset type: {ds_type}')
@@ -98,11 +99,11 @@ class SphericalDataModule(LightningDataModule):
         for ds in train_datasets[::sample_step]:
             self.plot_dataset(ds)
 
+        ds_normalization = valid_config.get('stokes_normalization', stokes_normalization)
         valid_ds_type = valid_config['type'].lower()
         if valid_ds_type == 'hmi':
-            valid_files = self._load_files(valid_config['data_path'])
+            valid_files = self._load_IQUV_files(valid_config['data_path'])
             sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
-            ds_normalization = valid_config.get('stokes_normalization', stokes_normalization)
             self.valid_dataset = HMISphericalDataset(valid_files[sample_idx],
                                                      ds_id='valid', instrument_id=valid_config['instrument_id'],
                                                      seconds_per_dt=seconds_per_dt,
@@ -117,7 +118,7 @@ class SphericalDataModule(LightningDataModule):
                                                         ds_id='valid', instrument_id=valid_config['instrument_id'],
                                                         seconds_per_dt=seconds_per_dt,
                                                         Rs_per_ds=Rs_per_ds, ref_time=ref_time,
-                                                        stokes_normalization=stokes_normalization,
+                                                        stokes_normalization=ds_normalization,
                                                         batch_size=self.batch_size, work_directory=work_directory,
                                                         filter_nans=False, shuffle=False)
         elif valid_ds_type == 'phi-fdt':
@@ -127,7 +128,7 @@ class SphericalDataModule(LightningDataModule):
                                                         ds_id='valid', instrument_id=valid_config['instrument_id'],
                                                         seconds_per_dt=seconds_per_dt,
                                                         Rs_per_ds=Rs_per_ds, ref_time=ref_time,
-                                                        stokes_normalization=stokes_normalization,
+                                                        stokes_normalization=ds_normalization,
                                                         batch_size=self.batch_size, work_directory=work_directory,
                                                         filter_nans=False, shuffle=False)
         else:
@@ -173,7 +174,7 @@ class SphericalDataModule(LightningDataModule):
         wandb.log({'Data Overview': wandb.Image(fig)})
         plt.close(fig)
 
-    def _load_files(self, data_path, num_wl=6):
+    def _load_IQUV_files(self, data_path, num_wl=6):
         # load maps
         I = np.stack([sorted(glob.glob(os.path.join(data_path, f'*I{int(i)}.fits')))
                       for i in range(num_wl)], -1)  # t, wl
@@ -185,6 +186,15 @@ class SphericalDataModule(LightningDataModule):
                       for i in range(num_wl)], -1)  # t, wl
         files = np.stack([I, Q, U, V], 1)  # t, stokes, wl
         return files
+
+    def _load_all_files(self, data_path):
+        if isinstance(data_path, str):
+            return sorted(glob.glob(data_path))
+        elif isinstance(data_path, Iterable):
+            files = [f  for d in data_path for f in glob.glob(d)]
+            return sorted(files)
+        else:
+            raise ValueError(f'Unknown data path type: {type(data_path)}. Expected str or Iterable[str].')
 
     def train_dataloader(self):
         # shuffle asynchronously
@@ -285,15 +295,14 @@ def load_v_observer_LOS(s_map):
     hpc_out = hgc_out.transform_to(frame=frames.Helioprojective)
 
     # Components of the satellite velocity
-    v_sdo_r = s_map.meta['OBS_VR']
+    v_sdo_r = s_map.meta['OBS_VR'] # positive is away from Sun
     v_sdo_w = s_map.meta['OBS_VW']
     v_sdo_n = s_map.meta['OBS_VN']
 
     theta_x = hpc_out.Tx.to_value(u.rad)
     theta_y = hpc_out.Ty.to_value(u.rad)
 
-    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2),
-                         np.cos(theta_y) * np.cos(theta_x))
+    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2), np.cos(theta_y) * np.cos(theta_x))
     psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
 
     # satellite motion
@@ -335,6 +344,10 @@ class PHIHRTSphericalDataset(SphericalDataset):
 
         # set Earth corrected observation time
         header['DATE-OBS'] = header['DATE_EAR']
+
+        # add CROTA2 to header if not present
+        if 'CROTA2' not in header:
+            header['CROTA2'] = header['CROTA']
 
         # (wl, stokes, x, y)
         data = fits.getdata(file)

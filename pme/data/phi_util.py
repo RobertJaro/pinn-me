@@ -226,4 +226,6 @@ def load_fix_phi_header(file):
         header[f'WAVELN{i + 1:02d}'] = wave_axis[i]
     header['WAVELNTH'] = ref_wavelength
 
+    header['CROTA2'] = header['CROTA']
+
     return header

@@ -1,21 +1,16 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_fdt_202403_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v05"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_fdt_202403_v04"
 data:
   train_configs:
-    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI' }
-    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-28/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI' }
-    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-29/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI' }
-    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-30/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI' }
-    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-31/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI' }
+    - { type: 'phi-fdt', data_path: ["/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-28/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-29/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-30/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-31/*.fits.gz"], stokes_normalization: 1.0, instrument_id: 'PHI' }
   valid_config: { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", sample_idx: 1, stokes_normalization: 1.0, instrument_id: 'PHI' }
   ref_time: "2024-03-27T00:00:00"
   num_workers: 16
   batch_size: 32768
-  dataset_batch_size: 4096
+  dataset_batch_size: 8192
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
-  stokes_normalization: 1.0
 
 instrument:
   - type: 'phi'
@@ -26,14 +21,13 @@ logging:
   tags: [ "hmi" ]
   name: "2024-04 PHI-FDT"
 model:
-  encoding: "default"
+  encoding: "time_split"
   w0_initial: 100
 training:
   epochs: 1.0e+3
   lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0
-  lambda_divergence: 0
-  lambda_force_free: 0
+  lambda_induction: 1.0e-4 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_divergence: 1.0e-4 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_force_free: 1.0e-4 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_static: 0.0
-  check_val_every_n_epoch: 10
-#  val_check_interval: 2000
+  check_val_every_n_epoch: 5

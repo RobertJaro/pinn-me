@@ -20,7 +20,7 @@ def main():
     t_start = parse(t_start)
 
     download_series(download_dir=download_dir, email=email, t_start=t_start, series='B_720s',
-                    segments='inclination, azimuth, field, disambig')
+                    segments='inclination, azimuth, field, disambig, vlos_mag')
 
 
 if __name__ == '__main__':

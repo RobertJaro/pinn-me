@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_202403_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_202403_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_202403_v04"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_202403_v04"
 data:
   train_configs:
     - { type: 'phi-hrt', data_path: "/glade/work/rjarolim/data/phi_stokes/LB5/*.fits", stokes_normalization: 0.86205, instrument_id: 'PHI' }
@@ -11,7 +11,6 @@ data:
   dataset_batch_size: 4096
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
-  stokes_normalization: 1.0
 
 instrument:
   - type: 'phi'
@@ -22,14 +21,13 @@ logging:
   tags: [ "hmi" ]
   name: "2024-04 PHI"
 model:
-  encoding: "default"
+  encoding: "time_split"
   w0_initial: 100
 training:
-  epochs: 500
-  lambda_stokes: [ 1, 2, 2, 2 ]
-  lambda_induction: 0
-  lambda_divergence: 0
-  lambda_force_free: 0
+  epochs: 1.0e+3
+  lambda_stokes: [ 1, 1, 1, 1 ]
+  lambda_induction: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_divergence: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_force_free: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_static: 0.0
   check_val_every_n_epoch: 5
-#  val_check_interval: 2000

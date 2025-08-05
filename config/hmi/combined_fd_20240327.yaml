@@ -27,13 +27,13 @@ logging:
   tags: [ "hmi" ]
   name: "2024-04-27 combined full-disk"
 model:
-  encoding: "default"
+  encoding: "time_split"
   w0_initial: 100
 training:
   epochs: 500
   lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0.0
-  lambda_divergence: 0.0
-  lambda_force_free: 0
+  lambda_induction: 1.0e-6
+  lambda_divergence: 1.0e-6
+  lambda_force_free: 0.0 #{ start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_static: 0.0
   check_val_every_n_epoch: 5

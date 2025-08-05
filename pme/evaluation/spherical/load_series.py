@@ -20,6 +20,9 @@ if __name__ == '__main__':
     parser.add_argument('--input', type=str, help='the path to the input file')
     parser.add_argument('--ref_maps', type=str, help='the path to the reference map fld')
     parser.add_argument('--output', type=str, help='the path to the output file', default=None, required=False)
+    parser.add_argument('--latitude_range', type=float, nargs=2, default=[-90, 90], help='the latitude range in degrees')
+    parser.add_argument('--longitude_range', type=float, nargs=2, default=[0, 360], help='the longitude range in degrees')
+    parser.add_argument('--resolution', type=float, default=1, help='the resolution in degrees')
     args = parser.parse_args()
 
     in_path = args.input
@@ -36,11 +39,11 @@ if __name__ == '__main__':
 
     # resolution = 0.05 # degrees
 
-    latitude_range = [-30, -10]
-    longitude_range = [25, 45]
-    # latitude_range = [-90, 90]
-    # longitude_range = [0, 360]
-    resolution = 0.1
+    # latitude_range = [-30, -10]
+    # longitude_range = [25, 45]
+    latitude_range = args.latitude_range
+    longitude_range = args.longitude_range
+    resolution = args.resolution
 
     latitude = np.deg2rad(np.linspace(latitude_range[0], latitude_range[1], int((latitude_range[1] - latitude_range[0] + 1) // resolution)))
     colatitude = np.pi / 2 - latitude  # convert to colatitude
@@ -56,7 +59,8 @@ if __name__ == '__main__':
 
     for i, target_time in tqdm(enumerate(times), total=len(times)):
         file_path = os.path.join(out_path, f'step{i:03d}.jpg')
-
+        if os.path.exists(file_path):
+            continue
 
         normalized_time = pinnme._normalize_time(target_time)
         time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
@@ -132,55 +136,55 @@ if __name__ == '__main__':
         plt.savefig(file_path, dpi=300)
         plt.close()
 
-        fig, axs = plt.subplots(2, 3, figsize=(10, 5))
-
-        ax = axs[0, 0]
-        im = ax.imshow(b_xyz[..., 0], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
-        ax.set_title(r'$B_\text{x}$ [G]')
-
-        ax = axs[0, 1]
-        im = ax.imshow(b_xyz[..., 1], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
-        ax.set_title(r'$B_\text{y}$ [G]')
-
-        ax = axs[0, 2]
-        im = ax.imshow(b_xyz[..., 2], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
-        ax.set_title(r'$B_\text{z}$ [G]')
-
-        ax = axs[1, 0]
-        im = ax.imshow(cartesian_coords[..., 0], cmap='viridis', origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$x$ [R$_\odot$]')
-        ax.set_title(r'$x$ [R$_\odot$]')
-
-        ax = axs[1, 1]
-        im = ax.imshow(cartesian_coords[..., 1], cmap='viridis', origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$y$ [R$_\odot$]')
-        ax.set_title(r'$y$ [R$_\odot$]')
-
-        ax = axs[1, 2]
-        im = ax.imshow(cartesian_coords[..., 2], cmap='viridis', origin='lower', extent=extent)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$z$ [R$_\odot$]')
-        ax.set_title(r'$z$ [R$_\odot$]')
-
-        for ax in axs.flat:
-            ax.set_xlabel(r'Longitude [deg]')
-            ax.set_ylabel(r'Latitude [deg]')
-        # add subtitle with date
-        plt.suptitle(f'{target_time}', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_path, f'xyz_step{i:03d}.jpg'), dpi=300)
-        plt.close()
+        # fig, axs = plt.subplots(2, 3, figsize=(10, 5))
+        #
+        # ax = axs[0, 0]
+        # im = ax.imshow(b_xyz[..., 0], cmap='gray', norm=b_norm, origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+        # ax.set_title(r'$B_\text{x}$ [G]')
+        #
+        # ax = axs[0, 1]
+        # im = ax.imshow(b_xyz[..., 1], cmap='gray', norm=b_norm, origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+        # ax.set_title(r'$B_\text{y}$ [G]')
+        #
+        # ax = axs[0, 2]
+        # im = ax.imshow(b_xyz[..., 2], cmap='gray', norm=b_norm, origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+        # ax.set_title(r'$B_\text{z}$ [G]')
+        #
+        # ax = axs[1, 0]
+        # im = ax.imshow(cartesian_coords[..., 0], cmap='viridis', origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$x$ [R$_\odot$]')
+        # ax.set_title(r'$x$ [R$_\odot$]')
+        #
+        # ax = axs[1, 1]
+        # im = ax.imshow(cartesian_coords[..., 1], cmap='viridis', origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$y$ [R$_\odot$]')
+        # ax.set_title(r'$y$ [R$_\odot$]')
+        #
+        # ax = axs[1, 2]
+        # im = ax.imshow(cartesian_coords[..., 2], cmap='viridis', origin='lower', extent=extent)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$z$ [R$_\odot$]')
+        # ax.set_title(r'$z$ [R$_\odot$]')
+        #
+        # for ax in axs.flat:
+        #     ax.set_xlabel(r'Longitude [deg]')
+        #     ax.set_ylabel(r'Latitude [deg]')
+        # # add subtitle with date
+        # plt.suptitle(f'{target_time}', fontsize=16)
+        # plt.tight_layout()
+        # plt.savefig(os.path.join(out_path, f'xyz_step{i:03d}.jpg'), dpi=300)
+        # plt.close()
