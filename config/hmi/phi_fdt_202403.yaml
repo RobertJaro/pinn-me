@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v05"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_fdt_202403_v04"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v06"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_fdt_202403_v06"
 data:
   train_configs:
     - { type: 'phi-fdt', data_path: ["/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-28/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-29/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-30/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-31/*.fits.gz"], stokes_normalization: 1.0, instrument_id: 'PHI' }

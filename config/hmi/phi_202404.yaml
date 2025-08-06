@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_202403_v04"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_202403_v05"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_202403_v04"
 data:
   train_configs:

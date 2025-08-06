@@ -83,6 +83,8 @@ if __name__ == '__main__':
     v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
     v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
 
+    v_los = -v_img[..., 2]  # negative because doppler shift is defined in the observer frame
+
     ########################################################################################################################
     # load reference map
     fld_ref = Map(args.ref_map_fld).reproject_to(ref_map.wcs).data
@@ -405,59 +407,44 @@ if __name__ == '__main__':
     # plot velocity
     v_norm = Normalize(vmin=-2000, vmax=2000)
 
-    fig, axs = plt.subplots(3, 3, figsize=(12, 8), subplot_kw={'projection': ref_map})
+    fig, axs = plt.subplots(2, 3, figsize=(12, 5), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
-    im = ax.imshow(v_rtp[..., 0], cmap='seismic', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r}$ [m/s]')
     ax.set_title('PINN ME $v_r$')
 
     ax = axs[0, 1]
-    im = ax.imshow(v_rtp[..., 1], cmap='seismic', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{t}$ [m/s]')
     ax.set_title('PINN ME $v_t$')
 
     ax = axs[0, 2]
-    im = ax.imshow(v_rtp[..., 2], cmap='seismic', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{p}$ [m/s]')
     ax.set_title('PINN ME $v_p$')
 
     ax = axs[1, 0]
-    im = ax.imshow(v_img[..., 0], cmap='seismic', origin='lower', norm=v_norm)
+    im = ax.imshow(v_los, cmap='RdBu_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_x$ [m/s]')
-    ax.set_title('PINN ME $v_x$')
+    ax.set_title(r'PINN ME $v_\text{LOS}$')
 
     ax = axs[1, 1]
-    im = ax.imshow(v_img[..., 1], cmap='seismic', origin='lower', norm=v_norm)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_y$ [m/s]')
-    ax.set_title('PINN ME $v_y$')
-
-    ax = axs[1, 2]
-    im = ax.imshow(v_img[..., 2], cmap='seismic', origin='lower', norm=v_norm)
+    im = ax.imshow(vlos_ref, cmap='RdBu_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_z$ [m/s]')
-    ax.set_title('PINN ME $v_z$')
-
-    axs[2, 0].axis('off')
-    axs[2, 1].axis('off')
-
-    ax = axs[2, 2]
-    im = ax.imshow(vlos_ref, cmap='seismic', origin='lower', norm=v_norm)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{los}$ [m/s]')
     ax.set_title(r'Reference $v_\text{LOS}$')
+
+    axs[1, 2].axis('off')
 
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]

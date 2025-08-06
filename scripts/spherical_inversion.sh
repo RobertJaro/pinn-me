@@ -18,7 +18,7 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_201102_3h_no_physics.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_physics.yaml
-#python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s.yaml
+python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_12h.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_201102_6h.yaml
 
@@ -64,7 +64,7 @@ python3 -m pme.evaluation.spherical.load_series --input "/glade/work/rjarolim/sp
 #python3 -m pme.evaluation.spherical.load_series --input "/glade/work/rjarolim/spinn_me/hmi/202405_v01/inversion.pme"
 
 # 90s series
-python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/202405_90s_v13/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.vlos_mag.fits" --hpc_range 100 600 -500 0
+python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/202405_90s_v14/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.vlos_mag.fits" --hpc_range 100 600 -500 0
 python3 -m pme.evaluation.spherical.load_series --input "/glade/work/rjarolim/spinn_me/hmi/202405_90s_v09/inversion.pme" --latitude_range -30 -10 --longitude_range 330 370 --resolution 0.1
 
 

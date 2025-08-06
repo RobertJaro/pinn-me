@@ -26,8 +26,8 @@ model:
 training:
   epochs: 1.0e+3
   lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
-  lambda_divergence: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
-  lambda_force_free: { start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_induction: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_divergence: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_force_free: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_static: 0.0
   check_val_every_n_epoch: 5
