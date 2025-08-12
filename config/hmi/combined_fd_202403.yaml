@@ -12,7 +12,6 @@ data:
   dataset_batch_size: 4096
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
-  stokes_normalization: 1.0
 
 instrument:
   - type: 'phi'

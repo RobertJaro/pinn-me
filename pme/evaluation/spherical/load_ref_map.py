@@ -99,7 +99,7 @@ if __name__ == '__main__':
     vlos_ref = vlos_ref - v_obs_los
 
     # correct for carrington rotation
-    v_carr = carrington_rotation_velocity(latitude=lat, f=np)
+    v_carr = carrington_rotation_velocity(latitude=lat, radius=r * pinnme.meters_per_ds, f=np)
     v_carr_rtp = np.stack([np.zeros_like(v_carr), np.zeros_like(v_carr), v_carr], axis=-1)
     v_carr_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_carr_rtp)
     vlos_ref = vlos_ref + v_carr_img[..., 2]  # subtract LOS component of carrington rotation velocity

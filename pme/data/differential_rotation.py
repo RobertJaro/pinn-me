@@ -62,7 +62,31 @@ def solar_differential_rotation_velocity_torch(latitude_rad: torch.Tensor) -> to
     v = R_sun * omega_rad_per_sec * torch.cos(latitude_rad)
     return v  # in m/s
 
-def carrington_rotation_velocity(latitude, f=torch):
-    R_sun = 6.957e8  # Solar radius in meters
-    rotation_rate = 2 * f.pi / (27.2753 * 24 * 3600) # rad/s
-    return R_sun * rotation_rate * f.cos(latitude)  # in m/s
+def carrington_rotation_velocity(latitude, radius, f=torch):
+    """
+        Compute the rigid Carrington co-rotation velocity at a given
+        heliographic latitude and radius, using the Sun's sidereal rotation period.
+
+        The Carrington sidereal rotation period is ~25.38 days, corresponding
+        to an angular velocity of ~2.865e-6 rad/s. This function returns the
+        tangential speed in the azimuthal (phi-hat) direction for a point fixed
+        in Carrington coordinates.
+
+        Parameters
+        ----------
+        latitude : array-like or tensor
+            Heliographic latitude(s) in radians (positive northward).
+        radius : float or array-like/tensor
+            Radial distance from the Sun's center in meters.
+        f : module, optional
+            Math module to use for calculations (default: torch; can also use numpy).
+
+        Returns
+        -------
+        v_phi : array-like or tensor
+            Tangential linear velocity (m/s) in the Carrington co-rotating frame.
+            Positive in the direction of increasing Carrington longitude.
+    """
+    rotation_rate = 2 * f.pi / (25.38 * 24 * 3600) # rad/s
+    # rotation_rate = 2 * f.pi / (27.2753 * 24 * 3600)  # rad/s
+    return radius * rotation_rate * f.cos(latitude)  # in m/s

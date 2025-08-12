@@ -59,8 +59,8 @@ if __name__ == '__main__':
 
     for i, target_time in tqdm(enumerate(times), total=len(times)):
         file_path = os.path.join(out_path, f'step{i:03d}.jpg')
-        if os.path.exists(file_path):
-            continue
+        # if os.path.exists(file_path):
+        #     continue
 
         normalized_time = pinnme._normalize_time(target_time)
         time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
@@ -136,55 +136,82 @@ if __name__ == '__main__':
         plt.savefig(file_path, dpi=300)
         plt.close()
 
-        # fig, axs = plt.subplots(2, 3, figsize=(10, 5))
-        #
-        # ax = axs[0, 0]
-        # im = ax.imshow(b_xyz[..., 0], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
-        # ax.set_title(r'$B_\text{x}$ [G]')
-        #
-        # ax = axs[0, 1]
-        # im = ax.imshow(b_xyz[..., 1], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
-        # ax.set_title(r'$B_\text{y}$ [G]')
-        #
-        # ax = axs[0, 2]
-        # im = ax.imshow(b_xyz[..., 2], cmap='gray', norm=b_norm, origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
-        # ax.set_title(r'$B_\text{z}$ [G]')
-        #
-        # ax = axs[1, 0]
-        # im = ax.imshow(cartesian_coords[..., 0], cmap='viridis', origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$x$ [R$_\odot$]')
-        # ax.set_title(r'$x$ [R$_\odot$]')
-        #
-        # ax = axs[1, 1]
-        # im = ax.imshow(cartesian_coords[..., 1], cmap='viridis', origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$y$ [R$_\odot$]')
-        # ax.set_title(r'$y$ [R$_\odot$]')
-        #
-        # ax = axs[1, 2]
-        # im = ax.imshow(cartesian_coords[..., 2], cmap='viridis', origin='lower', extent=extent)
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$z$ [R$_\odot$]')
-        # ax.set_title(r'$z$ [R$_\odot$]')
-        #
-        # for ax in axs.flat:
-        #     ax.set_xlabel(r'Longitude [deg]')
-        #     ax.set_ylabel(r'Latitude [deg]')
-        # # add subtitle with date
-        # plt.suptitle(f'{target_time}', fontsize=16)
-        # plt.tight_layout()
-        # plt.savefig(os.path.join(out_path, f'xyz_step{i:03d}.jpg'), dpi=300)
-        # plt.close()
+        ##################################################################################################
+        # Single panel (spherical): B_z (B_r) with subsampled v_tp arrows
+        # - Arrows are red; alpha scales with |B_z|
+        # - Arrow scaling is fixed across frames
+
+        # Output path and filename
+        out_path_bz = os.path.join(out_path, "bz_vtp")
+        os.makedirs(out_path_bz, exist_ok=True)
+        file_path_bz = os.path.join(out_path_bz, f"bz_vtp_step{i:03d}.jpg")
+        # if os.path.exists(file_path_bz):
+        #     continue
+
+        # Fixed norms (consistent across frames)
+        b_norm = Normalize(-500, 500)  # for background image
+        max_speed_ref = 4.0  # km/s reference for arrow length (kept constant across frames)
+        b_alpha_ref = 500.0  # G, sets where alpha ~ 1; match b_norm vmax for simplicity
+        alpha_min = 0.08  # small floor so arrows are still faintly visible
+
+        # Lat/lon grids in degrees for plotting and quiver
+        lon_deg = np.linspace(longitude_range[0], longitude_range[1], b_rtp.shape[1])
+        lat_deg = np.linspace(latitude_range[0], latitude_range[1], b_rtp.shape[0])
+        Lon, Lat = np.meshgrid(lon_deg, lat_deg, indexing='xy')
+
+        # Background = B_z in local heliographic sense (vertical) -> B_r
+        Bz = b_rtp[..., 0]  # [G]
+
+        # Tangential spherical components mapped to plot axes
+        v_lon = v_rtp[..., 2]  # km/s, v_phi (x-axis)
+        v_lat = -v_rtp[..., 1]  # km/s, -v_theta (y-axis)
+
+        # Fixed arrow scaling across frames
+        width_deg = (longitude_range[1] - longitude_range[0])
+        arrow_len_deg = 0.10 * width_deg  # arrows ~10% of width at max_speed_ref
+        U = (v_lon / max_speed_ref) * arrow_len_deg
+        V = (v_lat / max_speed_ref) * arrow_len_deg
+
+        # --- Simple subsampling for quiver clarity ---
+        target = 100  # ~arrows per axis; increase for denser arrows
+        H, W = U.shape
+        s_lat = max(1, H // target)
+        s_lon = max(1, W // target)
+
+        Lon_s = Lon[::s_lat, ::s_lon]
+        Lat_s = Lat[::s_lat, ::s_lon]
+        U_s = U[::s_lat, ::s_lon]
+        V_s = V[::s_lat, ::s_lon]
+
+        # --- Arrow transparency from |Bz| ---
+        Bz_s = Bz[::s_lat, ::s_lon]
+        alpha = np.clip(np.abs(Bz_s) / b_alpha_ref, 0.0, 1.0)
+        alpha = np.maximum(alpha, alpha_min)
+
+        # Build RGBA color array for red with per-arrow alpha
+        colors = np.zeros((*alpha.shape, 4), dtype=float)
+        colors[..., 0] = 1.0  # R
+        colors[..., 3] = alpha
+        colors = colors.reshape(-1, 4)  # quiver expects N x 4
+
+        # Plot (background full-res, vectors subsampled)
+        fig, ax = plt.subplots(figsize=(6, 5))
+
+        im = ax.imshow(Bz, cmap='gray', norm=b_norm, origin='lower', extent=extent)
+        fig.colorbar(im, ax=ax, orientation='vertical', label=r'$B_z \equiv B_r$ [G]')
+
+        ax.quiver(
+            Lon_s, Lat_s, U_s, V_s,
+            angles='xy', scale_units='xy', scale=1.0,
+            width=0.0015, headwidth=3, headlength=4, pivot='tail',
+            color=colors
+        )
+
+        ax.set_xlabel(r'Longitude [deg]')
+        ax.set_ylabel(r'Latitude [deg]')
+        ax.set_title(r'$B_z$ with $\vec{v}_{t\phi}$ arrows (alpha ∝ |B_z|)')
+
+        plt.suptitle(f'{target_time}', fontsize=14)
+        plt.tight_layout()
+        plt.savefig(file_path_bz, dpi=300)
+        plt.close()
