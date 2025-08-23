@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_physics_v03"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_physics_v01"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/201102_physics_v01"
 data:
   train_configs:

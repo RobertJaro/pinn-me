@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_no_physics_v04"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/201102_no_physics_v02"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/201102_physics_v01"
 data:
   train_configs:
@@ -30,3 +30,4 @@ training:
   lambda_divergence: 0.0
   lambda_force_free: 0.0
   lambda_static: 0.0
+  val_check_interval: 2000

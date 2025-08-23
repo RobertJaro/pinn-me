@@ -53,7 +53,7 @@ epochs = training_config.pop('epochs', 50)
 instrument_config = config['instrument'] if 'instrument' in config else {}
 
 me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config=data_module.lambda_config,
-                              model_config=model_config,
+                              model_config=model_config, normalization_config={'value_range': data_module.value_range},
                               instrument_config=instrument_config,
                               Rs_per_ds=data_module.Rs_per_ds, seconds_per_dt=data_module.seconds_per_dt,
                               gauss_per_dB=data_module.gauss_per_dB,

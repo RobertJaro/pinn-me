@@ -15,7 +15,8 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import cartesian_to_spherical, spherical_to_cartesian
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import MESphericalModel, jacobian, INormalizationModule, VelocityCorrectionModel, LimbCorrectionModel
+from pme.model import MESphericalModel, jacobian, INormalizationModule, VelocityCorrectionModel, LimbCorrectionModel, \
+    NormalizationModule
 from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
 from pme.train.util import acos_safe, atan2_safe, log_wandb_image
 
@@ -71,7 +72,7 @@ class MESphericalModule(LightningModule):
 
         self.validation_outputs = {}
         normalization_config = normalization_config if normalization_config is not None else {}
-        self.normalization = INormalizationModule(**normalization_config)
+        self.normalization = NormalizationModule(**normalization_config)
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
         #

@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_v12"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_v13"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_90s_v08"
 data:
   train_configs:

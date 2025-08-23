@@ -15,9 +15,11 @@ conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 
-python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s.yaml
+python3 -m pme.inversion_spherical --config config/hmi/hmi_201102_3h_no_physics.yaml
+#python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s_no_physics.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/combined_fd_20240327.yaml
+
 
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_201102_3h.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_201102_3h_VP.yaml
