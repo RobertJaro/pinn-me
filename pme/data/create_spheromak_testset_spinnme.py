@@ -11,6 +11,7 @@ from multiprocessing import Pool
 
 import numpy as np
 import pandas as pd
+from sunpy.coordinates import get_earth
 import torch
 from astropy import units as u
 from astropy.coordinates import SkyCoord, Angle
@@ -29,20 +30,18 @@ import matplotlib.pyplot as pl
 
 class SpheromakTestSetGenerator(TestSetGenerator):
 
-    def _create_spheromak_params(self, time_step, t_start =0, t_end =600):
+    def _create_spheromak_params(self, time_step, t_start = 0, t_end =600):
         '''
-        Create the
+        Create the map of parameters for the spheromak test case on a sphere
 
         '''
         # Initial conditions
 
         t0 = 0
-        t_start = 0  # Starting time
-        t_end = 600  # Ending time
 
-        R_solar = 699e3  # 699 Mm
-        temporal_res = 30
+        R_solar = 1 # 699 Mm
 
+        time_step = 0
         num_longitude_points = self.nx
         num_latitude_points = self.ny
 
@@ -50,22 +49,27 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         dlatitude = np.pi / num_latitude_points
 
         # Spatial parameters
-        R_0 = 500e5
+        R_0 = 2
 
         coords_polar = np.stack(np.meshgrid(R_solar,
                                             np.arange(-np.pi / 2, np.pi / 2, dlatitude),
                                             np.arange(-np.pi, np.pi, dlongitude),
                                             time_step, indexing='ij'), -1)
-
-        R, THETA, PHI, T = coords_polar[..., 0], coords_polar[..., 1], coords_polar[..., 2], coords_polar[..., 3]
+        # print(f"timestep is {time_step}")
+        #
+        #  breakpoint()
+        R, THETA, PHI, T = (coords_polar[..., 0],
+                            coords_polar[..., 1] + np.pi/2,
+                            coords_polar[..., 2],
+                            coords_polar[..., 3])
 
         # Calculate the spheromak solution
 
-        B_0 = 500
-        n = 1
-        m = 0
-        gamma = 5e2  # 2.5e5 # Mm/s
-        C_alpha = 4.4934
+        B_0 = 2000
+        n = 2
+        m = 3
+        gamma = 2.5e5  # 2.5e5 # Mm/s
+        C_alpha = 1.4934
         alpha_0 = C_alpha / R_0
         #
         A_r = np.zeros_like(R)
@@ -114,8 +118,8 @@ class SpheromakTestSetGenerator(TestSetGenerator):
     def _transform_parameters(self, input_parameters, obs_coord):
 
         latitudes = np.linspace(-np.pi / 2, np.pi / 2, self.ny) * u.rad
-        v_diff = solar_differential_rotation_velocity(latitudes).to_value(u.m / u.s)
-        input_parameters['v_phi'] += v_diff[:, None]
+        # v_diff = solar_differential_rotation_velocity(latitudes).to_value(u.m / u.s)
+        # input_parameters['v_phi'] += v_diff[:, None]
 
         # create carrington map header
         carrington_header = make_heliographic_header(obs_coord.obstime, 'earth',
@@ -131,7 +135,6 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         dummy_data = np.zeros((self.nx, self.ny), dtype=np.float32)
         reference_coord = SkyCoord(0 * u.arcsec, 0 * u.arcsec, observer=obs_coord, frame=frames.Helioprojective)
         helioprojective_header = make_fitswcs_header(dummy_data, reference_coord, scale=u.Quantity(scale))
-
         # transform all parameters to helioprojective frame
         exclude_parameters = ['b_r', 'b_theta', 'b_azi', 'v_r', 'v_phi', 'v_theta']
         # stack b vector
@@ -139,24 +142,21 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         b_theta = input_parameters.pop('b_theta')
         b_phi = input_parameters.pop('b_phi')
         b_rtp = np.stack([b_r, b_theta, b_phi], -1)
-        b_rtp[..., 1] *= -1
 
         v_r = input_parameters.pop('v_r')
         v_theta = input_parameters.pop('v_theta')
         v_phi = input_parameters.pop('v_phi')
         v_rtp = np.stack([v_r, v_theta, v_phi], -1)
-        v_rtp[..., 1] *= -1
 
         input_parameters = {k: v for k, v in input_parameters.items() if k not in exclude_parameters}
         transformed_parameters = {}
-
         for k, parameter in input_parameters.items():
 
             carrington_map = Map(np.array(parameter), carrington_header)
             helioprojective_map = carrington_map.reproject_to(helioprojective_header)
             transformed_parameters[k] = helioprojective_map.data
+        print(f"transformed_parameters: {transformed_parameters['vmac'][200:210, 200:210]}")
 
-        # breakpoint()
 
         # create dummy helioprojective map
 
@@ -210,7 +210,7 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         transformed_parameters['b_rtp'] = b_rtp
         transformed_parameters['v_rtp'] = v_rtp
         # breakpoint()
-
+        # print(f"transformed_parameters_vmac: {transformed_parameters['vmac']}")
         return transformed_parameters, helioprojective_map
 
     def create_spheromak_time_step(self, time_step, obs_coord, resolution=(180, 180)):
@@ -219,7 +219,6 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         # convert to numpy arrays
         transformed_parameters, dummy_helioprojective_map = self._transform_parameters(parameters, obs_coord)
         # convert back to torch tensors
-        print(f"transformed parameters: {transformed_parameters}")
         transformed_parameters = {k: torch.tensor(v, dtype=torch.float32) for k, v in transformed_parameters.items()}
         input_parameters = {k: v for k, v in transformed_parameters.items() if k not in ['b_rtp', 'v_rtp']}
         stokes_profiles = self.convert_to_profiles(**input_parameters)
@@ -275,6 +274,8 @@ if __name__ == '__main__':
 
     os.makedirs(out_path, exist_ok=True)
 
+    n_proc = 30
+
     obs_lon = 0 * u.deg
     obs_lat = 0 * u.deg
     observer_distance = 1 * u.AU
@@ -283,7 +284,7 @@ if __name__ == '__main__':
     t_end = datetime(2025, 2, 1)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
-    lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
+    lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA  # From Phillip Scherrer
     lambda0 = 617.33433 * u.nm  # From Phillip Scherrer
 
     data_generator = SpheromakTestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
@@ -299,39 +300,34 @@ if __name__ == '__main__':
         coord = coord.transform_to(frames.HeliographicCarrington)
         observers.append(coord)
     #
-    with Pool(16) as p:
-        print(f"writing out files?")
+    with Pool(n_proc) as p:
         in_data = [(t, out_path, obs) for t, obs in enumerate(observers)]
         p.starmap(data_generator.create_spherical_time_step_file, in_data)
-    # print(f"writing out files?")
-    # in_data = [(t, out_path, obs) for t, obs in enumerate(observers)]
-    # data_generator.create_spherical_time_step_file(10, out_path, observers[0])
 
+    profiles = load_fits_profiles(out_path)
+    parameters = load_parameters(os.path.join(out_path, 'parameters_*.npz'))
 
-    # profiles = load_fits_profiles(out_path)
-    # parameters = load_parameters(os.path.join(out_path, 'parameters_*.npz'))
-    #
-    # os.makedirs(os.path.join(out_path, 'images'), exist_ok=True)
-    #
-    # with Pool(16) as p:
-    #     in_data = [(profiles[i], os.path.join(out_path, 'images', f'stokes_{i:03d}.jpg'))
-    #                for i in range(profiles.shape[0])]
-    #     p.starmap(plot_stokes, in_data)
-    #
-    # with Pool(16) as p:
-    #     in_data = [(parameters_dict := {k: v[i] for k, v in parameters.items() if k not in ['b_rtp', 'v_rtp']},
-    #                 os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))
-    #                for i in range(profiles.shape[0])]
-    #     p.starmap(plot_parameters, in_data)
-    #
-    # with Pool(16) as p:
-    #     in_data = [(parameters['b_rtp'][i], os.path.join(out_path, 'images', f'brtp_{i:03d}.jpg'))
-    #                for i in range(profiles.shape[0])]
-    #     p.starmap(plot_brtp, in_data)
-    #
-    # # plot coordinate grid
-    # files = sorted(glob.glob(os.path.join(out_path, f'*I0.fits')))
-    # with Pool(16) as p:
-    #     in_data = [(files[i], os.path.join(out_path, 'images', f'coords_{i:03d}.jpg'))
-    #                for i in range(len(files))]
-    #     p.starmap(plot_coords, in_data)
+    os.makedirs(os.path.join(out_path, 'images'), exist_ok=True)
+
+    with Pool(n_proc) as p:
+        in_data = [(profiles[i], os.path.join(out_path, 'images', f'stokes_{i:03d}.jpg'))
+                   for i in range(profiles.shape[0])]
+        p.starmap(plot_stokes, in_data)
+
+    with Pool(n_proc) as p:
+        in_data = [(parameters_dict := {k: v[i] for k, v in parameters.items() if k not in ['b_rtp', 'v_rtp']},
+                    os.path.join(out_path, 'images', f'parameters_{i:03d}.jpg'))
+                   for i in range(profiles.shape[0])]
+        p.starmap(plot_parameters, in_data)
+
+    with Pool(n_proc) as p:
+        in_data = [(parameters['b_rtp'][i], os.path.join(out_path, 'images', f'brtp_{i:03d}.jpg'))
+                   for i in range(profiles.shape[0])]
+        p.starmap(plot_brtp, in_data)
+
+    # plot coordinate grid
+    files = sorted(glob.glob(os.path.join(out_path, f'*I0.fits')))
+    with Pool(n_proc) as p:
+        in_data = [(files[i], os.path.join(out_path, 'images', f'coords_{i:03d}.jpg'))
+                   for i in range(len(files))]
+        p.starmap(plot_coords, in_data)
