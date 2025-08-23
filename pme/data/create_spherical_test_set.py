@@ -135,11 +135,8 @@ class SphericalTestSetGenerator(TestSetGenerator):
         cos_inc = -b_img[..., 2] / (b_field + 1e-8)  # flipped inclination angle
 
 
-        # Shift polarizer position for HMI
         inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
-        inc = torch.pi - inc
         azi = np.arctan2(-b_img[..., 0], b_img[..., 1])
-        azi += torch.pi / 2  # azimuth is flipped in HMI
 
         # stack v vector
         v_r = transformed_parameters.pop('v_r')

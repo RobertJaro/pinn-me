@@ -3,9 +3,10 @@ import os
 from multiprocessing import Pool
 
 import numpy as np
+import torch
 from astropy import units as u
 from matplotlib import pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
@@ -25,28 +26,28 @@ def plot_stokes(profile, save_path):
     fig, axs = plt.subplots(1, 4, figsize=(16, 4))
 
     ax = axs[0]
-    im = ax.imshow(profile[..., 0, :].sum(axis=-1), norm=LogNorm())
+    im = ax.imshow(profile[..., 0, :].sum(axis=-1), norm=Normalize())
     ax.set_title("I")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[1]
-    im = ax.imshow(profile[..., 1, :].sum(axis=-1), norm=LogNorm())
+    im = ax.imshow(profile[..., 1, :].sum(axis=-1), norm=Normalize())
     ax.set_title("Q")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[2]
-    im = ax.imshow(profile[..., 2, :].sum(axis=-1), norm=LogNorm())
+    im = ax.imshow(profile[..., 2, :].sum(axis=-1), norm=Normalize())
     ax.set_title("U")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[3]
-    im = ax.imshow(profile[..., 3, :].sum(axis=-1), norm=LogNorm())
+    im = ax.imshow(profile[..., 3, :].sum(axis=-1), norm=Normalize())
     ax.set_title("V")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -75,14 +76,14 @@ def plot_parameters(parameters, save_path):
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 1]
-    im = ax.imshow(parameters['inc'], cmap='RdBu_r')
+    im = ax.imshow(np.arccos(parameters['cos_inc']), cmap='RdBu_r')
     ax.set_title("Inclination")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     plt.colorbar(im, cax=cax)
 
     ax = axs[0, 2]
-    im = ax.imshow(parameters['azi'], cmap='twilight')
+    im = ax.imshow(parameters['azi'] % (2 * np.pi), cmap='twilight', vmin=0, vmax=2 * np.pi)
     ax.set_title("Azimuth")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)

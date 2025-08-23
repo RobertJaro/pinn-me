@@ -1,8 +1,6 @@
 import numpy as np
 import torch
 from astropy import units as u
-from astropy.constants import R_sun
-# Some documentation to be included
 
 def spherical_to_cartesian_matrix(c):
     r, t, p = c[..., 0], c[..., 1], c[..., 2]
@@ -28,6 +26,32 @@ def cartesian_to_spherical_matrix(c):
     matrix = np.stack(matrix, axis=-1).reshape((*c.shape[:-1], 3, 3))
     #
     return matrix
+
+def vector_spherical_to_cartesian(v, c, f=np):
+    vr, vt, vp = v[..., 0], v[..., 1], v[..., 2]
+    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    sin = f.sin
+    cos = f.cos
+    #
+    vx = vr * sin(t) * cos(p) + vt * cos(t) * cos(p) - vp * sin(p)
+    vy = vr * sin(t) * sin(p) + vt * cos(t) * sin(p) + vp * cos(p)
+    vz = vr * cos(t) - vt * sin(t)
+    #
+    return f.stack([vx, vy, vz], -1)
+
+
+def vector_cartesian_to_spherical(v, c, f=np):
+    vx, vy, vz = v[..., 0], v[..., 1], v[..., 2]
+    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    sin = f.sin
+    cos = f.cos
+    #
+    vr = vx * sin(t) * cos(p) + vy * sin(t) * sin(p) + vz * cos(t)
+    vt = vx * cos(t) * cos(p) + vy * cos(t) * sin(p) - vz * sin(t)
+    vp = - vx * sin(p) + vy * cos(p)
+    #
+    return f.stack([vr, vt, vp], -1)
+
 
 
 def spherical_to_cartesian(v, f=np):
@@ -98,5 +122,5 @@ def solar_differential_rotation_velocity(latitude):
     omega = omega.to(u.rad / u.s)  # Convert to rad/s
 
     # Tangential velocity: v = R * omega * cos(latitude)
-    v = R_sun * omega * np.cos(theta) / u.rad
+    v = (1 * u.Rsun).to_value(u.m) * omega * np.cos(theta) / u.rad
     return v.to(u.m / u.s)

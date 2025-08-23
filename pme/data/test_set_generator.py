@@ -3,6 +3,7 @@ import os.path
 
 import numpy as np
 import torch
+from astropy import units as u
 from astropy.io import fits
 
 from pme.train.me_atmosphere import MEAtmosphere
@@ -22,10 +23,10 @@ def convert_rt_to_xy(r, t):
     return int(x), int(y)
 
 
-class TestSetGenerator():
+class TestSetGenerator:
 
     def __init__(self, lambda0, lambda_grid,
-                 j_up=1.0, j_low=0.0, g_up=2.49, g_low=0,
+                 j_up=1.0, j_low=0.0, g_up=2.5, g_low=0,
                  nx=400, ny=400,
                  b_field_0=2000.0, vmac=2.0 * 1e3, damping=0.2, b0=0.8, b1=0.2, mu=1.0, vdop=2.0 * 1e3, kl=25.0):
         self.lambda0 = lambda0
@@ -56,9 +57,13 @@ class TestSetGenerator():
         return {'stokes_profiles': stokes_profiles}, parameters
 
     def convert_to_profiles(self, b0, b1, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, damping, kl, mu, vdop, vmac):
-        atmos = MEAtmosphere(self.lambda0, self.jUp, self.jLow, self.gUp, self.gLow, self.lambda_grid)
+        atmos = MEAtmosphere(self.lambda0, self.jUp, self.jLow, self.gUp, self.gLow)
         # flatten and forward
-        I, Q, U, V = atmos.forward(b_field.reshape(-1, 1),
+        b_field = b_field.reshape(-1, 1)  # used as reference
+        lambda_grid = torch.tensor(self.lambda_grid.to_value(u.m), dtype=torch.float32, device=b_field.device)
+        lambda_grid = torch.ones_like(b_field) * lambda_grid[None, :]
+        I, Q, U, V = atmos.forward(lambda_grid,
+                                   b_field,
                                    cos2azi.reshape(-1, 1), sin2azi.reshape(-1, 1),
                                    sin_inc2.reshape(-1, 1), cos_inc.reshape(-1, 1),
                                    vmac.reshape(-1, 1), damping.reshape(-1, 1),
@@ -66,7 +71,7 @@ class TestSetGenerator():
                                    vdop.reshape(-1, 1), kl.reshape(-1, 1))
         stokes_profiles = torch.stack([I, Q, U, V], -2).cpu().numpy()
         # (x, y, n_lambda, n_stokes)
-        stokes_profiles = stokes_profiles.reshape(*b_field.shape, 4, *self.lambda_grid.shape)
+        stokes_profiles = stokes_profiles.reshape(*cos2azi.shape, 4, *self.lambda_grid.shape)
         return stokes_profiles
 
     def _load_parameters(self, time_step, resolution=None):
