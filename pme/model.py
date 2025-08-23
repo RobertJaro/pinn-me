@@ -236,12 +236,12 @@ class INormalizationModule(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e1), dtype=torch.float32))
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
 
     def forward(self, stokes):
         # total_intensity = stokes[..., 0:1, :].sum(-1, keepdim=True) + 1e-6  # avoid division by zero
         # normalized_stokes = stokes / total_intensity  # normalize by total intensity
-        normalized_stokes = torch.asinh(stokes * 1e1) / self.stretch
+        normalized_stokes = torch.asinh(stokes * 1e2) / self.stretch
         return normalized_stokes
 
 
@@ -254,3 +254,28 @@ class ProjectionModel(SirenModel):
         x = super().forward(x)
         x = torch.tanh(x) * self.max_shift
         return x
+
+
+class VelocityCorrectionModel(SirenModel):
+    def __init__(self, **kwargs):
+        super().__init__(1, 1, dim=32, n_layers=4, w0_initial=1, **kwargs)
+
+    def forward(self, x):
+        x = super().forward(x) * 1e3  # scale to m/s
+        return x
+
+
+class LimbCorrectionModel(SirenModel):
+    def __init__(self, **kwargs):
+        super().__init__(1, 6, dim=32, n_layers=4, w0_initial=1, **kwargs)
+
+    def forward(self, mu):
+        x = super().forward(mu)
+        c_b0 = 10 ** x[..., 0:1]  # limb correction for B0
+        c_b1 = 10 ** x[..., 1:2]  # limb correction for B1
+        c_vmac = 10 ** x[..., 2:3]  # limb correction for v_mac
+        c_damping = 10 ** x[..., 3:4]  # limb correction for damping
+        c_kl = 10 ** x[..., 4:5]  # limb correction for kl
+        c_vdop = 200 * x[..., 5:6]  # limb correction for convective blue shift
+        # c_vdop = self.limb_shift_velocity(mu)
+        return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vmac': c_vmac, 'c_damping': c_damping, 'c_kl': c_kl, 'c_vdop': c_vdop}

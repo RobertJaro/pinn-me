@@ -1,5 +1,5 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v06"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/phi_fdt_202403_v07"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/phi_fdt_202403_v06"
 data:
   train_configs:
@@ -15,6 +15,7 @@ data:
 instrument:
   - type: 'phi'
     instrument_id: 'PHI'
+    velocity_correction: true
 
 logging:
   project: pinn-me-spherical

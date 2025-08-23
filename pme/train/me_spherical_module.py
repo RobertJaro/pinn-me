@@ -15,9 +15,9 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import cartesian_to_spherical, spherical_to_cartesian
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import MESphericalModel, jacobian, INormalizationModule
+from pme.model import MESphericalModel, jacobian, INormalizationModule, VelocityCorrectionModel, LimbCorrectionModel
 from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
-from pme.train.util import acos_safe, atan2_safe
+from pme.train.util import acos_safe, atan2_safe, log_wandb_image
 
 
 class MESphericalModule(LightningModule):
@@ -42,17 +42,30 @@ class MESphericalModule(LightningModule):
 
         # init instrument models
         forward_models = {}
+        velocity_correction_models = {}
+        limb_correction_models = {}
         for instrument in instrument_config:
             instrument_id = instrument.pop('instrument_id')
             instrument_type = instrument.pop('type')
             lambda0 = lambda_config[instrument_id]['lambda0']
+            velocity_correction = instrument.pop('velocity_correction', False)
+            limb_correction = instrument.pop('limb_correction', True)
+
             if instrument_type == 'hmi':
-                forward_models[instrument_id] = HMIMEAtmosphere(lambda0 = lambda0, **instrument)
+                forward_models[instrument_id] = HMIMEAtmosphere(lambda0=lambda0, **instrument)
             elif instrument_type == 'phi':
-                forward_models[instrument_id] = PHIMEAtmosphere(lambda0 = lambda0, **instrument)
+                forward_models[instrument_id] = PHIMEAtmosphere(lambda0=lambda0, **instrument)
             else:
                 raise ValueError(f"Unknown instrument type: {instrument_type}")
+
+            if velocity_correction:
+                velocity_correction_models[instrument_id] = VelocityCorrectionModel()
+            if limb_correction:
+                limb_correction_models[instrument_id] = LimbCorrectionModel()
+
         self.forward_models = nn.ModuleDict(forward_models)
+        self.velocity_correction_models = nn.ModuleDict(velocity_correction_models)
+        self.limb_correction_models = nn.ModuleDict(limb_correction_models)
 
         self.lr_params = lr_params
 
@@ -61,12 +74,11 @@ class MESphericalModule(LightningModule):
         self.normalization = INormalizationModule(**normalization_config)
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
-        self.lambda_static = lambda_static
         #
         scheduled_lambda_config = {}
         lambdas = {}
         for k, v in [('induction', lambda_induction), ('divergence', lambda_divergence),
-                     ('force_free', lambda_force_free)]:
+                     ('force_free', lambda_force_free), ('static', lambda_static)]:
             if isinstance(v, dict):
                 gamma = (v['end'] / v['start']) ** (1 / v['iterations'])
                 scheduled_lambda_config[k] = {'end': v['end'], 'gamma': gamma}
@@ -83,7 +95,9 @@ class MESphericalModule(LightningModule):
 
     def configure_optimizers(self):
         parameters = (list(self.parameter_model.parameters()) +
-                      list(self.forward_models.parameters()))
+                      list(self.forward_models.parameters()) +
+                      list(self.velocity_correction_models.parameters()) +
+                      list(self.limb_correction_models.parameters()))
         if isinstance(self.lr_params, dict):
             lr_start = self.lr_params['start']
             lr_end = self.lr_params['end']
@@ -104,7 +118,8 @@ class MESphericalModule(LightningModule):
         instrument_ids = list(batch.keys())
 
         coords = torch.cat([batch[k]['coords'] for k in instrument_ids])
-        cartesian_to_spherical_transform = torch.cat([batch[k]['cartesian_to_spherical_transform'] for k in instrument_ids])
+        cartesian_to_spherical_transform = torch.cat(
+            [batch[k]['cartesian_to_spherical_transform'] for k in instrument_ids])
         rtp_to_img_transform = torch.cat([batch[k]['rtp_to_img_transform'] for k in instrument_ids])
         v_obs_los = torch.cat([batch[k]['v_obs_los'] for k in instrument_ids])
         ds_lengths = {k: batch[k]['coords'].shape[0] for k in instrument_ids}
@@ -117,7 +132,8 @@ class MESphericalModule(LightningModule):
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform, rtp_to_img_transform)
+        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform,
+                                                       rtp_to_img_transform)
 
         #################################################
         # stokes profile synthesis
@@ -125,18 +141,27 @@ class MESphericalModule(LightningModule):
         current_idx = 0
         stokes_pred_normalized = []
         stokes_true_normalized = []
-        for ds_id, n_samples in ds_lengths.items():
+        for instrument_id, n_samples in ds_lengths.items():
+            ds_mu = batch[instrument_id]['mu']
+            ds_lambda_grid = batch[instrument_id]['lambda_grid']
+            ds_stokes_true = batch[instrument_id]['stokes']
+
             ds_forward_params = {k: v[current_idx:current_idx + n_samples] for k, v in forward_params.items()}
-            ds_mu = batch[ds_id]['mu']
-            ds_lambda_grid = batch[ds_id]['lambda_grid']
-            current_idx += n_samples
-            I, Q, U, V = self.forward_models[ds_id](**ds_forward_params, lambda_grid=ds_lambda_grid, mu=ds_mu)
+            # apply velocity correction if available
+            if instrument_id in self.velocity_correction_models:
+                time_coords = batch[instrument_id]['coords'][..., 0:1]
+                v_obs_correction = self.velocity_correction_models[instrument_id](time_coords)
+                ds_forward_params['vdop'] += v_obs_correction
 
+            if instrument_id in self.limb_correction_models:
+                ds_forward_params, _ = self.correct_limb_effects(ds_forward_params, ds_mu, instrument_id)
+
+            I, Q, U, V = self.forward_models[instrument_id](**ds_forward_params, lambda_grid=ds_lambda_grid, mu=ds_mu)
             ds_stokes_pred = torch.stack([I, Q, U, V], dim=-2)
-            ds_stokes_true = batch[ds_id]['stokes']
 
-            stokes_true_normalized.append(self.normalization(ds_stokes_true))
-            stokes_pred_normalized.append(self.normalization(ds_stokes_pred))
+            stokes_true_normalized.append(self.normalization(ds_stokes_true / ds_mu[..., None]))
+            stokes_pred_normalized.append(self.normalization(ds_stokes_pred / ds_mu[..., None]))
+            current_idx += n_samples
 
         #################################################
         # compute stokes loss
@@ -155,11 +180,12 @@ class MESphericalModule(LightningModule):
 
         #################################################
         # compute physics losses
-        if all(v == 0 for v in self.lambdas.values()):
+        if all((v == 0).item() for k, v in self.lambdas.items() if k in ['induction', 'divergence', 'force_free']):
             # skip physics losses if not required
             physics_losses = {'induction': torch.zeros_like(stokes_loss[..., 0]),
                               'divergence': torch.zeros_like(stokes_loss[..., 0]),
-                              'force_free': torch.zeros_like(stokes_loss[..., 0])}
+                              'force_free': torch.zeros_like(stokes_loss[..., 0]),
+                              }
         else:
             spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
             # get coordinate range for sampling points
@@ -191,15 +217,14 @@ class MESphericalModule(LightningModule):
             # compute physics losses
             physics_losses = self.compute_physics_losses(b, v, random_coords)
 
-        static_loss = transformed_output['v_rtp'][..., 0:1].pow(2).sum(-1)
-
+        static_loss = transformed_output['v_rtp'][..., 0:1].mean().pow(2) # average radial velocity should be approx. zero
         #################################################
         # compute total loss
         total_loss = (stokes_loss.mean() +
                       self.lambdas['induction'] * physics_losses['induction'].mean() +
                       self.lambdas['divergence'] * physics_losses['divergence'].mean() +
                       self.lambdas['force_free'] * physics_losses['force_free'].mean() +
-                      self.lambda_static * static_loss.mean())
+                      self.lambdas['static'] * static_loss)
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
@@ -210,7 +235,7 @@ class MESphericalModule(LightningModule):
                 "induction_loss": physics_losses['induction'].mean(),
                 "divergence_loss": physics_losses['divergence'].mean(),
                 "force_free_loss": physics_losses['force_free'].mean(),
-                "static_loss": static_loss.mean(),
+                "static_loss": static_loss,
                 }
 
     def compute_physics_losses(self, b, v, coords):
@@ -281,7 +306,7 @@ class MESphericalModule(LightningModule):
         dBz_dr = dBz_dx * dx_dr + dBz_dy * dy_dr + dBz_dz * dz_dr
         dB_dr = torch.stack([dBx_dr, dBy_dr, dBz_dr], -1)
 
-        return {'divergence':divergence_loss,
+        return {'divergence': divergence_loss,
                 'force_free': force_free_loss,
                 'induction': induction_loss,
                 'dB_dt': dB_dt.pow(2).sum(-1).pow(0.5),
@@ -290,8 +315,8 @@ class MESphericalModule(LightningModule):
                 }
 
     def scale_parameters(self, output, transformed_output, v_obs_los):
-        v_dop = transformed_output['v_dop'] * self.meters_per_ds / self.seconds_per_dt
-        v_dop = v_dop + v_obs_los  # add doppler correction - spacecraft velocity
+        vdop = transformed_output['vdop'] * self.meters_per_ds / self.seconds_per_dt
+        vdop = vdop + v_obs_los  # add doppler correction - spacecraft velocity
 
         forward_params = {'b_field': transformed_output['b_field'] * self.gauss_per_dB,
                           'sin_inc2': transformed_output['sin_inc2'],
@@ -300,7 +325,7 @@ class MESphericalModule(LightningModule):
                           'sin2azi': transformed_output['sin2azi'],
                           'cos2azi': transformed_output['cos2azi'],
                           'azi': transformed_output['azi'],
-                          'vdop': v_dop,
+                          'vdop': vdop,
                           'vmac': output['vmac'], 'damping': output['damping'],
                           'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
         return forward_params
@@ -336,7 +361,8 @@ class MESphericalModule(LightningModule):
         spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
         colatitude = spherical_coords[..., 1]  # theta in spherical coordinates
         latitude = torch.pi / 2 - colatitude  # convert to latitude
-        v_rot = carrington_rotation_velocity(latitude)  # in m/s
+        radius = spherical_coords[..., 0] * self.meters_per_ds  # r in spherical coordinates
+        v_rot = carrington_rotation_velocity(latitude, radius)  # in m/s
         v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt (model units)
 
         # transform V
@@ -345,14 +371,43 @@ class MESphericalModule(LightningModule):
         v_rtp_alt = torch.stack([v_rtp[..., 0], v_rtp[..., 1], v_rtp[..., 2] + v_rot], dim=-1)
         v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp_alt)
 
-        v_dop = -v_img[..., 2:3] # negative because doppler shift is defined in the observer frame
+        vdop = -v_img[..., 2:3]  # negative because doppler shift is defined in the observer frame
 
         return {'b_field': b_field,
                 'sin2azi': sin2azi, 'cos2azi': cos2azi, 'azi': azi,
                 'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'inc': inc,
-                'v_dop': v_dop,
+                'vdop': vdop,
                 'v_rtp': v_rtp, 'b_rtp': b_rtp, 'v_img': v_img, 'b_img': b_img,
                 'b_xyz': b_xyz, 'v_xyz': v_xyz}
+
+    def correct_limb_effects(self, parameters, mu, instrument_id):
+        # apply limb correction
+        limb_correction = self.limb_correction_models[instrument_id](mu)
+        c_b0 = limb_correction['c_b0']
+        c_b1 = limb_correction['c_b1']
+        c_vmac = limb_correction['c_vmac']
+        c_damping = limb_correction['c_damping']
+        c_kl = limb_correction['c_kl']
+        c_vdop = limb_correction['c_vdop']
+
+        # apply limb correction to parameters
+        b0 = parameters['b0'] * c_b0
+        b1 = parameters['b1'] * c_b1
+        vmac = parameters['vmac'] * c_vmac
+        damping = parameters['damping'] * c_damping
+        kl = parameters['kl'] * c_kl
+        vdop = parameters['vdop'] + c_vdop
+
+        corrected_output = {k: v for k, v in parameters.items() if
+                            k not in ['b0', 'b1', 'vmac', 'damping', 'kl', 'vdop']}
+        corrected_output['b0'] = b0
+        corrected_output['b1'] = b1
+        corrected_output['vmac'] = vmac
+        corrected_output['damping'] = damping
+        corrected_output['kl'] = kl
+        corrected_output['vdop'] = vdop
+
+        return corrected_output, limb_correction
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -371,14 +426,10 @@ class MESphericalModule(LightningModule):
                 gamma = self.scheduled_lambda_config[k]['gamma']
                 new_value = value * gamma
                 self.lambdas[k].copy_(new_value)
-            wandb.log({f"lambda.{k}": self.lambdas[k].item()})
-
-        # log scaling parameters
-        for k in self.forward_models.keys():
-            wandb.log({f"scaling.{k}": self.forward_models[k].scaling.item()})
+            wandb.log({f"lambda.{k}": self.lambdas[k].item()}, commit=False)
 
         # log results to WANDB
-        self.log("train", {k: v.mean() for k, v in outputs.items()})
+        self.log_dict({f'train.{k}': v.mean() for k, v in outputs.items()})
 
     @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
@@ -391,19 +442,29 @@ class MESphericalModule(LightningModule):
         lambda_grid = batch['lambda_grid']
         instrument_id = batch['instrument_id']
 
-
         # forward step
         coords.requires_grad = True
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform, rtp_to_img_transform)
+        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform,
+                                                       rtp_to_img_transform)
         forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
+
+        limb_correction = None
+        if instrument_id in self.limb_correction_models:
+            forward_params, limb_correction = self.correct_limb_effects(forward_params, mu, instrument_id)
+
+        v_obs_correction = torch.zeros_like(v_obs_los)
+        if instrument_id in self.velocity_correction_models:
+            time_coords = coords[..., 0:1]
+            v_obs_correction = self.velocity_correction_models[instrument_id](time_coords)
+            forward_params['vdop'] += v_obs_correction
 
         I, Q, U, V = self.forward_models[instrument_id](**forward_params, mu=mu, lambda_grid=lambda_grid)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        stokes_true_normalized = self.normalization(stokes_true)
-        stokes_pred_normalized = self.normalization(stokes_pred)
+        stokes_true_normalized = self.normalization(stokes_true / mu[..., None])
+        stokes_pred_normalized = self.normalization(stokes_pred / mu[..., None])
 
         diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
 
@@ -411,21 +472,30 @@ class MESphericalModule(LightningModule):
         v = transformed_output['v_xyz']
         physics_losses = self.compute_physics_losses(b, v, coords)
 
-        return {'diff': diff.detach(),
-                'stokes_true': stokes_true_normalized.detach(), 'stokes_pred': stokes_pred_normalized.detach(),
-                **forward_params,
-                'b_rtp': transformed_output['b_rtp'] * self.gauss_per_dB,
-                'v_rtp': transformed_output['v_rtp'] * self.meters_per_ds / self.seconds_per_dt,
-                'b_img': transformed_output['b_img'] * self.gauss_per_dB,
-                'v_img': transformed_output['v_img'] * self.meters_per_ds / self.seconds_per_dt,
-                'induction': physics_losses['induction'].detach(),
-                'dB_dt': physics_losses['dB_dt'].detach(),
-                'curl_VxB': physics_losses['curl_VxB'].detach(),
-                'divergence': physics_losses['divergence'].detach(),
-                'force_free': physics_losses['force_free'].detach(),
-                'dB_dr': physics_losses['dB_dr'].detach(),
-                'mu': mu.detach(), 'v_obs_los': v_obs_los.detach()
-                }
+        res = {'diff': diff.detach(),
+               'stokes_true': stokes_true_normalized.detach(), 'stokes_pred': stokes_pred_normalized.detach(),
+               **forward_params,
+               'b_rtp': transformed_output['b_rtp'] * self.gauss_per_dB,
+               'v_rtp': transformed_output['v_rtp'] * self.meters_per_ds / self.seconds_per_dt,
+               'b_img': transformed_output['b_img'] * self.gauss_per_dB,
+               'v_img': transformed_output['v_img'] * self.meters_per_ds / self.seconds_per_dt,
+               'induction': physics_losses['induction'].detach(),
+               'dB_dt': physics_losses['dB_dt'].detach(),
+               'curl_VxB': physics_losses['curl_VxB'].detach(),
+               'divergence': physics_losses['divergence'].detach(),
+               'force_free': physics_losses['force_free'].detach(),
+               'dB_dr': physics_losses['dB_dr'].detach(),
+               'mu': mu.detach(), 'v_obs_los': v_obs_los.detach(),
+               'v_obs_correction': v_obs_correction.detach(),
+               }
+        if limb_correction is not None:
+            res['c_b0'] = limb_correction['c_b0'].detach()
+            res['c_b1'] = limb_correction['c_b1'].detach()
+            res['c_vmac'] = limb_correction['c_vmac'].detach()
+            res['c_damping'] = limb_correction['c_damping'].detach()
+            res['c_kl'] = limb_correction['c_kl'].detach()
+            res['c_vdop'] = limb_correction['c_vdop'].detach()
+        return res
 
     def validation_epoch_end(self, outputs_list):
         if len(outputs_list) == 0 or any([len(o) == 0 for o in outputs_list]):
@@ -436,21 +506,14 @@ class MESphericalModule(LightningModule):
             outputs[k] = torch.cat([o[k] for o in outputs_list], dim=0)
 
         I_diff, Q_diff, U_diff, V_diff = torch.nanmean(outputs['diff'], dim=(0, 2))
-        self.log("valid", {
-            # log total stokes loss
-            "diff": torch.nanmean(outputs['diff']),
-            # log stokes differences
-            'I_diff': I_diff, 'Q_diff': Q_diff, 'U_diff': U_diff, 'V_diff': V_diff,
-            # log physics losses
-            'induction': torch.nanmean(outputs['induction']),
-            'divergence': torch.nanmean(outputs['divergence']),
-            'force_free': torch.nanmean(outputs['force_free']),
-        })
 
         parameters = {}
         for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
-                  'v_rtp', 'b_rtp', 'v_img', 'b_img',
-                  'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr', 'mu', 'v_obs_los']:
+                  'v_rtp', 'b_rtp', 'v_img', 'b_img', 'v_obs_correction',
+                  'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr', 'mu', 'v_obs_los',
+                  'c_b0', 'c_b1', 'c_vmac', 'c_damping', 'c_kl', 'c_vdop']:
+            if k not in outputs:
+                continue
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
             parameters[k] = field
 
@@ -459,11 +522,23 @@ class MESphericalModule(LightningModule):
         self.plot_B_rtp_scaled(parameters)
         self.plot_v_rtp(parameters)
         self.plot_physics_losses(parameters)
+        self.plot_limb_correction(parameters)
 
         stokes_true = outputs['stokes_true'].cpu().numpy().reshape(*self.image_shape[:2], 4, -1)
         stokes_pred = outputs['stokes_pred'].cpu().numpy().reshape(*self.image_shape[:2], 4, -1)
 
         self.plot_stokes(stokes_pred, stokes_true)
+
+        self.log_dict({
+            # log total stokes loss
+            "valid.diff": torch.nanmean(outputs['diff']),
+            # log stokes differences
+            'valid.I_diff': I_diff, 'valid.Q_diff': Q_diff, 'valid.U_diff': U_diff, 'valid.V_diff': V_diff,
+            # log physics losses
+            'valid.induction': torch.nanmean(outputs['induction']),
+            'valid.divergence': torch.nanmean(outputs['divergence']),
+            'valid.force_free': torch.nanmean(outputs['force_free']),
+        })
 
     def plot_physics_losses(self, parameters):
         induction = parameters['induction']
@@ -472,7 +547,7 @@ class MESphericalModule(LightningModule):
         divergence = parameters['divergence']
         dB_dr = parameters['dB_dr']
 
-        fig, axs = plt.subplots(3, 3, figsize=(10, 6), dpi=150)
+        fig, axs = plt.subplots(3, 3, figsize=(10, 6), dpi=100)
         ax = axs[0, 0]
         im = ax.imshow(induction, origin='lower', norm='log')
         ax.set_title("Induction")
@@ -524,8 +599,79 @@ class MESphericalModule(LightningModule):
         ax = axs[2, 2]
         ax.set_axis_off()
 
-        plt.tight_layout()
-        wandb.log({"Physics Losses": fig})
+        # plt.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, 'Physics Losses')
+        plt.close('all')
+
+    def plot_limb_correction(self, outputs):
+        if 'c_b0' not in outputs or 'c_b1' not in outputs or 'c_vmac' not in outputs:
+            return
+        c_b0 = outputs['c_b0']
+        c_b1 = outputs['c_b1']
+        c_vmac = outputs['c_vmac']
+        mu = outputs['mu']
+        c_damping = outputs['c_damping']
+        c_kl = outputs['c_kl']
+        c_vdop = outputs['c_vdop']
+
+        fig, axs = plt.subplots(2, 4, figsize=(10, 5), dpi=100)
+
+        ax = axs[0, 0]
+        im = ax.imshow(mu, origin='lower', cmap='cividis', vmin=0, vmax=1)
+        ax.set_title("mu")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[0, 1]
+        im = ax.imshow(c_damping, origin='lower', cmap='magma')
+        ax.set_title(r"$c_\text{damping}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[0, 2]
+        im = ax.imshow(c_kl, origin='lower', cmap='magma')
+        ax.set_title(r"$c_\text{kl}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        axs[0, 3].set_axis_off()
+
+        ax = axs[1, 0]
+        im = ax.imshow(c_b0, origin='lower', cmap='magma')
+        ax.set_title(r"$c_\text{b0}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 1]
+        im = ax.imshow(c_b1, origin='lower', cmap='magma')
+        ax.set_title(r"$c_\text{b1}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 2]
+        im = ax.imshow(c_vmac, origin='lower', cmap='magma')
+        ax.set_title(r"$c_\text{vmac}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        ax = axs[1, 3]
+        v_min_max = np.nanmax(np.abs(c_vdop))
+        im = ax.imshow(c_vdop, origin='lower', cmap='RdBu_r', vmin=-v_min_max, vmax=v_min_max)
+        ax.set_title(r"$c_\text{vdop}$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+
+        fig.suptitle("Limb Correction Factors")
+        fig.tight_layout()
+        log_wandb_image(fig, "Limb Correction Factors")
         plt.close('all')
 
     def plot_profile(self, stokes_pred, stokes_true):
@@ -547,8 +693,9 @@ class MESphericalModule(LightningModule):
 
             [ax.legend(loc='upper right') for ax in axs]
             # log figure
-            fig.tight_layout()
-            wandb.log({f"Profile x:{x:02d} y:{y:02d}": wandb.Image(fig)})
+            # fig.tight_layout()
+            fig.subplots_adjust(wspace=0.25, hspace=0.25)
+            log_wandb_image(fig, f"Profile x:{x:02d} y:{y:02d}")
             plt.close('all')
 
     def plot_stokes(self, stokes_pred, stokes_true):
@@ -570,8 +717,9 @@ class MESphericalModule(LightningModule):
             divider = make_axes_locatable(ax[1, i])
             cax = divider.append_axes("right", size="5%", pad=0.05)
             fig.colorbar(im, cax=cax)
-        fig.tight_layout()
-        wandb.log({"Integrated Stokes vector - Comparison": fig})
+        # fig.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, "Integrated Stokes vector - Comparison")
         plt.close('all')
 
     def plot_parameter_overview(self, parameters):
@@ -584,7 +732,7 @@ class MESphericalModule(LightningModule):
         inc = inc % np.pi
         azi = azi % (2 * np.pi)
 
-        fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=150)
+        fig, axs = plt.subplots(2, 5, figsize=(16, 4), dpi=100)
         ax = axs[0, 0]
         im = ax.imshow(b, cmap='viridis', vmin=.1, origin='lower', norm='log')
         ax.set_title("B")
@@ -646,8 +794,9 @@ class MESphericalModule(LightningModule):
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
-        plt.tight_layout()
-        wandb.log({"Parameter Overview": fig})
+        # plt.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, "Parameter Overview")
         plt.close('all')
 
     def plot_B_rtp(self, parameters):
@@ -656,7 +805,7 @@ class MESphericalModule(LightningModule):
 
         norm = SymLogNorm(linthresh=10, vmin=-5000, vmax=5000)
 
-        fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=150)
+        fig, axs = plt.subplots(2, 3, figsize=(10, 5), dpi=100)
 
         ax = axs[0, 0]
         im = ax.imshow(b_rtp[..., 0], norm=norm, origin='lower', cmap='PuOr')
@@ -700,8 +849,9 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        plt.tight_layout()
-        wandb.log({"B": fig})
+        # plt.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, 'B')
         plt.close('all')
 
     def plot_B_rtp_scaled(self, parameters):
@@ -709,7 +859,7 @@ class MESphericalModule(LightningModule):
 
         norm = Normalize(vmin=-500, vmax=500)
 
-        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=150)
+        fig, axs = plt.subplots(1, 3, figsize=(10, 3), dpi=100)
 
         ax = axs[0]
         im = ax.imshow(b_rtp[..., 0], norm=norm, origin='lower', cmap='gray')
@@ -732,18 +882,20 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        plt.tight_layout()
-        wandb.log({"B_rtp": fig})
+        # plt.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, 'B_rtp')
         plt.close('all')
 
     def plot_v_rtp(self, parameters):
         v_rtp = parameters['v_rtp']
         v_img = parameters['v_img']
+        v_obs_correction = parameters['v_obs_correction']
 
-        v_min_max = max(np.nanmax(np.abs(v_img)), np.nanmax(np.abs(v_rtp)))
+        v_min_max = 2000  # m/s
         norm = Normalize(vmin=-v_min_max, vmax=v_min_max)
 
-        fig, axs = plt.subplots(3, 3, figsize=(10, 7), dpi=150)
+        fig, axs = plt.subplots(3, 3, figsize=(10, 7), dpi=100)
         ax = axs[0, 0]
         im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=norm)
         ax.set_title("$v_r$")
@@ -766,21 +918,21 @@ class MESphericalModule(LightningModule):
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 0]
-        im = ax.imshow(v_img[..., 0], cmap='RdBu_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 0], cmap='RdBu', origin='lower', norm=norm)
         ax.set_title(r"$v_\text{xi}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 1]
-        im = ax.imshow(v_img[..., 1], cmap='RdBu_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 1], cmap='RdBu', origin='lower', norm=norm)
         ax.set_title(r"$v_\text{eta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[1, 2]
-        im = ax.imshow(v_img[..., 2], cmap='RdBu_r', origin='lower', norm=norm)
+        im = ax.imshow(v_img[..., 2], cmap='RdBu', origin='lower', norm=norm)
         ax.set_title(r"$v_\text{zeta}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -788,19 +940,24 @@ class MESphericalModule(LightningModule):
 
         ax = axs[2, 0]
         im = ax.imshow(parameters['v_obs_los'], cmap='RdBu_r', origin='lower', norm=norm)
-        ax.set_title("V_obs_los")
+        ax.set_title(r"$v_\text{OBS LOS}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
         ax = axs[2, 1]
-        ax.set_axis_off()
+        im = ax.imshow(v_obs_correction, cmap='RdBu_r', origin='lower', norm=norm)
+        ax.set_title(r'$v_\text{OBS correction}$')
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
 
         ax = axs[2, 2]
         ax.set_axis_off()
 
-        plt.tight_layout()
-        wandb.log({"v": fig})
+        # plt.tight_layout()
+        fig.subplots_adjust(wspace=0.25, hspace=0.25)
+        log_wandb_image(fig, "v")
         plt.close('all')
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
@@ -816,7 +973,6 @@ class MESphericalModule(LightningModule):
                 continue
             checkpoint_v = state_dict[f"lambdas.{k}"]
             if k in self.scheduled_lambda_config or checkpoint_v == v:  # skip scheduled lambdas or same values
-                print(checkpoint_v, v.data)
                 continue
             print(f'Update lambda {k}: {checkpoint_v} --> {v.data}')
             state_dict[f'lambdas.{k}'] = v

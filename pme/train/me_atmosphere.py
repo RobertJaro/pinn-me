@@ -18,7 +18,7 @@ from pme.train.profile_functions import Voigt, FaradayVoigt
 class MEAtmosphere(nn.Module):
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, j_up, j_low, g_up, g_low, scaling_config=None):
+    def __init__(self, lambda0, j_up, j_low, g_up, g_low):
         super().__init__()
 
         self.voigt = Voigt()
@@ -35,10 +35,6 @@ class MEAtmosphere(nn.Module):
         zeeman_strength_lookup = {k: nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
                                   for k, v in zeeman_strength_lookup.items()}
         self.zeeman_strength_lookup = nn.ParameterDict(zeeman_strength_lookup)
-
-        scaling_config = {'value': 0.0, 'learnable': False} if scaling_config is None else scaling_config
-        self.scaling = nn.Parameter(torch.tensor(scaling_config['value'], dtype=torch.float32),
-                                    requires_grad=scaling_config['learnable'])
 
     def calculate_voigt_faraday_profiles(self, nu, nu_m, damping, lambda_dop, **kwargs):
         gamma = torch.ones_like(nu) * damping  # [batch, n_lambda]
@@ -206,12 +202,6 @@ class MEAtmosphere(nn.Module):
         U = self.compute_U(**state)
         V = self.compute_V(**state)
 
-        # apply instrument scaling
-        scaling = 10 ** self.scaling
-        I = I * scaling
-        Q = Q * scaling
-        U = U * scaling
-        V = V * scaling
         # return the Stokes parameters
         return I, Q, U, V
 
