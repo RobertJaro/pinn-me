@@ -19,6 +19,8 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_060" --n_time_steps 100 --obs_lon 60.0
 #python3 -m pme.data.create_spherical_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/test_set/simple_obs_120" --n_time_steps 100 --obs_lon 120.0
 
+python3 -m pme.data.create_spheromak_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/spheromak/simple_obs_000" --n_time_steps 100 --obs_lon 0.0
+python3 -m pme.data.create_spheromak_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/spheromak/simple_obs_060" --n_time_steps 100 --obs_lon 60.0
 python3 -m pme.data.create_spheromak_test_set --out_path "/glade/campaign/hao/radmhd/rjarolim/SPINN-ME/spheromak/simple_obs_120" --n_time_steps 100 --obs_lon 120.0
 
 

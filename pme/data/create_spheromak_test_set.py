@@ -19,7 +19,8 @@ from sunpy.sun import constants
 from pme.data.create_cartesian_test_set import plot_parameters, plot_stokes, plot_brtp, plot_coords
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.test_set_generator import TestSetGenerator, load_parameters, load_fits_profiles
-from pme.data.util import image_to_spherical_matrix, vector_spherical_to_cartesian, vector_cartesian_to_spherical
+from pme.data.util import image_to_spherical_matrix, vector_spherical_to_cartesian, vector_cartesian_to_spherical, \
+    spherical_to_cartesian, cartesian_to_spherical
 
 
 class SpheromakTestSetGenerator(TestSetGenerator):
@@ -35,24 +36,32 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         R_solar = 1
         meters_per_Rs = (1 * u.Rsun).to_value(u.m)
 
-        coords_spherical = np.stack(np.meshgrid(R_solar,
+        target_coords = np.stack(np.meshgrid(R_solar,
                                                 np.linspace(0, np.pi, self.carrington_map_resolution[0]),
                                                 np.linspace(0, 2 * np.pi, self.carrington_map_resolution[1]),
                                                 time_seconds, indexing='ij'), -1)
-        R, THETA, PHI, T = (coords_spherical[..., 0],
-                            coords_spherical[..., 1],
-                            coords_spherical[..., 2],
-                            coords_spherical[..., 3])
+        spheromak_coords = np.copy(target_coords)
+        # shift spheromak
+        time_coords = spheromak_coords[..., 3:4]
+        transformed_coords = spherical_to_cartesian(spheromak_coords[..., :3], f=np)
+        transformed_coords[..., 2] += 0.4 # translate in z
+        transformed_coords[..., 1] += 0.3 # translate in y
+        transformed_coords = cartesian_to_spherical(transformed_coords, f=np)
+        spheromak_coords = np.concatenate([transformed_coords, time_coords], axis=-1)
+        R, THETA, PHI, T = (spheromak_coords[..., 0],
+                            spheromak_coords[..., 1],
+                            spheromak_coords[..., 2],
+                            spheromak_coords[..., 3])
 
         # Calculate the spheromak solution
 
         # Spatial parameters
         R_0 = 0.5
-        B_0 = 2000
+        B_0 = 5e4
         n = 1
         m = 0
-        gamma = (0.1 * u.km / u.s).to_value(u.Rsun / u.s)
-        C_alpha = 4.4934
+        gamma = (4.0 * u.km / u.s).to_value(u.Rsun / u.s)
+        C_alpha = 4.4934e1
         alpha_0 = C_alpha / R_0
         #
         alpha = C_alpha * (R_0 + gamma * (T - t0) ** n) ** -1
@@ -73,23 +82,21 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         B_rtp = np.stack([B_r, B_theta, B_phi], -1)
         E_rtp = np.stack([E_r, E_theta, E_phi], -1)
 
-        B = vector_spherical_to_cartesian(B_rtp, coords_spherical)
-        E = vector_spherical_to_cartesian(E_rtp, coords_spherical)
+        B = vector_spherical_to_cartesian(B_rtp, spheromak_coords)
+        E = vector_spherical_to_cartesian(E_rtp, spheromak_coords)
         V = np.divide(np.cross(E, B), (B ** 2).sum(-1, keepdims=True))
 
-        V_rtp = vector_cartesian_to_spherical(V, coords_spherical)
-        V_r = V_rtp[..., 0] * meters_per_Rs
-        V_theta = V_rtp[..., 1] * meters_per_Rs
-        V_phi = V_rtp[..., 2] * meters_per_Rs
+        # translate back into target spherical system
+        V_rtp = vector_cartesian_to_spherical(V, target_coords)
+        v_r_arr = V_rtp[0, :, :, 0, 0] * meters_per_Rs
+        v_theta_arr = V_rtp[0, :, :, 0, 1] * meters_per_Rs
+        v_phi_arr = V_rtp[0, :, :, 0, 2] * meters_per_Rs
 
-        # reshape for output
-        b_r_arr = B_r[0, :, :, 0]  # squeeze out r and t dimensions
-        b_theta_arr = B_theta[0, :, :, 0]
-        b_phi_arr = B_phi[0, :, :, 0]
-
-        v_r_arr = V_r[0, :, :, 0]
-        v_theta_arr = V_theta[0, :, :, 0]
-        v_phi_arr = V_phi[0, :, :, 0]
+        # translate back into target spherical system
+        B_rtp = vector_cartesian_to_spherical(B, target_coords)
+        b_r_arr = B_rtp[0, :, :, 0, 0]  # squeeze out r and t dimensions
+        b_theta_arr = B_rtp[0, :, :, 0, 1]
+        b_phi_arr = B_rtp[0, :, :, 0, 2]
 
         damping_arr = self.damping * np.ones_like(b_r_arr)
         mu_arr = self.mu * np.ones_like(b_r_arr)
@@ -244,7 +251,7 @@ if __name__ == '__main__':
     observer_distance = 1 * u.AU
 
     t_start = datetime(2025, 1, 1, )
-    t_end = datetime(2025, 2, 1)
+    t_end = datetime(2025, 1, 2)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
     lambda0 = 6173.3433 * u.AA
