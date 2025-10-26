@@ -454,3 +454,63 @@ if __name__ == '__main__':
     plt.savefig(os.path.join(out_path, 'velocity.jpg'), dpi=300)
     plt.close()
 
+    ########################################################################################################################
+    # plot log B
+
+    norm = SymLogNorm(1, vmin=-3000, vmax=3000)
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_rtp[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('PINN ME $B_r$')
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_rtp[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('PINN ME $B_t$')
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_rtp[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('PINN ME $B_p$')
+
+    ax = axs[1, 0]
+    im = ax.imshow(b_rtp_ref[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('Reference $B_r$')
+
+    ax = axs[1, 1]
+    im = ax.imshow(b_rtp_ref[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('Reference $B_t$')
+
+    ax = axs[1, 2]
+    im = ax.imshow(b_rtp_ref[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('Reference $B_p$')
+
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
+    [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
+
+    # add subtitle with date
+    plt.suptitle(f'Map at {target_time}', fontsize=16)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_path, 'log_B.jpg'), dpi=300)
+    plt.close()

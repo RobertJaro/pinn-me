@@ -1,21 +1,36 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_12h_v01"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/202405_12h_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_12h_v06"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/202405_12h_v01"
 data:
-  train_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h"}
-  valid_config: {data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h", sample_idx: 7}
+  train_configs:
+    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
+  valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h", sample_idx: 7, stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   ref_time: "2024-05-01T00:00:00"
   num_workers: 16
   batch_size: 65536
-  dataset_batch_size: 8192
-  seconds_per_dt: 864000 # 10 days
+  dataset_batch_size: 2048
+  seconds_per_dt: 86400 # 1 days
+  gauss_per_dB: 1000
+
+instrument:
+  - type: 'hmi'
+    instrument_id: 'HMI'
+    limb_correction: True
+    velocity_correction: False
+
 logging:
   project: pinn-me-spherical
-  tags: ["hmi"]
+  tags: [ "hmi" ]
   name: "2024-05 12h"
+
 model:
-  encoding: "gaussian"
+  vector_potential: False
+  encoding_config: {type: default, w0: 100}
+
 training:
   epochs: 500
-  lambda_stokes: [1, 1, 1, 1]
-  lambda_induction: 1.0e-3
+  lambda_stokes: [ 1, 1, 1, 1 ]
+  lambda_induction: { start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_divergence: { start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_force_free: { start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
+  lambda_static: 0.0

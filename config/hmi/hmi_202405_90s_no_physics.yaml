@@ -1,13 +1,13 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_no_physics_v01"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_90s_v08"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_no_physics_v08"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_90s_v14"
 data:
   train_configs:
     - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_90s", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_90s", sample_idx: 8, stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   ref_time: "2024-05-09T00:00:00"
   num_workers: 16
-  batch_size: 32768
+  batch_size: 65536
   dataset_batch_size: 8192
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
@@ -15,14 +15,16 @@ data:
 instrument:
   - type: 'hmi'
     instrument_id: 'HMI'
+    limb_correction: False
 
 logging:
   project: pinn-me-spherical
   tags: [ "hmi" ]
   name: "2024-05 90s no physics"
+
 model:
-  encoding: "time_split"
-  w0_initial: 100
+  encoding_config: {type: spatiotemporal} #{type: default, w0: 100}
+
 training:
   epochs: 500
   lambda_stokes: [ 1, 1, 1, 1 ]
@@ -30,3 +32,4 @@ training:
   lambda_divergence: 0.0
   lambda_force_free: 0.0
   lambda_static: 0.0
+  val_check_interval: 10000

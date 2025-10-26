@@ -84,3 +84,30 @@ class PositionalEncoding(nn.Module):
         encoded = encoded.reshape(x.shape[0], -1)
         encoded = torch.cat([torch.sin(encoded), torch.cos(encoded)], -1)
         return encoded
+
+class SpatiotemporalEncoding(nn.Module):
+
+    def __init__(self, d_input, num_freqs=32, max_spatial_freq=8, max_temporal_freq=2):
+        super().__init__()
+        spatial_frequencies = 2 ** torch.linspace(0, max_spatial_freq, num_freqs)
+        self.spatial_frequencies = nn.Parameter(spatial_frequencies[None, :, None], requires_grad=False)
+
+        temporal_frequencies = 2 ** torch.linspace(0, max_temporal_freq, num_freqs)
+        self.temporal_frequencies = nn.Parameter(temporal_frequencies[None, :, None], requires_grad=False)
+
+        self.d_output = d_input * (num_freqs * 2)
+
+    def forward(self, x):
+        t = x[..., :1]
+        spatial = x[..., 1:]
+
+        spatial_encoded = t[:, None, :] * torch.pi * self.temporal_frequencies
+        spatial_encoded = spatial_encoded.reshape(x.shape[0], -1)
+        spatial_encoded = torch.cat([torch.sin(spatial_encoded), torch.cos(spatial_encoded)], -1)
+
+        temporal_encoded = spatial[:, None, :] * torch.pi * self.spatial_frequencies
+        temporal_encoded = temporal_encoded.reshape(x.shape[0], -1)
+        temporal_encoded = torch.cat([torch.sin(temporal_encoded), torch.cos(temporal_encoded)], -1)
+
+        encoded = torch.cat([spatial_encoded, temporal_encoded], -1)
+        return encoded

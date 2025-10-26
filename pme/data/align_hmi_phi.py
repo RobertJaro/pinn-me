@@ -3,6 +3,7 @@ import os.path
 from multiprocessing import Pool
 
 import matplotlib.pyplot as plt
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from sunpy.coordinates import frames
 from sunpy.map import Map
@@ -23,7 +24,9 @@ class _Converter:
             return
 
         s_map = Map(file)
-        s_map = s_map.submap(bottom_left=self.bottom_left, top_right=self.top_right)
+        bl = SkyCoord(lat=self.bottom_left.lat, lon=self.bottom_left.lon, frame=frames.HeliographicCarrington, observer=s_map.coordinate_frame.observer)
+        tr = SkyCoord(lat=self.top_right.lat, lon=self.top_right.lon, frame=frames.HeliographicCarrington, observer=s_map.coordinate_frame.observer)
+        s_map = s_map.submap(bottom_left=bl, top_right=tr)
         s_map.save(save_path, overwrite=True)
 
         fig, ax = plt.subplots(figsize=(10, 10))
@@ -60,5 +63,5 @@ if __name__ == '__main__':
     top_right = ref_map.top_right_coord.transform_to(frames.HeliographicCarrington)
 
     with Pool(processes=8) as pool:
-        converter = _Converter(bottom_left, top_right, out_path)
+        converter = _Converter(bottom_left, top_right, out_path, overwrite=True)
         pool.map(converter.convert, hmi_files)

@@ -26,7 +26,9 @@ python3 -m pme.data.create_spheromak_test_set --out_path "/glade/campaign/hao/ra
 
 #################################################################################
 # inversion
-python3 -m pme.inversion_spherical --config config/spherical/2_obs.yaml
+#python3 -m pme.inversion_spherical --config config/spherical/2_obs.yaml
+python3 -m pme.inversion_spherical --config config/spherical/spheromak_1_obs.yaml
+
 
 # test transformation
 #python3 -m pme.data.test_B_transform

@@ -159,7 +159,7 @@ class GenericModel(nn.Module):
 class MESphericalModel(SirenModel):
 
     def __init__(self, vector_potential=False, **kwargs):
-        super().__init__(in_dim=4, out_dim=13, **kwargs)
+        super().__init__(in_dim=4, out_dim=14, **kwargs)
         self.vector_potential = vector_potential
 
     def forward(self, x):
@@ -167,13 +167,13 @@ class MESphericalModel(SirenModel):
         #
         if self.vector_potential:
             a = params[..., 0:3]
-            jac_matrix = jacobian(a, x)
-            dAy_dx = jac_matrix[:, 1, 1]
-            dAz_dx = jac_matrix[:, 2, 1]
-            dAx_dy = jac_matrix[:, 0, 2]
-            dAz_dy = jac_matrix[:, 2, 2]
-            dAx_dz = jac_matrix[:, 0, 3]
-            dAy_dz = jac_matrix[:, 1, 3]
+            a_jac_matrix = jacobian(a, x)
+            dAy_dx = a_jac_matrix[:, 1, 1]
+            dAz_dx = a_jac_matrix[:, 2, 1]
+            dAx_dy = a_jac_matrix[:, 0, 2]
+            dAz_dy = a_jac_matrix[:, 2, 2]
+            dAx_dz = a_jac_matrix[:, 0, 3]
+            dAy_dz = a_jac_matrix[:, 1, 3]
             # B = curl(A)
             b_x = (dAz_dy - dAy_dz)[..., None]
             b_y = (dAx_dz - dAz_dx)[..., None]
@@ -182,6 +182,9 @@ class MESphericalModel(SirenModel):
             b_x = params[..., 0:1]
             b_y = params[..., 1:2]
             b_z = params[..., 2:3]
+            a_jac_matrix = None
+
+        disambiguation = torch.tanh(params[..., 3:4])
 
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
@@ -193,10 +196,13 @@ class MESphericalModel(SirenModel):
         v_z = params[..., 11:12]
         kl = torch.sigmoid(params[..., 12:13]) * 100
         #
+        eta = 10 ** params[..., 13:14]
+        #
         output = {
             "b_x": b_x,
             "b_y": b_y,
             "b_z": b_z,
+            "disambiguation": disambiguation,
             "vmac": vmac,
             "damping": damping,
             "b0": b0,
@@ -205,6 +211,8 @@ class MESphericalModel(SirenModel):
             "v_y": v_y,
             "v_z": v_z,
             "kl": kl,
+            "a_jac_matrix": a_jac_matrix,
+            "eta": eta,
         }
 
         return output
@@ -267,15 +275,16 @@ class VelocityCorrectionModel(SirenModel):
 
 class LimbCorrectionModel(SirenModel):
     def __init__(self, **kwargs):
-        super().__init__(1, 6, dim=32, n_layers=4, w0_initial=1, **kwargs)
+        super().__init__(1, 6, dim=32, n_layers=4,
+                         encoding_config={'type': 'default', 'w0': 1.}, **kwargs)
 
     def forward(self, mu):
         x = super().forward(mu)
-        c_b0 = 10 ** x[..., 0:1]  # limb correction for B0
-        c_b1 = 10 ** x[..., 1:2]  # limb correction for B1
-        c_vmac = 10 ** x[..., 2:3]  # limb correction for v_mac
-        c_damping = 10 ** x[..., 3:4]  # limb correction for damping
-        c_kl = 10 ** x[..., 4:5]  # limb correction for kl
-        c_vdop = 200 * x[..., 5:6]  # limb correction for convective blue shift
+        c_b0 = torch.sigmoid(x[..., 0:1]) * 10  # limb correction for B0
+        c_b1 = torch.sigmoid(x[..., 1:2]) * 10  # limb correction for B1
+        c_vmac = torch.sigmoid(x[..., 2:3]) * 10  # limb correction for v_mac
+        c_damping = torch.sigmoid(x[..., 3:4]) * 10  # limb correction for damping
+        c_kl = torch.sigmoid(x[..., 4:5]) * 10  # limb correction for kl
+        c_vdop = x[..., 5:6] * 100  # limb correction for convective blue shift
         # c_vdop = self.limb_shift_velocity(mu)
         return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vmac': c_vmac, 'c_damping': c_damping, 'c_kl': c_kl, 'c_vdop': c_vdop}

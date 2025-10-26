@@ -15,8 +15,7 @@ from torch.optim.lr_scheduler import ExponentialLR
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import cartesian_to_spherical, spherical_to_cartesian
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import MESphericalModel, jacobian, INormalizationModule, VelocityCorrectionModel, LimbCorrectionModel, \
-    NormalizationModule
+from pme.model import MESphericalModel, jacobian, INormalizationModule, VelocityCorrectionModel, LimbCorrectionModel
 from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
 from pme.train.util import acos_safe, atan2_safe, log_wandb_image
 
@@ -29,7 +28,7 @@ class MESphericalModule(LightningModule):
                  lr_params=None, model_config=None, normalization_config=None,
                  lambda_stokes=None,
                  lambda_induction=0.0, lambda_divergence=0.0, lambda_force_free=0.0,
-                 lambda_static=0.0,
+                 lambda_static=0.0, lambda_gauge=0.0,
                  **kwargs):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
@@ -50,7 +49,7 @@ class MESphericalModule(LightningModule):
             instrument_type = instrument.pop('type')
             lambda0 = lambda_config[instrument_id]['lambda0']
             velocity_correction = instrument.pop('velocity_correction', False)
-            limb_correction = instrument.pop('limb_correction', True)
+            limb_correction = instrument.pop('limb_correction', False)
 
             if instrument_type == 'hmi':
                 forward_models[instrument_id] = HMIMEAtmosphere(lambda0=lambda0, **instrument)
@@ -72,14 +71,14 @@ class MESphericalModule(LightningModule):
 
         self.validation_outputs = {}
         normalization_config = normalization_config if normalization_config is not None else {}
-        self.normalization = NormalizationModule(**normalization_config)
+        self.normalization = INormalizationModule()
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
         #
         scheduled_lambda_config = {}
         lambdas = {}
         for k, v in [('induction', lambda_induction), ('divergence', lambda_divergence),
-                     ('force_free', lambda_force_free), ('static', lambda_static)]:
+                     ('force_free', lambda_force_free), ('static', lambda_static), ('gauge', lambda_gauge)]:
             if isinstance(v, dict):
                 gamma = (v['end'] / v['start']) ** (1 / v['iterations'])
                 scheduled_lambda_config[k] = {'end': v['end'], 'gamma': gamma}
@@ -186,12 +185,13 @@ class MESphericalModule(LightningModule):
             physics_losses = {'induction': torch.zeros_like(stokes_loss[..., 0]),
                               'divergence': torch.zeros_like(stokes_loss[..., 0]),
                               'force_free': torch.zeros_like(stokes_loss[..., 0]),
+                              'gauge': torch.zeros_like(stokes_loss[..., 0])
                               }
         else:
             spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
             # get coordinate range for sampling points
             min_t, max_t = torch.min(coords[..., 0]), torch.max(coords[..., 0])
-            min_r, max_r = 1.0, 1.01  # define a shell of 0.01 Rs around the sun
+            min_r, max_r = 1.0, 1.03  # define a shell of 0.03 Rs around the sun
             min_th, max_th = torch.min(spherical_coords[..., 1]), torch.max(spherical_coords[..., 1])
             min_phi, max_phi = torch.min(spherical_coords[..., 2]), torch.max(spherical_coords[..., 2])
 
@@ -214,32 +214,32 @@ class MESphericalModule(LightningModule):
             physics_out = self.parameter_model(random_coords)
             b = torch.cat([physics_out['b_x'], physics_out['b_y'], physics_out['b_z']], dim=-1)
             v = torch.cat([physics_out['v_x'], physics_out['v_y'], physics_out['v_z']], dim=-1)
+            a_jac_matrix = physics_out['a_jac_matrix']
+            eta = physics_out['eta']
 
             # compute physics losses
-            physics_losses = self.compute_physics_losses(b, v, random_coords)
+            physics_losses = self.compute_physics_losses(b, v, eta, a_jac_matrix, random_coords)
 
-        static_loss = transformed_output['v_rtp'][..., 0:1].mean().pow(2) # average radial velocity should be approx. zero
         #################################################
         # compute total loss
         total_loss = (stokes_loss.mean() +
                       self.lambdas['induction'] * physics_losses['induction'].mean() +
                       self.lambdas['divergence'] * physics_losses['divergence'].mean() +
                       self.lambdas['force_free'] * physics_losses['force_free'].mean() +
-                      self.lambdas['static'] * static_loss)
+                      self.lambdas['gauge'] * physics_losses['gauge'].mean())
 
         assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss,
-                "stokes_loss": stokes_loss,
+                "stokes_loss": stokes_loss.mean(),
                 "induction_loss": physics_losses['induction'].mean(),
                 "divergence_loss": physics_losses['divergence'].mean(),
                 "force_free_loss": physics_losses['force_free'].mean(),
-                "static_loss": static_loss,
                 }
 
-    def compute_physics_losses(self, b, v, coords):
+    def compute_physics_losses(self, b, v, eta, a_jac_matrix, coords):
         # compute B derivatives
         jac_matrix = jacobian(b, coords)
         dBx_dt = jac_matrix[..., 0, 0]
@@ -269,6 +269,12 @@ class MESphericalModule(LightningModule):
         dVz_dy = v_jac[:, 2, 2]
         dVz_dz = v_jac[:, 2, 3]
 
+        # compute j = curl(B)
+        rot_x = dBz_dy - dBy_dz
+        rot_y = dBx_dz - dBz_dx
+        rot_z = dBy_dx - dBx_dy
+        j = torch.stack([rot_x, rot_y, rot_z], -1)
+
         # compute induction loss
         div_V = (dVx_dx + dVy_dy + dVz_dz)[..., None]
         div_B = (dBx_dx + dBy_dy + dBz_dz)[..., None]
@@ -279,25 +285,46 @@ class MESphericalModule(LightningModule):
         V_nabla_B = torch.stack([v[:, 0] * dBx_dx + v[:, 1] * dBx_dy + v[:, 2] * dBx_dz,
                                  v[:, 0] * dBy_dx + v[:, 1] * dBy_dy + v[:, 2] * dBy_dz,
                                  v[:, 0] * dBz_dx + v[:, 1] * dBz_dy + v[:, 2] * dBz_dz, ], -1)
-        induction_rhs = B_nabla_V - V_nabla_B - b * div_V + v * div_B
 
-        induction_equation = dB_dt - induction_rhs
-        induction_loss = induction_equation.pow(2).sum(-1)
+        vxB = torch.cross(v, b, dim=-1)
+
+        if a_jac_matrix is not None:
+            # A derivatives
+            dAx_dt = a_jac_matrix[:, 0, 0]
+            dAx_dx = a_jac_matrix[:, 0, 1]
+            dAx_dy = a_jac_matrix[:, 0, 2]
+            dAx_dz = a_jac_matrix[:, 0, 3]
+            dAy_dt = a_jac_matrix[:, 1, 0]
+            dAy_dx = a_jac_matrix[:, 1, 1]
+            dAy_dy = a_jac_matrix[:, 1, 2]
+            dAy_dz = a_jac_matrix[:, 1, 3]
+            dAz_dt = a_jac_matrix[:, 2, 0]
+            dAz_dx = a_jac_matrix[:, 2, 1]
+            dAz_dy = a_jac_matrix[:, 2, 2]
+            dAz_dz = a_jac_matrix[:, 2, 3]
+            dA_dt = torch.stack([dAx_dt, dAy_dt, dAz_dt], -1)
+
+            induction_equation = dA_dt - vxB + eta * j
+            induction_loss = induction_equation.pow(2).sum(-1)
+
+            # compute Coulomb gauge condition
+            gauge_loss = (dAx_dx + dAy_dy + dAz_dz).pow(2)
+        else:
+            induction_rhs = B_nabla_V - V_nabla_B - b * div_V + v * div_B
+            induction_equation = dB_dt - induction_rhs
+            induction_loss = induction_equation.pow(2).sum(-1)
+            gauge_loss = torch.zeros_like(induction_loss)
 
         # compute divergence loss
         divergence_loss = div_B.pow(2).sum(-1)
 
-        # compute force_free
-        rot_x = dBz_dy - dBy_dz
-        rot_y = dBx_dz - dBz_dx
-        rot_z = dBy_dx - dBx_dy
-        j = torch.stack([rot_x, rot_y, rot_z], -1)
         # compute force-free condition
         force_free_loss = torch.cross(j, b, dim=-1).pow(2).sum(-1)
 
-        # x = r * cos(t) * cos(p)
-        # y = r * cos(t) * sin(p)
-        # z = r * sin(t)
+
+        # x = r * sin(t) * cos(p)
+        # y = r * sin(t) * sin(p)
+        # z = r * cos(t)
         spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
         dx_dr = torch.sin(spherical_coords[..., 1]) * torch.cos(spherical_coords[..., 2])
         dy_dr = torch.sin(spherical_coords[..., 1]) * torch.sin(spherical_coords[..., 2])
@@ -310,8 +337,9 @@ class MESphericalModule(LightningModule):
         return {'divergence': divergence_loss,
                 'force_free': force_free_loss,
                 'induction': induction_loss,
+                'gauge': gauge_loss,
                 'dB_dt': dB_dt.pow(2).sum(-1).pow(0.5),
-                'curl_VxB': induction_rhs.pow(2).sum(-1).pow(0.5),
+                'curl_VxB': vxB.pow(2).sum(-1).pow(0.5),
                 'dB_dr': dB_dr.pow(2).sum(-1).pow(0.5),
                 }
 
@@ -471,7 +499,9 @@ class MESphericalModule(LightningModule):
 
         b = transformed_output['b_xyz']
         v = transformed_output['v_xyz']
-        physics_losses = self.compute_physics_losses(b, v, coords)
+        eta = output['eta']
+        a_jac_matrix = output['a_jac_matrix']
+        physics_losses = self.compute_physics_losses(b, v, eta, a_jac_matrix, coords)
 
         res = {'diff': diff.detach(),
                'stokes_true': stokes_true_normalized.detach(), 'stokes_pred': stokes_pred_normalized.detach(),
@@ -488,6 +518,7 @@ class MESphericalModule(LightningModule):
                'dB_dr': physics_losses['dB_dr'].detach(),
                'mu': mu.detach(), 'v_obs_los': v_obs_los.detach(),
                'v_obs_correction': v_obs_correction.detach(),
+               'eta': eta.detach(),
                }
         if limb_correction is not None:
             res['c_b0'] = limb_correction['c_b0'].detach()
@@ -512,7 +543,7 @@ class MESphericalModule(LightningModule):
         for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
                   'v_rtp', 'b_rtp', 'v_img', 'b_img', 'v_obs_correction',
                   'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr', 'mu', 'v_obs_los',
-                  'c_b0', 'c_b1', 'c_vmac', 'c_damping', 'c_kl', 'c_vdop']:
+                  'c_b0', 'c_b1', 'c_vmac', 'c_damping', 'c_kl', 'c_vdop', 'eta']:
             if k not in outputs:
                 continue
             field = outputs[k].reshape(*self.image_shape[:2], -1).cpu().numpy().squeeze()
@@ -777,8 +808,8 @@ class MESphericalModule(LightningModule):
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
         ax = axs[1, 2]
-        im = ax.imshow(parameters['mu'], origin='lower', vmin=0, vmax=1, cmap='cividis')
-        ax.set_title("Mu")
+        im = ax.imshow(parameters['eta'], origin='lower', cmap='cividis', norm='log')
+        ax.set_title("Eta")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
@@ -893,7 +924,7 @@ class MESphericalModule(LightningModule):
         v_img = parameters['v_img']
         v_obs_correction = parameters['v_obs_correction']
 
-        v_min_max = 2000  # m/s
+        v_min_max = 5000  # m/s
         norm = Normalize(vmin=-v_min_max, vmax=v_min_max)
 
         fig, axs = plt.subplots(3, 3, figsize=(10, 7), dpi=100)

@@ -91,7 +91,7 @@ trainer = Trainer(max_epochs=int(epochs),
                   num_sanity_val_steps=-1,
                   check_val_every_n_epoch=check_val_every_n_epoch,
                   val_check_interval=val_check_interval,
-                  gradient_clip_val=0.1,
+                  gradient_clip_val=2,
                   # reload dataloaders to avoid oscillating loss
                   reload_dataloaders_every_n_epochs=check_val_every_n_epoch if check_val_every_n_epoch is not None else 0,
                   callbacks=[checkpoint_callback, save_callback], )

@@ -111,6 +111,8 @@ class PINNMEOutput:
             pred = self.parameter_model(batch)
 
             for key, value in pred.items():
+                if value is None:
+                    continue
                 if key not in parameters:
                     parameters[key] = []
                 value = value.detach().cpu().numpy()

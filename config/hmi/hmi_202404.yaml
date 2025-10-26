@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/hmi_202403_v02"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi_202403_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202403_v01"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/202403_v01"
 data:
   train_configs:
     - { type: 'hmi', data_path: "/glade/work/rjarolim/data/phi_stokes/LB5_hmi", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
@@ -20,12 +20,13 @@ logging:
   project: pinn-me-spherical
   tags: [ "hmi" ]
   name: "2024-04 HMI"
+
 model:
-  encoding: "time_split"
-  w0_initial: 100
+  encoding: "gaussian"
+
 training:
   epochs: 1.0e+3
-  lambda_stokes: [ 1, 1, 1, 1 ]
+  lambda_stokes: [ 1, 4, 4, 4 ]
   lambda_induction: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_divergence: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
   lambda_force_free: 1.0e-3 #{ start: 1.0e-3, end: 1.0e-6, iterations: 5.0e+4 }
