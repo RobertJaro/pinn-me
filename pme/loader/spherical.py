@@ -1,7 +1,7 @@
+import copy
 import glob
 import os
 from datetime import datetime
-from itertools import repeat
 from multiprocessing import Pool
 from typing import Iterable
 
@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from pme.data.phi_util import load_fix_phi_header
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
+from pme.loader.util import MultiprocessingWrapper
 from pme.train.data_loader import TensorsDataset, CombinedDataset
 
 
@@ -46,40 +47,51 @@ class SphericalDataModule(LightningDataModule):
         train_configs = train_configs if isinstance(train_configs, list) else [train_configs]
         train_datasets = []
         for i, train_config in enumerate(train_configs):
-            ds_type = train_config['type'].lower()
+            train_config = copy.deepcopy(train_config)
+            ds_type = train_config.pop('type').lower()
             if ds_type == 'hmi':
-                train_files = self._load_IQUV_files(train_config['data_path'])
+                train_files = self._load_IQUV_files(train_config.pop('data_path'))
                 ds_class = HMISphericalDataset
             elif ds_type == 'phi-hrt':
-                train_files = self._load_all_files(train_config['data_path'])
+                train_files = self._load_all_files(train_config.pop('data_path'))
                 ds_class = PHIHRTSphericalDataset
             elif ds_type == 'phi-fdt':
-                train_files = self._load_all_files(train_config['data_path'])
+                train_files = self._load_all_files(train_config.pop('data_path'))
                 ds_class = PHIFDTSphericalDataset
+            elif ds_type == 'test':
+                train_files = self._load_IQUV_files(train_config.pop('data_path'))
+                ds_class = TestSphericalDataset
             else:
                 raise ValueError(f'Unknown dataset type: {ds_type}')
 
             if 'sample_idx' in train_config:  # use a single sample for debugging
-                sample_idx = train_config['sample_idx']
+                sample_idx = train_config.pop('sample_idx')
                 train_files = train_files[sample_idx:sample_idx + 1]
             if 'n_samples' in train_config:  # apply subsampling for debugging
-                n_samples = train_config['n_samples']
+                n_samples = train_config.pop('n_samples')
                 sampling = len(train_files) // n_samples
                 train_files = train_files[::sampling]
             if 'first_n_samples' in train_config:  # apply subsampling for debugging
-                first_n_samples = train_config['first_n_samples']
+                first_n_samples = train_config.pop('first_n_samples')
                 train_files = train_files[:first_n_samples]
             with Pool(num_workers) as p:
                 print(f'Processing {len(train_files)} training files with {num_workers} workers...')
                 ds_ids = [f'train_{i:02d}_{j:03d}' for j in range(len(train_files))]
-                ds_normalization = train_config.get('stokes_normalization', stokes_normalization)
-                instrument_id = train_config['instrument_id']
-                oversample_factor = train_config.get('oversample_factor', 1)
-                args = zip(train_files, ds_ids, repeat(instrument_id), repeat(seconds_per_dt), repeat(Rs_per_ds),
-                           repeat(ref_time),
-                           repeat(ds_normalization), repeat(self.dataset_batch_size), repeat(work_directory),
-                           repeat(oversample_factor))
-                tds = p.starmap(ds_class, args)
+                ds_normalization = train_config.pop('stokes_normalization', stokes_normalization)
+                instrument_id = train_config.pop('instrument_id')
+                oversample_factor = train_config.pop('oversample_factor', 1)
+                process_wrapper = MultiprocessingWrapper(ds_class,
+                                                         instrument_id=instrument_id,
+                                                         seconds_per_dt=seconds_per_dt,
+                                                         Rs_per_ds=Rs_per_ds,
+                                                         ref_time=ref_time,
+                                                         batch_size=self.dataset_batch_size,
+                                                         work_directory=work_directory,
+                                                         oversample_factor=oversample_factor,
+                                                         stokes_normalization=ds_normalization,
+                                                         **train_config)
+                args = [{'data': tf, 'ds_id': ds_id} for tf, ds_id in zip(train_files, ds_ids)]
+                tds = p.map(process_wrapper.run, args)
             train_datasets += tds  # append all datasets
 
         self.train_datasets = train_datasets
@@ -131,6 +143,16 @@ class SphericalDataModule(LightningDataModule):
                                                         stokes_normalization=ds_normalization,
                                                         batch_size=self.batch_size, work_directory=work_directory,
                                                         filter_nans=False, shuffle=False)
+        elif valid_ds_type == 'test':
+            valid_files = self._load_IQUV_files(valid_config['data_path'])
+            sample_idx = valid_config.get('sample_idx', len(valid_files) // 2)
+            self.valid_dataset = TestSphericalDataset(valid_files[sample_idx], noise=valid_config.get('noise', 0),
+                                                      ds_id='valid', instrument_id=valid_config['instrument_id'],
+                                                      seconds_per_dt=seconds_per_dt,
+                                                      Rs_per_ds=Rs_per_ds, ref_time=ref_time,
+                                                      stokes_normalization=ds_normalization,
+                                                      batch_size=self.batch_size, work_directory=work_directory,
+                                                      filter_nans=False, shuffle=False)
         else:
             raise ValueError(f'Unknown validation dataset type: {valid_ds_type}')
 
@@ -191,7 +213,7 @@ class SphericalDataModule(LightningDataModule):
         if isinstance(data_path, str):
             return sorted(glob.glob(data_path))
         elif isinstance(data_path, Iterable):
-            files = [f  for d in data_path for f in glob.glob(d)]
+            files = [f for d in data_path for f in glob.glob(d)]
             return sorted(files)
         else:
             raise ValueError(f'Unknown data path type: {type(data_path)}. Expected str or Iterable[str].')
@@ -295,14 +317,15 @@ def load_v_observer_LOS(s_map):
     hpc_out = hgc_out.transform_to(frame=frames.Helioprojective)
 
     # Components of the satellite velocity
-    v_sdo_r = s_map.meta['OBS_VR'] # positive is away from Sun
+    v_sdo_r = s_map.meta['OBS_VR']  # positive is away from Sun
     v_sdo_w = s_map.meta['OBS_VW']
     v_sdo_n = s_map.meta['OBS_VN']
 
     theta_x = hpc_out.Tx.to_value(u.rad)
     theta_y = hpc_out.Ty.to_value(u.rad)
 
-    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2), np.cos(theta_y) * np.cos(theta_x))
+    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2),
+                         np.cos(theta_y) * np.cos(theta_x))
     psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
 
     # satellite motion
@@ -314,29 +337,29 @@ def load_v_observer_LOS(s_map):
 
 class HMISphericalDataset(SphericalDataset):
 
-    def __init__(self, files, *args, **kwargs):
+    def __init__(self, data, *args, **kwargs):
         lambda0 = 6173.3433 * u.AA
         lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA  # From Phillip Scherrer
         lambda_config = {'lambda_grid': lambda_grid, 'lambda0': lambda0}
 
-        I, Q, U, V = files
+        I, Q, U, V = data
         ref_file = I[0]
         s_map = Map(ref_file)
         map_data = load_map_data(s_map)
-        stokes = load_stokes_data(files)
+        stokes = load_stokes_data(data)
 
         super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
 
 
 class PHIHRTSphericalDataset(SphericalDataset):
 
-    def __init__(self, file, *args, **kwargs):
+    def __init__(self, data, *args, **kwargs):
         # wave_axis, voltagesData, tunning_constant, cpos, ref_wavelength = fits_get_sampling(file)
         # wave_axis = wave_axis * u.AA  # convert to angstroms
         # ref_wavelength = ref_wavelength * u.AA  # convert to angstroms
         # lambda_center = ref_wavelength
         # lambda_grid = wave_axis - lambda_center
-        header = fits.getheader(file)
+        header = fits.getheader(data)
         lambda_center = header['WAVELNTH'] * u.AA  # reference wavelength from header
         lambda_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)]) * u.AA
         lambda_grid = lambda_grid - lambda_center  # center the grid at the reference wavelength
@@ -350,11 +373,11 @@ class PHIHRTSphericalDataset(SphericalDataset):
             header['CROTA2'] = header['CROTA']
 
         # (wl, stokes, x, y)
-        data = fits.getdata(file)
+        stokes_data = fits.getdata(data)
         # --> (x, y, stokes, wl)
-        stokes = np.transpose(data, (2, 3, 1, 0))
+        stokes = np.transpose(stokes_data, (2, 3, 1, 0))
         stokes[stokes[:, :, 0, :].sum(-1) <= 1e-3] = np.nan  # mask out stokes I < 1e-3
-        ref_map = Map(data, header)  # use the first wavelength as reference map
+        ref_map = Map(stokes_data, header)  # use the first wavelength as reference map
         map_data = load_map_data(ref_map)
 
         super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
@@ -362,13 +385,13 @@ class PHIHRTSphericalDataset(SphericalDataset):
 
 class PHIFDTSphericalDataset(SphericalDataset):
 
-    def __init__(self, file, *args, **kwargs):
+    def __init__(self, data, *args, **kwargs):
         # wave_axis, voltagesData, tunning_constant, cpos, ref_wavelength = fits_get_sampling(file)
         # wave_axis = wave_axis * u.AA  # convert to angstroms
         # ref_wavelength = ref_wavelength * u.AA  # convert to angstroms
         # lambda_center = ref_wavelength
         # lambda_grid = wave_axis - lambda_center
-        header = load_fix_phi_header(file)
+        header = load_fix_phi_header(data)
         lambda_center = header['WAVELNTH'] * u.AA  # reference wavelength from header
         lambda_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)]) * u.AA
         lambda_grid = lambda_grid - lambda_center  # center the grid at the reference wavelength
@@ -378,11 +401,31 @@ class PHIFDTSphericalDataset(SphericalDataset):
         header['DATE-OBS'] = header['DATE_EAR']
 
         # (wl, stokes, x, y)
-        data = fits.getdata(file)
+        stokes_data = fits.getdata(data)
         # --> (x, y, stokes, wl)
-        stokes = np.transpose(data, (2, 3, 1, 0))
-        ref_map = Map(data, header)
+        stokes = np.transpose(stokes_data, (2, 3, 1, 0))
+        ref_map = Map(stokes_data, header)
         map_data = load_map_data(ref_map)
+
+        super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
+
+
+class TestSphericalDataset(SphericalDataset):
+
+    def __init__(self, data, noise=0, *args, **kwargs):
+        lambda0 = 6173.3433 * u.AA
+        lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA  # From Phillip Scherrer
+        lambda_config = {'lambda_grid': lambda_grid, 'lambda0': lambda0}
+
+        I, Q, U, V = data
+        ref_file = I[0]
+        s_map = Map(ref_file)
+        map_data = load_map_data(s_map)
+        stokes = load_stokes_data(data)
+
+        # add noise
+        normal_noise = np.random.normal(size=stokes.shape, scale=noise)
+        stokes += normal_noise
 
         super().__init__(stokes, map_data, lambda_config, *args, **kwargs)
 
@@ -417,7 +460,7 @@ def load_map_data(s_map):
     r = np.ones_like(lon)  # carrington_coords.radius
     # r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
     # convert latitude to colatitude
-    carrington_coords = np.stack([r,  np.pi / 2 - lat, lon], -1)
+    carrington_coords = np.stack([r, np.pi / 2 - lat, lon], -1)
 
     # create rtp transform
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(carrington_coords)

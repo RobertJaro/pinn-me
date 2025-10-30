@@ -95,9 +95,8 @@ class SphericalTestSetGenerator(TestSetGenerator):
         helioprojective_coords = helioprojective_coords.transform_to(frames.Helioprojective)
         radial_distance = np.sqrt(
             helioprojective_coords.Tx ** 2 + helioprojective_coords.Ty ** 2) / helioprojective_map.rsun_obs
-        mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
+        mu = np.sqrt(1 - radial_distance ** 2)
         mu = mu.astype(np.float32)
-        mu[mu < 0] = np.nan
         transformed_parameters['mu'] = mu
 
         # Transform vector quantities -- B, V -- to image coordinates

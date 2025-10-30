@@ -13,7 +13,7 @@ from sunpy.map import Map, all_coordinates_from_map
 from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix, spherical_to_cartesian_matrix
-from pme.evaluation.loader import PINNMEOutput
+from pme.evaluation.loader import PINNMEOutput, SPINNMEOutput
 from pme.loader.spherical import load_v_observer_LOS
 
 if __name__ == '__main__':
@@ -35,7 +35,7 @@ if __name__ == '__main__':
     os.makedirs(out_path, exist_ok=True)
 
     # load
-    pinnme = PINNMEOutput(in_path)
+    pinnme = SPINNMEOutput(in_path)
 
     # load reference maps
     ref_map = Map(args.ref_map_fld)
@@ -120,8 +120,23 @@ if __name__ == '__main__':
     b_rtp_ref = np.einsum('...ij,...j->...i', a_matrix, b_img_ref)
     spherical_to_cartesian_matrix = spherical_to_cartesian_matrix(spherical_coords)
     b_xyz_ref = np.einsum('...ij,...j->...i', spherical_to_cartesian_matrix, b_rtp_ref)
+
     ########################################################################################################################
-    # Plot subframe in B_r, B_theta, B_phi
+    # disambiguate PINN ME
+    azi_disambig = azi % 180
+    azi_disambig[condition] += 180
+
+    b_xi_disambig = - fld * np.sin(np.deg2rad(inc)) * np.sin(np.deg2rad(azi_disambig))
+    b_eta_disambig = fld * np.sin(np.deg2rad(inc)) * np.cos(np.deg2rad(azi_disambig))
+    b_zeta_disambig = fld * np.cos(np.deg2rad(inc))
+
+    b_img_disambig = np.concatenate([b_xi_disambig, b_eta_disambig, b_zeta_disambig], axis=-1)
+
+    b_rtp_disambig = np.einsum('...ij,...j->...i', a_matrix, b_img_disambig)
+    b_xyz_disambig = np.einsum('...ij,...j->...i', spherical_to_cartesian_matrix, b_rtp_disambig)
+
+    ########################################################################################################################
+    # Plot in B_r, B_theta, B_phi
 
     norm = Normalize(-500, 500)
 
@@ -179,6 +194,67 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     plt.savefig(os.path.join(out_path, 'reference_comparison.jpg'), dpi=300)
+    plt.close()
+
+    ########################################################################################################################
+    # Plot disambiguated B_r, B_theta, B_phi
+
+    norm = Normalize(-500, 500)
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_rtp_disambig[..., 0], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('PINN ME $B_r$')
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_rtp_disambig[..., 1], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('PINN ME $B_t$')
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_rtp_disambig[..., 2], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('PINN ME $B_p$')
+
+    ax = axs[1, 0]
+    im = ax.imshow(b_rtp_ref[..., 0], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('Reference $B_r$')
+
+    ax = axs[1, 1]
+    im = ax.imshow(b_rtp_ref[..., 1], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('Reference $B_t$')
+
+    ax = axs[1, 2]
+    im = ax.imshow(b_rtp_ref[..., 2], cmap='gray', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('Reference $B_p$')
+
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
+    [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
+
+    # add subtitle with date
+    plt.suptitle(f'Map at {target_time}', fontsize=16)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_path, 'reference_comparison_disambiguated.jpg'), dpi=300)
     plt.close()
 
     ########################################################################################################################
@@ -261,7 +337,6 @@ if __name__ == '__main__':
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
-
 
     [ax.set_xlabel(' ') for ax in axs.flatten()]
     [ax.set_ylabel(' ') for ax in axs.flatten()]
@@ -513,4 +588,66 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     plt.savefig(os.path.join(out_path, 'log_B.jpg'), dpi=300)
+    plt.close()
+
+
+    ########################################################################################################################
+    # plot log B disambiguated
+
+    norm = SymLogNorm(1, vmin=-3000, vmax=3000)
+
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
+
+    ax = axs[0, 0]
+    im = ax.imshow(b_rtp_disambig[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('PINN ME $B_r$')
+
+    ax = axs[0, 1]
+    im = ax.imshow(b_rtp_disambig[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('PINN ME $B_t$')
+
+    ax = axs[0, 2]
+    im = ax.imshow(b_rtp_disambig[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('PINN ME $B_p$')
+
+    ax = axs[1, 0]
+    im = ax.imshow(b_rtp_ref[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
+    ax.set_title('Reference $B_r$')
+
+    ax = axs[1, 1]
+    im = ax.imshow(b_rtp_ref[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
+    ax.set_title('Reference $B_t$')
+
+    ax = axs[1, 2]
+    im = ax.imshow(b_rtp_ref[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+    fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
+    ax.set_title('Reference $B_p$')
+
+    [ax.set_xlabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel(' ') for ax in axs.flatten()]
+    [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
+    [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
+
+    # add subtitle with date
+    plt.suptitle(f'Map at {target_time}', fontsize=16)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_path, 'log_B_disambiguated.jpg'), dpi=300)
     plt.close()

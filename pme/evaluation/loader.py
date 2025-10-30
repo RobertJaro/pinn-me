@@ -1,11 +1,13 @@
+from datetime import datetime
+
 import numpy as np
 import torch
 from astropy import units as u
 from torch import nn
 from tqdm import tqdm
 
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix
 from pme.model import jacobian
-from pme.train.me_atmosphere import MEAtmosphere
 
 
 class PINNMEOutput:
@@ -23,7 +25,7 @@ class PINNMEOutput:
         self.lambda_config = state['lambda_config']
         self.data_range = state['data_range']
 
-        lambda_config = list(self.lambda_config.values())[0] # use first instrument as default
+        lambda_config = list(self.lambda_config.values())[0]  # use first instrument as default
         # self.forward_model = MEAtmosphere(**lambda_config).to(self.device)
         # self.forward_model = nn.DataParallel(self.forward_model)
         # self.forward_model.eval()
@@ -95,7 +97,7 @@ class PINNMEOutput:
 
         return parameters
 
-    def load_parameters(self, coords, batch_size=int(2 ** 13), progress=True, compute_jacobian=False):
+    def load_parameters(self, coords, batch_size=int(2 ** 13), progress=True):
         batch_size = batch_size * torch.cuda.device_count() if torch.cuda.is_available() else batch_size
         coords_shape = coords.shape
         coords_tensor = torch.tensor(coords, dtype=torch.float32).reshape(-1, coords.shape[-1])
@@ -149,6 +151,30 @@ class PINNMEOutput:
 
     def _normalize_time(self, time):
         return (time - self.ref_time).total_seconds() / self.seconds_per_dt
+
+
+class SPINNMEOutput(PINNMEOutput):
+
+    def load_coords(self, spherical_coords, times):
+        #
+        cartesian_coords = spherical_to_cartesian(spherical_coords)
+        if isinstance(times, datetime):
+            time_coords = np.full((*spherical_coords.shape[:-1], 1), times)
+        normalized_time = self._normalize_time(times)
+
+        coords = np.concatenate([normalized_time, cartesian_coords], axis=-1)
+        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
+
+        parameter_cube = self.load_parameters(coords=coords)
+        b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']],
+                               axis=-1) * self.gauss_per_dB
+        b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
+
+        v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']],
+                               axis=-1) * self.meters_per_ds / self.seconds_per_dt
+        v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
+
+        return {'b_rtp': b_rtp, 'v_rtp': v_rtp}
 
 
 def to_cartesian(b, inc, azi, disamb=None):

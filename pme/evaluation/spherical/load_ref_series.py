@@ -43,7 +43,7 @@ if __name__ == '__main__':
         # bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
         # tr = SkyCoord(500 * u.arcsec, 500 * u.arcsec, frame=ref_map.coordinate_frame)
         # ref_map = ref_map.submap(bl, top_right=tr)
-        # ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 128x128 pixels
+        ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 512x512 pixels
 
         # load time
         target_time = ref_map.date.to_datetime()

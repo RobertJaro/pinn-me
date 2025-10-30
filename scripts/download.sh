@@ -65,3 +65,7 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 
 # 2024-03-27
 python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240327_720s --email robert.jarolim@uni-graz.at --t_start 2024-03-27T00:00:00 --t_end 2024-03-28T00:00:00 --series 'S_720s' --cadence '6h'
+
+
+# PHI aligned observations
+python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_stokes/20240327_3h --email "robert.jarolim@uni-graz.at" --t_start "2024-03-27T00:00:00" --t_end "2024-04-01T00:00:00" --series 'S_720s' --cadence "3h"

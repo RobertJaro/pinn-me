@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import wandb
 from torch import nn
 from torch.distributions import Normal
 
@@ -85,9 +86,10 @@ class PositionalEncoding(nn.Module):
         encoded = torch.cat([torch.sin(encoded), torch.cos(encoded)], -1)
         return encoded
 
+
 class SpatiotemporalEncoding(nn.Module):
 
-    def __init__(self, d_input, num_freqs=32, max_spatial_freq=8, max_temporal_freq=2):
+    def __init__(self, d_input, num_freqs=128, max_spatial_freq=8, max_temporal_freq=2):
         super().__init__()
         spatial_frequencies = 2 ** torch.linspace(0, max_spatial_freq, num_freqs)
         self.spatial_frequencies = nn.Parameter(spatial_frequencies[None, :, None], requires_grad=False)
@@ -101,13 +103,64 @@ class SpatiotemporalEncoding(nn.Module):
         t = x[..., :1]
         spatial = x[..., 1:]
 
-        spatial_encoded = t[:, None, :] * torch.pi * self.temporal_frequencies
+        spatial_encoded = spatial[:, None, :] * torch.pi * self.spatial_frequencies
         spatial_encoded = spatial_encoded.reshape(x.shape[0], -1)
         spatial_encoded = torch.cat([torch.sin(spatial_encoded), torch.cos(spatial_encoded)], -1)
 
-        temporal_encoded = spatial[:, None, :] * torch.pi * self.spatial_frequencies
+        temporal_encoded = t[:, None, :] * torch.pi * self.temporal_frequencies
         temporal_encoded = temporal_encoded.reshape(x.shape[0], -1)
         temporal_encoded = torch.cat([torch.sin(temporal_encoded), torch.cos(temporal_encoded)], -1)
+
+        encoded = torch.cat([spatial_encoded, temporal_encoded], -1)
+        return encoded
+
+
+class ProgressiveSpatiotemporalEncoding(nn.Module):
+
+    def __init__(self, d_input, num_freqs=128, min_freq=0, max_spatial_freq=8, max_temporal_freq=1,
+                 max_iter=1e5, transition_step=0.01):
+        super().__init__()
+        self.num_freqs = num_freqs
+        spatial_frequencies = 2 ** torch.linspace(min_freq, max_spatial_freq, num_freqs)
+        self.register_buffer('spatial_frequencies', spatial_frequencies[None, :, None])
+
+        temporal_frequencies = 2 ** torch.linspace(min_freq, max_temporal_freq, num_freqs)
+        self.register_buffer('temporal_frequencies', temporal_frequencies[None, :, None])
+
+        self.d_output = d_input * (num_freqs * 2)
+
+        self.max_iter = max_iter
+        self.transition_step = transition_step
+        self.weights = nn.Parameter(torch.zeros(num_freqs), requires_grad=False)
+        self.step(0)
+
+    @torch.no_grad()
+    def step(self, global_step):
+        t = global_step / self.max_iter
+        t_l = torch.linspace(0, 1, self.num_freqs, device=self.spatial_frequencies.device)
+        weights = 1 - torch.sigmoid((t_l - t) / self.transition_step)  # smooth transition
+        self.weights.copy_(weights)
+        # log current t value
+        wandb.log({'posenc_progress': t}, commit=False)
+
+    def forward(self, x):
+        t = x[..., :1]
+        spatial = x[..., 1:]
+
+        weights = self.weights[None, :, None]
+
+        spatial_encoded = spatial[:, None, :] * torch.pi * self.spatial_frequencies
+        spatial_sin_encoded = torch.sin(spatial_encoded) * weights
+        spatial_cos_encoded = torch.cos(spatial_encoded) * weights
+        spatial_encoded = torch.cat([spatial_sin_encoded, spatial_cos_encoded], 1)
+        spatial_encoded = spatial_encoded.reshape(x.shape[0], -1)
+
+
+        temporal_encoded = t[:, None, :] * torch.pi * self.temporal_frequencies
+        temporal_sin_encoded = torch.sin(temporal_encoded) * weights
+        temporal_cos_encoded = torch.cos(temporal_encoded) * weights
+        temporal_encoded = torch.cat([temporal_sin_encoded, temporal_cos_encoded], 1)
+        temporal_encoded = temporal_encoded.reshape(x.shape[0], -1)
 
         encoded = torch.cat([spatial_encoded, temporal_encoded], -1)
         return encoded

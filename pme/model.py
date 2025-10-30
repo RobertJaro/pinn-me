@@ -158,15 +158,17 @@ class GenericModel(nn.Module):
 
 class MESphericalModel(SirenModel):
 
-    def __init__(self, vector_potential=False, **kwargs):
+    def __init__(self, vector_potential=False, scale=False, **kwargs):
         super().__init__(in_dim=4, out_dim=14, **kwargs)
         self.vector_potential = vector_potential
+        self.scale = scale
 
     def forward(self, x):
         params = super().forward(x)
         #
         if self.vector_potential:
-            a = params[..., 0:3]
+            a_scale = 10 ** params[..., 3:4] if self.scale else 1.0
+            a = params[..., 0:3] * a_scale
             a_jac_matrix = jacobian(a, x)
             dAy_dx = a_jac_matrix[:, 1, 1]
             dAz_dx = a_jac_matrix[:, 2, 1]
@@ -179,21 +181,21 @@ class MESphericalModel(SirenModel):
             b_y = (dAx_dz - dAz_dx)[..., None]
             b_z = (dAy_dx - dAx_dy)[..., None]
         else:
-            b_x = params[..., 0:1]
-            b_y = params[..., 1:2]
-            b_z = params[..., 2:3]
+            b_scale = 10 ** params[..., 3:4] if self.scale else 1.0
+            b_x = params[..., 0:1] * b_scale
+            b_y = params[..., 1:2] * b_scale
+            b_z = params[..., 2:3] * b_scale
             a_jac_matrix = None
-
-        disambiguation = torch.tanh(params[..., 3:4])
 
         vmac = torch.sigmoid(params[..., 4:5]) * 20e3
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
 
-        v_x = params[..., 9:10]
-        v_y = params[..., 10:11]
-        v_z = params[..., 11:12]
+        v_scale = 10 ** params[..., 8:9]
+        v_x = params[..., 9:10] * v_scale
+        v_y = params[..., 10:11] * v_scale
+        v_z = params[..., 11:12] * v_scale
         kl = torch.sigmoid(params[..., 12:13]) * 100
         #
         eta = 10 ** params[..., 13:14]
@@ -202,7 +204,6 @@ class MESphericalModel(SirenModel):
             "b_x": b_x,
             "b_y": b_y,
             "b_z": b_z,
-            "disambiguation": disambiguation,
             "vmac": vmac,
             "damping": damping,
             "b0": b0,
@@ -242,14 +243,15 @@ class NormalizationModule(nn.Module):
 
 class INormalizationModule(nn.Module):
 
-    def __init__(self):
+    def __init__(self, stretch_factor=1e2, **kwargs):
         super().__init__()
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e2), dtype=torch.float32))
+        self.stretch_factor = stretch_factor
+        self.register_buffer("stretch", torch.tensor(np.arcsinh(stretch_factor), dtype=torch.float32))
 
     def forward(self, stokes):
         # total_intensity = stokes[..., 0:1, :].sum(-1, keepdim=True) + 1e-6  # avoid division by zero
         # normalized_stokes = stokes / total_intensity  # normalize by total intensity
-        normalized_stokes = torch.asinh(stokes * 1e2) / self.stretch
+        normalized_stokes = torch.asinh(stokes * self.stretch_factor) / self.stretch
         return normalized_stokes
 
 
@@ -266,7 +268,8 @@ class ProjectionModel(SirenModel):
 
 class VelocityCorrectionModel(SirenModel):
     def __init__(self, **kwargs):
-        super().__init__(1, 1, dim=32, n_layers=4, w0_initial=1, **kwargs)
+        encoding_config = {'type': 'default', 'w0': 1.}
+        super().__init__(1, 1, dim=32, n_layers=4, encoding_config=encoding_config, **kwargs)
 
     def forward(self, x):
         x = super().forward(x) * 1e3  # scale to m/s
@@ -275,8 +278,8 @@ class VelocityCorrectionModel(SirenModel):
 
 class LimbCorrectionModel(SirenModel):
     def __init__(self, **kwargs):
-        super().__init__(1, 6, dim=32, n_layers=4,
-                         encoding_config={'type': 'default', 'w0': 1.}, **kwargs)
+        encoding_config = {'type': 'default', 'w0': 1.}
+        super().__init__(1, 6, dim=32, n_layers=4, encoding_config=encoding_config, **kwargs)
 
     def forward(self, mu):
         x = super().forward(mu)
@@ -288,3 +291,4 @@ class LimbCorrectionModel(SirenModel):
         c_vdop = x[..., 5:6] * 100  # limb correction for convective blue shift
         # c_vdop = self.limb_shift_velocity(mu)
         return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vmac': c_vmac, 'c_damping': c_damping, 'c_kl': c_kl, 'c_vdop': c_vdop}
+

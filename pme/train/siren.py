@@ -5,7 +5,7 @@ from torch.nn import Identity
 from torch.nn.functional import linear
 
 from pme.encoding import GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding, \
-    SpatiotemporalEncoding
+    SpatiotemporalEncoding, ProgressiveSpatiotemporalEncoding
 
 
 class SirenLayer(nn.Module):
@@ -56,6 +56,9 @@ class SirenModel(nn.Module):
             posenc_dim = self.posenc.d_output
         elif encoding_type == "progressive_fourier":
             self.posenc = ProgressiveFourierEncoding(d_input=in_dim)
+            posenc_dim = self.posenc.d_output
+        elif encoding_type == "progressive_spatiotemporal":
+            self.posenc = ProgressiveSpatiotemporalEncoding(d_input=in_dim)
             posenc_dim = self.posenc.d_output
         elif encoding_type == "identity":
             self.posenc = Identity()
