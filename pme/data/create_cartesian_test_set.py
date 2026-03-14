@@ -232,14 +232,14 @@ if __name__ == '__main__':
     out_path = args.out_path
     os.makedirs(out_path, exist_ok=True)
 
-    lambda0 = 6302.4931 * u.AA
+    wavelength_center = 6302.4931 * u.AA
     lambda_step = 0.021743135134784097 * u.AA
     n_lambda = 56
     lambda_range = (n_lambda - 1) * lambda_step
-    lambda_grid = np.linspace(-0.5 * lambda_range, 0.5 * lambda_range, n_lambda)
+    wavelength_grid = np.linspace(-0.5 * lambda_range, 0.5 * lambda_range, n_lambda)
 
     data_generator = TestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
-                                      lambda_grid=lambda_grid, lambda0=lambda0)
+                                      wavelength_grid=wavelength_grid, wavelength_center=wavelength_center)
 
     with Pool(16) as p:
         in_data = [(t, out_path) for t in range(args.n_time_steps)]

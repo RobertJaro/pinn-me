@@ -1,8 +1,10 @@
-import numpy as np
 import torch
 from torch import nn
+from torch.nn import Identity, Sequential
 
-from pme.encoding import PeriodicBoundary, GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding
+from pme.encoding import PeriodicBoundary, GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding, \
+    ProgressiveSpatiotemporalEncoding, SpatiotemporalEncoding, ProgressiveGaussianEncoding, \
+    ProgressivePositionalEncoding, SphericalEncoding, BankGaussianEncoding
 from pme.train.siren import SirenModel
 
 
@@ -40,7 +42,7 @@ class MEModel(nn.Module):
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "gaussian":
             posenc = GaussianPositionalEncoding(d_input=in_coords)
-            d_in = nn.Linear(posenc.d_output, dim)
+            d_in = nn.Linear(posenc.out_dim, dim)
             self.d_in = nn.Sequential(posenc, d_in)
         elif encoding == "linear":
             self.d_in = nn.Linear(in_coords, dim)
@@ -101,31 +103,48 @@ class MEModel(nn.Module):
 
 class GenericModel(nn.Module):
 
-    def __init__(self, in_dim, out_dim, dim=512, encoding='gaussian', activation='sine', n_layers=8):
+    def __init__(self, in_dim, out_dim, dim=512, encoding_config=None, activation='sine', n_layers=8):
         super().__init__()
         # encoding layer
-        self.posenc = None
-        if encoding == "periodic":
-            posenc = PeriodicBoundary()
-            d_in = nn.Linear(in_dim + 2, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        if encoding == "positional":
-            posenc = PositionalEncoding(num_freqs=20, d_input=in_dim)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_dim, scale=64)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "progressive_fourier":
-            posenc = ProgressiveFourierEncoding(d_input=in_dim)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.posenc = posenc
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "linear":
-            self.d_in = nn.Linear(in_dim, dim)
+        encoding_config = {'type': 'gaussian'} if encoding_config is None else encoding_config
+        encoding_type = encoding_config.pop('type')
+
+        if encoding_type == "positional":
+            self.posenc = PositionalEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "spatiotemporal":
+            self.posenc = SpatiotemporalEncoding(d_input=in_dim)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "gaussian":
+            self.posenc = GaussianPositionalEncoding(d_input=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "spherical":
+            spherical_encoding = SphericalEncoding()
+            gaussian_encoding = GaussianPositionalEncoding(d_input=spherical_encoding.out_dim, **encoding_config)
+            self.posenc = Sequential(spherical_encoding, gaussian_encoding)
+            posenc_dim = gaussian_encoding.out_dim
+        elif encoding_type == "progressive_fourier":
+            self.posenc = ProgressiveFourierEncoding(d_input=in_dim)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "progressive_spatiotemporal":
+            self.posenc = ProgressiveSpatiotemporalEncoding(d_input=in_dim)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "progressive_gaussian":
+            self.posenc = ProgressiveGaussianEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "bank_gaussian":
+            self.posenc = BankGaussianEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "progressive_positional":
+            self.posenc = ProgressivePositionalEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "none" or encoding_type == "identity":
+            self.posenc = Identity()
+            posenc_dim = in_dim
         else:
-            raise ValueError(f"Unknown encoding: {encoding}")
+            raise ValueError(f"Unknown encoding: {encoding_type}")
+
+        self.d_in = nn.Linear(posenc_dim, dim)
 
         # hidden layers
         lin = [nn.Linear(dim, dim) for _ in range(n_layers)]
@@ -145,10 +164,11 @@ class GenericModel(nn.Module):
             raise ValueError(f"Unknown activation: {activation}")
 
     def step(self, global_step):
-        if self.posenc is not None:
+        if self.posenc is not None and hasattr(self.posenc, 'step'):
             self.posenc.step(global_step)
 
     def forward(self, x):
+        x = self.posenc(x)
         x = self.in_activation(self.d_in(x))
         for l, a in zip(self.linear_layers, self.activations):
             x = a(l(x))
@@ -164,10 +184,11 @@ class MESphericalModel(SirenModel):
         self.scale = scale
 
     def forward(self, x):
+        # forward pass through generic model
         params = super().forward(x)
         #
         if self.vector_potential:
-            a_scale = 10 ** params[..., 3:4] if self.scale else 1.0
+            a_scale = torch.exp(params[..., 3:4]) if self.scale else 1.0
             a = params[..., 0:3] * a_scale
             a_jac_matrix = jacobian(a, x)
             dAy_dx = a_jac_matrix[:, 1, 1]
@@ -181,24 +202,24 @@ class MESphericalModel(SirenModel):
             b_y = (dAx_dz - dAz_dx)[..., None]
             b_z = (dAy_dx - dAx_dy)[..., None]
         else:
-            b_scale = 10 ** params[..., 3:4] if self.scale else 1.0
+            b_scale = torch.exp(params[..., 3:4]) if self.scale else 1.0
             b_x = params[..., 0:1] * b_scale
             b_y = params[..., 1:2] * b_scale
             b_z = params[..., 2:3] * b_scale
             a_jac_matrix = None
 
-        vmac = torch.sigmoid(params[..., 4:5]) * 20e3
+        vmac = torch.exp(params[..., 4:5] + 9)
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
 
-        v_scale = 10 ** params[..., 8:9]
+        v_scale = torch.exp(params[..., 8:9]) if self.scale else 1.0
         v_x = params[..., 9:10] * v_scale
         v_y = params[..., 10:11] * v_scale
         v_z = params[..., 11:12] * v_scale
         kl = torch.sigmoid(params[..., 12:13]) * 100
         #
-        eta = 10 ** params[..., 13:14]
+        eta = torch.exp(params[..., 13:14])
         #
         output = {
             "b_x": b_x,
@@ -213,7 +234,7 @@ class MESphericalModel(SirenModel):
             "v_z": v_z,
             "kl": kl,
             "a_jac_matrix": a_jac_matrix,
-            "eta": eta,
+            "eta": eta
         }
 
         return output
@@ -230,65 +251,62 @@ def jacobian(output, coords):
 
 class NormalizationModule(nn.Module):
 
-    def __init__(self, value_range):
+    def __init__(self, alphas=None, **kwargs):
         super().__init__()
-        self.register_buffer("value_range", torch.tensor(value_range, dtype=torch.float32)[None, :, None, :])
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(1e3), dtype=torch.float32))
+        alphas = [1e-1, 1e-2, 1e-2, 1e-2] if alphas is None else alphas
+        self.register_buffer("alphas", torch.tensor(alphas, dtype=torch.float32))
 
-    def forward(self, stokes):
-        stokes = stokes / self.value_range[..., 1]  # normalize by max value (I = [0, 1]; QUV = [-1, 1])
-        stokes = torch.asinh(stokes * 1e3) / self.stretch
-        return stokes
+    def forward(self, stokes, Ic):
+        I = stokes[..., 0:1, :]
+        Q = stokes[..., 1:2, :]
+        U = stokes[..., 2:3, :]
+        V = stokes[..., 3:4, :]
 
+        # normalize to continuum
+        # Ic = Ic.clamp_min(1e-3)  # prevent division by zero or very small numbers
+        I = I / Ic
+        Q = Q / Ic
+        U = U / Ic
+        V = V / Ic
 
-class INormalizationModule(nn.Module):
+        # asinh scaling for polarization
+        # Q = torch.asinh(Q / self.alphas[1]) / torch.asinh(1 / self.alphas[1])
+        # U = torch.asinh(U / self.alphas[2]) / torch.asinh(1 / self.alphas[2])
+        # V = torch.asinh(V / self.alphas[3]) / torch.asinh(1 / self.alphas[3])
 
-    def __init__(self, stretch_factor=1e2, **kwargs):
-        super().__init__()
-        self.stretch_factor = stretch_factor
-        self.register_buffer("stretch", torch.tensor(np.arcsinh(stretch_factor), dtype=torch.float32))
-
-    def forward(self, stokes):
-        # total_intensity = stokes[..., 0:1, :].sum(-1, keepdim=True) + 1e-6  # avoid division by zero
-        # normalized_stokes = stokes / total_intensity  # normalize by total intensity
-        normalized_stokes = torch.asinh(stokes * self.stretch_factor) / self.stretch
-        return normalized_stokes
-
-
-class ProjectionModel(SirenModel):
-    def __init__(self, Mm_per_ds, max_shift_Mm=1, **kwargs):
-        super().__init__(4, 1, dim=32, n_layers=4, **kwargs)
-        self.max_shift = max_shift_Mm / Mm_per_ds  # convert to model units
-
-    def forward(self, x):
-        x = super().forward(x)
-        x = torch.tanh(x) * self.max_shift
-        return x
+        return torch.cat([I, Q, U, V], dim=-2)
 
 
-class VelocityCorrectionModel(SirenModel):
+class VelocityCorrectionModel(GenericModel):
     def __init__(self, **kwargs):
-        encoding_config = {'type': 'default', 'w0': 1.}
-        super().__init__(1, 1, dim=32, n_layers=4, encoding_config=encoding_config, **kwargs)
+        encoding_config = {'type': 'none'}
+        super().__init__(1, 1, dim=16, n_layers=3, encoding_config=encoding_config, **kwargs)
 
     def forward(self, x):
         x = super().forward(x) * 1e3  # scale to m/s
         return x
 
 
-class LimbCorrectionModel(SirenModel):
+class LimbCorrectionModel(GenericModel):
     def __init__(self, **kwargs):
-        encoding_config = {'type': 'default', 'w0': 1.}
-        super().__init__(1, 6, dim=32, n_layers=4, encoding_config=encoding_config, **kwargs)
+        encoding_config = {'type': 'identity'}
+        super().__init__(1, 6, dim=16, n_layers=3, encoding_config=encoding_config, **kwargs)
 
     def forward(self, mu):
         x = super().forward(mu)
-        c_b0 = torch.sigmoid(x[..., 0:1]) * 10  # limb correction for B0
-        c_b1 = torch.sigmoid(x[..., 1:2]) * 10  # limb correction for B1
-        c_vmac = torch.sigmoid(x[..., 2:3]) * 10  # limb correction for v_mac
-        c_damping = torch.sigmoid(x[..., 3:4]) * 10  # limb correction for damping
-        c_kl = torch.sigmoid(x[..., 4:5]) * 10  # limb correction for kl
+        c_b0 = torch.sigmoid(x[..., 0:1])  # limb correction for B0
+        c_b1 = torch.sigmoid(x[..., 1:2])  # limb correction for B1
         c_vdop = x[..., 5:6] * 100  # limb correction for convective blue shift
         # c_vdop = self.limb_shift_velocity(mu)
-        return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vmac': c_vmac, 'c_damping': c_damping, 'c_kl': c_kl, 'c_vdop': c_vdop}
+        return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vdop': c_vdop}
 
+
+class DisambiguationModel(SirenModel):
+    def __init__(self, **kwargs):
+        encoding_config = {'type': 'spatiotemporal'}
+        super().__init__(4, 1, dim=64, encoding_config=encoding_config, **kwargs)
+
+    def forward(self, x):
+        x = super().forward(x)
+        x = torch.tanh(x)
+        return x

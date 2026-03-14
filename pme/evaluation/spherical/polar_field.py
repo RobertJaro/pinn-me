@@ -47,10 +47,11 @@ if __name__ == '__main__':
         rsun=getattr(ref_map.observer_coordinate, "rsun", None),
     )
     shape = (256, 256)
-    scale = (40 / shape[0], 40 / shape[1]) * u.deg / u.pix
+    # scale = (40 / shape[0], 40 / shape[1]) * u.deg / u.pix
+    scale = [40 / int(shape[1]), (40 / np.pi) / (int(shape[0]) / 2)] * u.deg / u.pix
     lat_offset = 70 / scale[0].to_value(u.deg / u.pix)
-    reference_pixel = ((shape[0] - 1) / 2, (shape[1] - 1) / 2 + lat_offset) * u.pix
-    carr_header = make_fitswcs_header(shape, frame_out, scale=scale, projection_code='CAR', reference_pixel=reference_pixel)
+    reference_pixel = ((shape[1] - 1) / 2, (shape[0] - 1) / 2 + lat_offset) * u.pix
+    carr_header = make_fitswcs_header(shape, frame_out, scale=scale, projection_code='CEA', reference_pixel=reference_pixel)
     carrington_ref_map = ref_map.reproject_to(carr_header)
 
     # shape = (720, 1440)
@@ -142,19 +143,20 @@ if __name__ == '__main__':
         extent = [bl.lon.to_value(u.deg), tr.lon.to_value(u.deg) + 360, bl.lat.to_value(u.deg), tr.lat.to_value(u.deg)]
     else:
         extent = [bl.lon.to_value(u.deg), tr.lon.to_value(u.deg), bl.lat.to_value(u.deg), tr.lat.to_value(u.deg)]
+    extent = None
 
     b_norm = SymLogNorm(linthresh=1, vmin=-3000, vmax=3000)
     fig, axs = plt.subplots(3, 3, figsize=(15, 12))
 
     ax = axs[0, 0]
-    im = ax.imshow(b_r_pinnme, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_r_pinnme, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
     ax.set_title('PINN ME $B_r$')
 
     ax = axs[0, 1]
-    im = ax.imshow(b_r_ref, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_r_ref, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
@@ -168,14 +170,14 @@ if __name__ == '__main__':
     ax.set_title('Radius $r$')
 
     ax = axs[1, 0]
-    im = ax.imshow(b_t_pinnme, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_t_pinnme, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\theta$ [G]')
     ax.set_title('PINN ME $B_\\theta$')
 
     ax = axs[1, 1]
-    im = ax.imshow(b_t_ref, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_t_ref, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\theta$ [G]')
@@ -189,14 +191,14 @@ if __name__ == '__main__':
     ax.set_title('Latitude $\\theta$')
 
     ax = axs[2, 0]
-    im = ax.imshow(b_p_pinnme, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_p_pinnme, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\phi$ [G]')
     ax.set_title('PINN ME $B_\\phi$')
 
     ax = axs[2, 1]
-    im = ax.imshow(b_p_ref, cmap='PuOr', norm=b_norm, origin='lower', extent=extent)
+    im = ax.imshow(b_p_ref, cmap='seismic', norm=b_norm, origin='lower', extent=extent)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\phi$ [G]')

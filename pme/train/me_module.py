@@ -16,7 +16,7 @@ from pme.train.psf import PSF, LoadPSF, NoPSF
 
 class MEModule(LightningModule):
 
-    def __init__(self, cube_shape, lambda_config, value_range, pixel_per_ds, psf_config=None,
+    def __init__(self, cube_shape, wavelength_config, value_range, pixel_per_ds, psf_config=None,
                  lr_params=None, lambda_stokes=None, model_config=None, **kwargs):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
@@ -57,7 +57,7 @@ class MEModule(LightningModule):
         coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
         self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
 
-        self.forward_model = MEAtmosphere(**lambda_config)
+        self.forward_model = MEAtmosphere(**wavelength_config)
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
@@ -104,8 +104,9 @@ class MEModule(LightningModule):
         I, Q, U, V = self.convolve_psf(I, Q, U, V)
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        stokes_true = self.normalization(stokes_true)
-        stokes_pred = self.normalization(stokes_pred)
+        Ic = torch.quantile(stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
+        stokes_true = self.normalization(stokes_true, Ic=Ic)
+        stokes_pred = self.normalization(stokes_pred, Ic=Ic)
 
         loss = self.loss_function(stokes_pred, stokes_true)
         loss = loss.sum(-1)  # sum over wavelength axis
@@ -171,8 +172,9 @@ class MEModule(LightningModule):
 
         stokes_pred = torch.stack([I, Q, U, V], dim=-2)
 
-        stokes_true = self.normalization(stokes_true)
-        stokes_pred = self.normalization(stokes_pred)
+        Ic = torch.quantile(stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
+        stokes_true = self.normalization(stokes_true, Ic=Ic)
+        stokes_pred = self.normalization(stokes_pred, Ic=Ic)
 
         diff = torch.abs(stokes_true - stokes_pred)
 

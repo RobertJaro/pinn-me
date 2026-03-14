@@ -363,7 +363,7 @@ if __name__ == '__main__':
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label='Latitude [deg]')
-    ax.set_title('Latitude')
+    ax.set_title('Co-Latitude')
 
     ax = axs[0, 2]
     im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', origin='lower', vmin=0, vmax=360)
@@ -485,21 +485,21 @@ if __name__ == '__main__':
     fig, axs = plt.subplots(2, 3, figsize=(12, 5), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
-    im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 0], cmap='RdBu_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r}$ [m/s]')
     ax.set_title('PINN ME $v_r$')
 
     ax = axs[0, 1]
-    im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 1], cmap='RdBu_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{t}$ [m/s]')
     ax.set_title('PINN ME $v_t$')
 
     ax = axs[0, 2]
-    im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', norm=v_norm)
+    im = ax.imshow(v_rtp[..., 2], cmap='RdBu_r', origin='lower', norm=v_norm)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{p}$ [m/s]')
@@ -537,42 +537,42 @@ if __name__ == '__main__':
     fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
-    im = ax.imshow(b_rtp[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp[..., 0], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
     ax.set_title('PINN ME $B_r$')
 
     ax = axs[0, 1]
-    im = ax.imshow(b_rtp[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
     ax.set_title('PINN ME $B_t$')
 
     ax = axs[0, 2]
-    im = ax.imshow(b_rtp[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
     ax.set_title('PINN ME $B_p$')
 
     ax = axs[1, 0]
-    im = ax.imshow(b_rtp_ref[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 0], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
     ax.set_title('Reference $B_r$')
 
     ax = axs[1, 1]
-    im = ax.imshow(b_rtp_ref[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
     ax.set_title('Reference $B_t$')
 
     ax = axs[1, 2]
-    im = ax.imshow(b_rtp_ref[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
@@ -599,42 +599,42 @@ if __name__ == '__main__':
     fig, axs = plt.subplots(2, 3, figsize=(15, 10), subplot_kw={'projection': ref_map})
 
     ax = axs[0, 0]
-    im = ax.imshow(b_rtp_disambig[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_disambig[..., 0], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
     ax.set_title('PINN ME $B_r$')
 
     ax = axs[0, 1]
-    im = ax.imshow(b_rtp_disambig[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_disambig[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
     ax.set_title('PINN ME $B_t$')
 
     ax = axs[0, 2]
-    im = ax.imshow(b_rtp_disambig[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_disambig[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')
     ax.set_title('PINN ME $B_p$')
 
     ax = axs[1, 0]
-    im = ax.imshow(b_rtp_ref[..., 0], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 0], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{r}$ [G]')
     ax.set_title('Reference $B_r$')
 
     ax = axs[1, 1]
-    im = ax.imshow(b_rtp_ref[..., 1], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 1], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{t}$ [G]')
     ax.set_title('Reference $B_t$')
 
     ax = axs[1, 2]
-    im = ax.imshow(b_rtp_ref[..., 2], cmap='PuOr', norm=norm, origin='lower')
+    im = ax.imshow(b_rtp_ref[..., 2], cmap='RdBu_r', norm=norm, origin='lower')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
     fig.colorbar(im, cax=cax, orientation='vertical', label=r'$B_\text{p}$ [G]')

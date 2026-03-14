@@ -220,11 +220,11 @@ if __name__ == '__main__':
     t_end = datetime(2025, 2, 1)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
-    lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
-    lambda0 = 617.33433 * u.nm  # From Phillip Scherrer
+    wavelength_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
+    wavelength_center = 617.33433 * u.nm  # From Phillip Scherrer
 
     data_generator = SphericalTestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
-                                      lambda0=lambda0, lambda_grid=lambda_grid, g_up=2.50)
+                                               wavelength_center=wavelength_center, wavelength_grid=wavelength_grid, g_up=2.50)
 
     observers = []
     for time in t_range:

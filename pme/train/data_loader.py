@@ -112,6 +112,7 @@ class BatchesDataset(Dataset):
         # lazy load data
         data = {k: torch.tensor(v[idx * self.batch_size: (idx + 1) * self.batch_size], dtype=torch.float32) for k, v in
                 self.data.items()}
+        data['lin_idx'] = torch.tensor([idx], dtype=torch.long)
         return data
 
     def clear(self):
@@ -132,7 +133,7 @@ class TensorsDataset(BatchesDataset):
         # filter nan entries
         nan_mask = np.any([np.any(np.isnan(t), axis=tuple(range(1, t.ndim))) for t in tensors.values()], axis=0)
         if nan_mask.sum() > 0 and filter_nans:
-            print(f'Filtering {nan_mask.sum()} nan entries')
+            # print(f'Filtering {nan_mask.sum()} nan entries')
             tensors = {k: v[~nan_mask] for k, v in tensors.items()}
 
         # shuffle data
@@ -146,9 +147,10 @@ class TensorsDataset(BatchesDataset):
             coords_zarr_path = os.path.join(work_directory, f'{ds_name}_{k}.zarr')
             # write data to zarr - chunks
             store = NestedDirectoryStore(coords_zarr_path)
-            z = zarr.open(store, mode='w', shape=v.shape, chunks=(batch_size, *v.shape[1:]), dtype='float32')
-            for i in range(0, v.shape[0], batch_size):
-                z[i:i + batch_size] = v[i:i + batch_size]
+            chunk_size = batch_size #max(batch_size, 524288) # 2 ** 19 entries per chunk, to avoid too many small files
+            z = zarr.open(store, mode='w', shape=v.shape, chunks=(chunk_size, *v.shape[1:]), dtype='float32')
+            for i in range(0, v.shape[0], chunk_size):
+                z[i:i + chunk_size] = v[i:i + chunk_size]
             batches_paths[k] = coords_zarr_path
 
         # cleanup memory to avoid out of memory errors when loading data
@@ -160,7 +162,7 @@ class TensorsDataset(BatchesDataset):
 
 class GenericDataModule(LightningDataModule):
 
-    def __init__(self, stokes_vector, mu, times, lambda_config,
+    def __init__(self, stokes_vector, mu, times, wavelength_config,
                  coordinates=None,
                  seconds_per_dt=3600, pixel_per_ds=1e2,
                  batch_size=4096, num_workers=None):
@@ -180,12 +182,12 @@ class GenericDataModule(LightningDataModule):
         self.seconds_per_dt = seconds_per_dt
         self.pixel_per_ds = pixel_per_ds
 
-        # centered at lambda0
-        self.lambda_grid = lambda_config['lambda_grid']
-        self.lambda_config = {'lambda0': lambda_config['0'],
-                              'j_up': lambda_config['j_up'], 'j_low': lambda_config['j_low'],
-                              'g_up': lambda_config['g_up'], 'g_low': lambda_config['g_low'],
-                              'lambda_grid': self.lambda_grid}
+        # centered at wavelength_center
+        self.wavelength_grid = wavelength_config['wavelength_grid']
+        self.wavelength_config = {'wavelength_center': wavelength_config['0'],
+                              'j_up': wavelength_config['j_up'], 'j_low': wavelength_config['j_low'],
+                              'g_up': wavelength_config['g_up'], 'g_low': wavelength_config['g_low'],
+                              'wavelength_grid': self.wavelength_grid}
 
         normalized_times = [(t - self.ref_time).total_seconds() / seconds_per_dt for t in times]
         normalized_times = np.array(normalized_times, dtype=np.float32)
@@ -249,7 +251,7 @@ class GenericDataModule(LightningDataModule):
                                    vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
-            fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
+            fig.suptitle(f'lambda: {self.wavelength_grid[l]:.2f}')
             fig.tight_layout()
             wandb.log({'Stokes vector': fig})
             plt.close('all')
@@ -312,15 +314,15 @@ class GenericDataModule(LightningDataModule):
 class TestDataModule(GenericDataModule):
 
     def __init__(self, files, psf=None, noise=None, **kwargs):
-        lambda_center = 6302.4931
-        lambda_step = 0.021743135134784097
+        wavelength_center = 6302.4931
+        wavelength_step = 0.021743135134784097
         n_lambda = 56
 
-        # lambda_grid = np.array([lambda_start + i * lambda_step for i in range(n_lambda)])
-        lambda_range = (n_lambda - 1) * lambda_step
-        lambda_grid = np.linspace(-0.5 * lambda_range, 0.5 * lambda_range, n_lambda)
+        # wavelength_grid = np.array([wavelength_start + i * wavelength_step for i in range(n_lambda)])
+        wavelength_range = (n_lambda - 1) * wavelength_step
+        wavelength_grid = np.linspace(-0.5 * wavelength_range, 0.5 * wavelength_range, n_lambda)
 
-        lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_grid * u.AA,
+        wavelength_config = {'0': wavelength_center * u.AA, 'wavelength_grid': wavelength_grid * u.AA,
                          'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
         files = [files] if not isinstance(files, list) else files
         files = [sorted(glob.glob(f)) for f in files]  # load wildcards
@@ -337,12 +339,12 @@ class TestDataModule(GenericDataModule):
 
         mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
 
-        super().__init__(stokes_vector, mu, times, lambda_config, **kwargs)
+        super().__init__(stokes_vector, mu, times, wavelength_config, **kwargs)
 
 
 class HinodeDataModule(GenericDataModule):
 
-    def __init__(self, files, lambda_config=None, **kwargs):
+    def __init__(self, files, wavelength_config=None, **kwargs):
         files = [files] if not isinstance(files, list) else files
         files = [sorted(glob.glob(f)) for f in files]  # load wildcards
 
@@ -358,29 +360,29 @@ class HinodeDataModule(GenericDataModule):
         stokes_vector = np.stack(stokes_vector, 0)
         mu = np.stack(mu, 0)[..., None]
 
-        if lambda_config is None:
+        if wavelength_config is None:
             header = getheader(files[0][0])
-            lambda_step = -header["CDELT1"]
-            lambda_center = header["CRVAL1"]
+            wavelength_step = -header["CDELT1"]
+            wavelength_center = header["CRVAL1"]
             pixel_center = header["CRPIX1"]
-            offset = 6302.4931 - lambda_center
+            offset = 6302.4931 - wavelength_center
             n_lambda = stokes_vector.shape[-1]
 
             pixel_range = np.arange(n_lambda)
             pixel_range = pixel_range - pixel_center
-            lambda_range = pixel_range * lambda_step
-            lambda_grid = lambda_range - offset
+            wavelength_range = pixel_range * wavelength_step
+            wavelength_grid = wavelength_range - offset
 
             stokes_vector = stokes_vector[..., -56:]
-            lambda_grid = lambda_grid[-56:]
+            wavelength_grid = wavelength_grid[-56:]
 
             max_I = stokes_vector[..., 0, :].max()
             stokes_vector /= max_I * 1.1
 
-            lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_grid * u.AA,
+            wavelength_config = {'0': wavelength_center * u.AA, 'wavelength_grid': wavelength_grid * u.AA,
                              'j_up': 1.0, 'j_low': 0.0, 'g_up': 2.49, 'g_low': 0}
 
-        super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
+        super().__init__(stokes_vector, mu, times, wavelength_config, pixel_per_ds=512, **kwargs)
 
     def _load_fits(self, files):
         stokes_vector = np.stack([fits.getdata(f) for f in files], 0, dtype=np.float32)
@@ -442,20 +444,20 @@ class FitsDataModule(GenericDataModule):
 
         header = getheader(file)
         times = [parse(header['DATE_OBS'])]
-        lambda_step = header["CDELT1"]
-        lambda_center = header["CRVAL1"]
+        wavelength_step = header["CDELT1"]
+        wavelength_center = header["CRVAL1"]
         pixel_center = header["CRPIX1"]
         n_lambda = stokes_vector.shape[-1]
 
         pixel_range = np.arange(n_lambda)
         pixel_range = pixel_range - pixel_center
-        lambda_range = pixel_range * lambda_step
+        wavelength_range = pixel_range * wavelength_step
 
-        lambda_config = {'0': lambda_center * u.AA, 'lambda_grid': lambda_range * u.AA, **atomic_parameters}
+        wavelength_config = {'0': wavelength_center * u.AA, 'wavelength_grid': wavelength_range * u.AA, **atomic_parameters}
 
         mu = np.ones((*stokes_vector.shape[:3], 1), dtype=np.float32)
 
-        super().__init__(stokes_vector, mu, times, lambda_config, pixel_per_ds=512, **kwargs)
+        super().__init__(stokes_vector, mu, times, wavelength_config, pixel_per_ds=512, **kwargs)
 
 
 def add_synthetic_noise(stokes_vector, noise=None, psf_file=None, bin=1):
@@ -502,7 +504,7 @@ class SHARPDataModule(LightningDataModule):
         U_maps = [Map(f) for f in sorted(glob.glob(files['U']))]
         V_maps = [Map(f) for f in sorted(glob.glob(files['V']))]
 
-        self.lambda_grid = np.linspace(6173.3 - 0.68, 6173.3 + 0.68, 6) * 1e-10
+        self.wavelength_grid = np.linspace(6173.3 - 0.68, 6173.3 + 0.68, 6) * 1e-10
 
         I_vector = np.stack([m.data for m in I_maps], -1)
         Q_vector = np.stack([m.data for m in Q_maps], -1)
@@ -549,13 +551,13 @@ class SHARPDataModule(LightningDataModule):
 
         # plot stokes vector
         stokes_min_max = np.abs(stokes_vector).max((0, 1, 2, -1))
-        for l in range(len(self.lambda_grid)):
+        for l in range(len(self.wavelength_grid)):
             fig, axs = plt.subplots(1, 4, figsize=(9, 3), dpi=100)
             for i, label in enumerate(['I', 'Q', 'U', 'V']):
                 im = axs[i].imshow(stokes_vector[:, :, ref_time, i, l], vmin=-stokes_min_max[i], vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
-            fig.suptitle(f'lambda: {self.lambda_grid[l]:.2f}')
+            fig.suptitle(f'wavelength: {self.wavelength_grid[l]:.2f}')
             fig.tight_layout()
             wandb.log({'Stokes vector': fig})
             plt.close('all')

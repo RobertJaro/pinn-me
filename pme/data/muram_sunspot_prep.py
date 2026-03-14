@@ -19,9 +19,9 @@ if __name__ == '__main__':
     out_file = args.out_file
 
     data = np.load(file)  # y, x, lambda, stokes
-    lambda_grid = np.load(wl_file)
+    wavelength_grid = np.load(wl_file)
 
-    lambda_grid = lambda_grid[201:]
+    wavelength_grid = wavelength_grid[201:]
     data = data[:, :, 201:, :]
 
     # (y, x, lambda, stokes) --> (y, x, stokes, lambda)
@@ -31,9 +31,9 @@ if __name__ == '__main__':
 
     header = fits.Header()
     header['DATE_OBS'] = '2024-01-01T00:00:00'
-    header["CDELT1"] = np.gradient(lambda_grid)[0]
-    header["CRVAL1"] = (lambda_grid[-1] + lambda_grid[0]) / 2
-    header["CRPIX1"] = lambda_grid.shape[0] / 2
+    header["CDELT1"] = np.gradient(wavelength_grid)[0]
+    header["CRVAL1"] = (wavelength_grid[-1] + wavelength_grid[0]) / 2
+    header["CRPIX1"] = wavelength_grid.shape[0] / 2
 
     header['NAXIS'] = 4
     header['NAXIS1'] = data.shape[0]

@@ -1,6 +1,6 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_no_physics_v10"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/202405_90s_v14"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_90s_no_physics_v17"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/202405_90s_v01"
 data:
   train_configs:
     - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_90s", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
@@ -24,7 +24,7 @@ logging:
   name: "2024-05 90s no physics"
 
 model:
-  encoding_config: {type: spatiotemporal}
+  encoding_config: {type: positional, max_frequencies: [4, 6, 6, 6]}
 
 training:
   epochs: 500
@@ -32,4 +32,6 @@ training:
   lambda_induction: 0.0
   lambda_divergence: 0.0
   lambda_force_free: 0.0
-  val_check_interval: 5000
+
+normalization:
+  stretch_factor: 1.0e+2

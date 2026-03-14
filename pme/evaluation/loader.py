@@ -22,11 +22,11 @@ class PINNMEOutput:
         self.parameter_model.eval()
 
         self.cube_shape = state['cube_shape']
-        self.lambda_config = state['lambda_config']
+        self.wavelength_config = state['wavelength_config']
         self.data_range = state['data_range']
 
-        lambda_config = list(self.lambda_config.values())[0]  # use first instrument as default
-        # self.forward_model = MEAtmosphere(**lambda_config).to(self.device)
+        wavelength_config = list(self.wavelength_config.values())[0]  # use first instrument as default
+        # self.forward_model = MEAtmosphere(**wavelength_config).to(self.device)
         # self.forward_model = nn.DataParallel(self.forward_model)
         # self.forward_model.eval()
 

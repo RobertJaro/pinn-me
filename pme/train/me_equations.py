@@ -11,22 +11,19 @@ import torch
 from scipy.special import voigt_profile, wofz
 from torch import nn
 
-from pme.train.generic_function import GenericFunction
-
 class MEAtmosphere(nn.Module):
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, jUp, jLow, gUp, gLow, loggf,
+    def __init__(self, wavelength_center, jUp, jLow, gUp, gLow, loggf,
                  lambdaGrid, voigt_pt, faraday_voigt_pt):
         super().__init__()
 
-        m = GenericFunction(3)
         self.voigt = torch.load(voigt_pt)
         self.faraday_voigt = torch.load(faraday_voigt_pt)
 
         self.c = 3e8
         
-        self.lambda0 = lambda0 * 1e-10
+        self.wavelength_center = wavelength_center * 1e-10
         self.JUp = jUp # Angular momentum of the upper level
         self.JLow = jLow # Angular momentum of the lower level
         self.gUp = gUp # Lande-g factor of the upper level
@@ -37,7 +34,7 @@ class MEAtmosphere(nn.Module):
 
     def compute_larmor_freq(self):
         
-        dlambda_B = 1e-13 * 4.6686e10 * (self.lambda0 **2) * self.BField
+        dlambda_B = 1e-13 * 4.6686e10 * (self.wavelength_center **2) * self.BField
         self.nu_m = dlambda_B/ self.dLambda
 
     def compute_scattering_profiles(self, nu, sigma, gamma):
@@ -390,7 +387,7 @@ class MEAtmosphere(nn.Module):
                 vmac, damping, b0, b1, mu,
                 vdop, kl):
 
-        self.dLambda = self.lambda0 * vmac / self.c * 1e3
+        self.dLambda = self.wavelength_center * vmac / self.c * 1e3
         self.nuArray = self.lambdaGrid[None, :] / self.dLambda
 
         self.a = damping
@@ -403,7 +400,7 @@ class MEAtmosphere(nn.Module):
         self.B1 = b1
         self.mu = mu
         self.vdop = vdop
-        self.lambdaDop = self.lambda0 * vdop * 1e3 / self.c
+        self.lambdaDop = self.wavelength_center * vdop * 1e3 / self.c
         self.kl = kl
 
         self.nu_L = 1.3996e6 * self.BField  # in 1/s for Bfield in Gauss

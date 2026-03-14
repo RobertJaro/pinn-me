@@ -20,7 +20,11 @@ if __name__ == '__main__':
     parser.add_argument('--input', type=str, help='the path to the input file')
     parser.add_argument('--ref_maps', type=str, help='the path to the reference map fld')
     parser.add_argument('--output', type=str, help='the path to the output file', default=None, required=False)
+    parser.add_argument('--resolution', type=int, nargs=2, default=None, required=False, metavar=('WIDTH', 'HEIGHT'),
+                        help='optional target resolution used to resample each reference map, e.g. --resolution 256 256')
     args = parser.parse_args()
+    if args.resolution is not None and any(v <= 0 for v in args.resolution):
+        raise ValueError('--resolution values must be positive integers')
 
     in_path = args.input
 
@@ -40,10 +44,12 @@ if __name__ == '__main__':
         #     continue
 
         ref_map = Map(f)
+        if args.resolution is not None:
+            ref_map = ref_map.resample(tuple(args.resolution) * u.pix)
         # bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
         # tr = SkyCoord(500 * u.arcsec, 500 * u.arcsec, frame=ref_map.coordinate_frame)
         # ref_map = ref_map.submap(bl, top_right=tr)
-        ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 512x512 pixels
+        # ref_map = ref_map.resample((512, 512) * u.pix)  # resample to 512x512 pixels
 
         # load time
         target_time = ref_map.date.to_datetime()
@@ -87,7 +93,7 @@ if __name__ == '__main__':
 
         b_norm = Normalize(-500, 500)
 
-        fig, axs = plt.subplots(4, 3, figsize=(10, 10), subplot_kw={'projection': ref_map})
+        fig, axs = plt.subplots(2, 3, figsize=(15, 5), subplot_kw={'projection': ref_map})
 
         ax = axs[0, 0]
         im = ax.imshow(b_rtp[..., 0], cmap='gray', norm=b_norm, origin='lower')
@@ -127,53 +133,53 @@ if __name__ == '__main__':
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')
-
-        ax = axs[2, 0]
-        im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r  }$ [km/s]')
-        ax.set_title(r'$v_\text{rad}$ [km/s]')
-
-        ax = axs[2, 1]
-        im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\theta$ [km/s]')
-        ax.set_title(r'$v_\theta$ [km/s]')
-
-        ax = axs[2, 2]
-        im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\phi$ [km/s]')
-        ax.set_title(r'$v_\phi$ [km/s]')
-
-        ax = axs[3, 0]
-        im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{dop}$ [km/s]')
-        ax.set_title(r'$v_\text{LOS}$ [km/s]')
-
-        ax = axs[3, 1]
-        im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=0, vmax=180, origin='lower')
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'Colatitude [deg]')
-        ax.set_title(r'Colatitude [deg]')
-
-        ax = axs[3, 2]
-        im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', vmin=0, vmax=360, origin='lower')
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
-        fig.colorbar(im, cax=cax, orientation='vertical', label=r'Longitude [deg]')
-        ax.set_title(r'Longitude [deg]')
+        #
+        # ax = axs[2, 0]
+        # im = ax.imshow(v_rtp[..., 0], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{r  }$ [km/s]')
+        # ax.set_title(r'$v_\text{rad}$ [km/s]')
+        #
+        # ax = axs[2, 1]
+        # im = ax.imshow(v_rtp[..., 1], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\theta$ [km/s]')
+        # ax.set_title(r'$v_\theta$ [km/s]')
+        #
+        # ax = axs[2, 2]
+        # im = ax.imshow(v_rtp[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\phi$ [km/s]')
+        # ax.set_title(r'$v_\phi$ [km/s]')
+        #
+        # ax = axs[3, 0]
+        # im = ax.imshow(v_img[..., 2], cmap='seismic_r', origin='lower', vmin=-2, vmax=2)
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'$v_\text{dop}$ [km/s]')
+        # ax.set_title(r'$v_\text{LOS}$ [km/s]')
+        #
+        # ax = axs[3, 1]
+        # im = ax.imshow(np.rad2deg(spherical_coords[..., 1]), cmap='RdBu_r', vmin=0, vmax=180, origin='lower')
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'Colatitude [deg]')
+        # ax.set_title(r'Colatitude [deg]')
+        #
+        # ax = axs[3, 2]
+        # im = ax.imshow(np.rad2deg(spherical_coords[..., 2]), cmap='twilight', vmin=0, vmax=360, origin='lower')
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
+        # fig.colorbar(im, cax=cax, orientation='vertical', label=r'Longitude [deg]')
+        # ax.set_title(r'Longitude [deg]')
 
         [ax.set_xlabel(' ') for ax in axs.flatten()]
         [ax.set_ylabel(' ') for ax in axs.flatten()]
         [ax.set_ylabel('Latitude [deg]') for ax in axs[:, 0]]
-        [ax.set_xlabel('Longitude [deg]') for ax in axs[-1]]
+        [ax.set_xlabel('Longitude [deg]') for ax in axs[-1, :]]
 
         # add subtitle with date
         plt.suptitle(f'{target_time}', fontsize=16)

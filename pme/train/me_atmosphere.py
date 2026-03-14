@@ -18,14 +18,14 @@ from pme.train.profile_functions import Voigt, FaradayVoigt
 class MEAtmosphere(nn.Module):
     ''' Class to contain the ME atmosphere properties'''
 
-    def __init__(self, lambda0, j_up, j_low, g_up, g_low):
+    def __init__(self, wavelength_center, j_up, j_low, g_up, g_low):
         super().__init__()
 
         self.voigt = Voigt()
         self.faraday_voigt = FaradayVoigt()
 
         self.register_buffer('c', torch.tensor(const.c.to_value(u.m / u.s), dtype=torch.float32))  # Speed of light
-        self.register_buffer('lambda0', torch.tensor(lambda0.to_value(u.m), dtype=torch.float32))
+        self.register_buffer('wavelength_center', torch.tensor(wavelength_center.to_value(u.m), dtype=torch.float32))
         self.register_buffer('j_up', torch.tensor(j_up, dtype=torch.float32))  # Upper level angular momentum
         self.register_buffer('j_low', torch.tensor(j_low, dtype=torch.float32))  # Lower level angular momentum
         self.register_buffer('g_up', torch.tensor(g_up, dtype=torch.float32))  # Lande factor for upper level
@@ -153,19 +153,19 @@ class MEAtmosphere(nn.Module):
         return V
 
     def nu_m(self, b_field, d_lambda, **kwargs):
-        dlambda_B = 4.6686e-3 * (self.lambda0 ** 2) * b_field
+        dlambda_B = 4.6686e-3 * (self.wavelength_center ** 2) * b_field
         return dlambda_B / d_lambda
 
     def lambda_dop(self, vdop, d_lambda, **kwargs):
-        return self.lambda0 * vdop / self.c / d_lambda
+        return self.wavelength_center * vdop / self.c / d_lambda
 
     def d_lambda(self, vmac, **kwargs):
-        return self.lambda0 * vmac / self.c
+        return self.wavelength_center * vmac / self.c
 
-    def nu(self, d_lambda, lambda_grid, **kwargs):
-        return lambda_grid / d_lambda
+    def nu(self, d_lambda, wavelength_grid, **kwargs):
+        return wavelength_grid / d_lambda
 
-    def forward(self, lambda_grid, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
+    def forward(self, wavelength_grid, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
         # sin2azi = sin(2 * azi)
         # cos2azi = cos(2 * azi)
         # sin_inc2 = sin(inc) ** 2
@@ -175,7 +175,7 @@ class MEAtmosphere(nn.Module):
                  'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'cos2azi': cos2azi, 'sin2azi': sin2azi,
                  'vmac': vmac, 'damping': damping,
                  'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl,
-                 'lambda_grid': lambda_grid}
+                 'wavelength_grid': wavelength_grid}
 
         # base profile properties
         state['d_lambda'] = self.d_lambda(**state)

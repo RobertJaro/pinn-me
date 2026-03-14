@@ -33,6 +33,6 @@ for file in files:
 
 for f in sorted(glob.glob('/glade/work/rjarolim/data/phi_stokes/LB5/*.fits')):
     header =  fits.getheader(f)
-    lambda_center = header['WAVELNTH']  # reference wavelength from header
-    lambda_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)])
-    print(f"File: {os.path.basename(f)}, Center Wavelength: {lambda_center}, Wavelength Grid: {lambda_grid}")
+    wavelength_center = header['WAVELNTH']  # reference wavelength from header
+    wavelength_grid = np.array([header[f'WAVELN{i + 1:02d}'] for i in range(6)])
+    print(f"File: {os.path.basename(f)}, Center Wavelength: {wavelength_center}, Wavelength Grid: {wavelength_grid}")

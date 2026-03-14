@@ -1,13 +1,13 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_12h_v14"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/202405_12h_v01"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/202405_12h_v31"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v3/202405_12h_v01"
 data:
   train_configs:
     - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_12h", sample_idx: 7, stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   ref_time: "2024-05-01T00:00:00"
   num_workers: 16
-  batch_size: 65536
+  batch_size: 262144
   dataset_batch_size: 8192
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
@@ -15,8 +15,7 @@ data:
 instrument:
   - type: 'hmi'
     instrument_id: 'HMI'
-    limb_correction: True
-    velocity_correction: False
+    limb_correction: False
 
 logging:
   project: pinn-me-spherical
@@ -24,12 +23,12 @@ logging:
   name: "2024-05 12h"
 
 model:
-  encoding_config: {type: spatiotemporal}
-
+  encoding_config: {type: spatiotemporal} #{ type: positional, max_frequencies: [2.0, 8.0, 8.0, 8.0], num_frequencies: [16, 64, 64, 64] }#{ type: progressive_positional, max_frequencies: [1.0, 8.0, 8.0, 8.0], num_frequencies: [8, 32, 32, 32] }#{ type: spherical, scales: [1.0, 1.0, 128.0, 128.0, 128.0, 128.0], num_frequencies: [16, 0, 64, 64, 64, 64]}
 
 training:
-  epochs: 500
-  lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0 #{ start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
-  lambda_divergence: 0 #{ start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
-  lambda_force_free: 0 #{ start: 1.0e-2, end: 1.0e-6, iterations: 5.0e+4 }
+  epochs: 1000
+  lambda_stokes: [ 1.0, 0.2, 0.2, 1.0 ]
+  check_val_every_n_epoch: 2
+  time_shift_config: {scale: 0.0, iterations: 0.0}
+  lambda_divergence: 1.0e-3
+  lambda_force_free: 1.0e-3

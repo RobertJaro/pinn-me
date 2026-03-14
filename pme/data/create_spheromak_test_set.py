@@ -254,11 +254,11 @@ if __name__ == '__main__':
     t_end = datetime(2025, 1, 2)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
-    lambda0 = 6173.3433 * u.AA
-    lambda_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA
+    wavelength_center = 6173.3433 * u.AA
+    wavelength_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA
 
     data_generator = SpheromakTestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
-                                               lambda0=lambda0, lambda_grid=lambda_grid,
+                                               wavelength_center=wavelength_center, wavelength_grid=wavelength_grid,
                                                g_up=2.50, ref_time=t_start)
 
     observers = []

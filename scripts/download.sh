@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#PBS -N global
+#PBS -N download
 #PBS -A P22100000
 #PBS -q preempt
 #PBS -l select=1:ncpus=1:mem=4gb

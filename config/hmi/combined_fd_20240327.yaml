@@ -1,14 +1,14 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/combined/combined_fd_20240327_v04"
+base_path: "/glade/work/rjarolim/spinn_me/combined/combined_fd_20240327_v01"
 work_directory: "/glade/derecho/scratch/rjarolim/spinn_me_v2/hmi/combined_fd_20240327_v01"
 data:
   train_configs:
-    - { type: 'phi-fdt', data_path: ["/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-28/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-29/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-30/*.fits.gz", "/glade/work/rjarolim/data/phi_fdt/2024-03-31/*.fits.gz"], stokes_normalization: 1.0, instrument_id: 'PHI', oversample_factor: 4 }
-    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240327_3h", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
-  valid_config: { type: 'phi-fdt', data_path: "/glade/work/rjarolim/data/phi_fdt/2024-03-27/*.fits.gz", sample_idx: 1, stokes_normalization: 1.0, instrument_id: 'PHI' }
+    - { type: 'phi-fdt', data_path: "/glade/work/rjarolim/spinn_me/align_phi/*.fits.gz", stokes_normalization: 1.0, instrument_id: 'PHI', oversample_factor: 4, fix_header: False }
+    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240327", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
+  valid_config: { type: 'phi-fdt', data_path: "/glade/work/rjarolim/spinn_me/align_phi/*.fits.gz", sample_idx: 1, stokes_normalization: 1.0, instrument_id: 'PHI', fix_header: False }
   ref_time: "2024-03-27T00:00:00"
   num_workers: 16
-  batch_size: 65536
+  batch_size: 262144
   dataset_batch_size: 8192
   seconds_per_dt: 86400 # 1 day
   gauss_per_dB: 1000
@@ -18,24 +18,22 @@ instrument:
     instrument_id: 'PHI'
     limb_correction: True
     intensity_correction: True
-    velocity_correction: False
+    artifact_correction: True
   - type: 'hmi'
     instrument_id: 'HMI'
     limb_correction: True
     intensity_correction: False
-    velocity_correction: False
 
 logging:
   project: pinn-me-spherical
-  tags: [ "hmi" ]
+  tags: [ "hmi", "phi" ]
   name: "2024-04-27 combined full-disk"
+
 model:
-  encoding_config: {type: spatiotemporal}
-  scale: True
+  encoding_config: { type: spherical, scales: [1.0, 1.0, 128.0, 128.0, 128.0, 128.0], num_frequencies: [16, 16, 64, 64, 64, 64]}
 
 training:
-  epochs: 500
-  lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0
-  lambda_divergence: 0
-  lambda_force_free: 0
+  epochs: 10000
+  lambda_stokes: [ 1.0, 1.0, 1.0, 1.0 ]
+  check_val_every_n_epoch: 10
+  time_shift_config: {scale: 0.0, iterations: 0.0}

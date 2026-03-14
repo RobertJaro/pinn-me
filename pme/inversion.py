@@ -48,7 +48,7 @@ training_config = config['training'] if 'training' in config else {}
 check_val_every_n_epoch = training_config.pop('check_val_every_n_epoch', None)
 epochs = training_config.pop('epochs', 50)
 
-me_module = MEModule(data_module.cube_shape, data_module.lambda_config,
+me_module = MEModule(data_module.cube_shape, data_module.wavelength_config,
                      data_module.value_range, data_module.pixel_per_ds,
                      model_config=model_config,
                      **training_config)
@@ -64,7 +64,7 @@ save_path = os.path.join(base_path, 'inversion.pme')
 def save(*args, **kwargs):
     torch.save({
         'parameter_model': me_module.parameter_model,
-        'cube_shape': data_module.cube_shape, 'lambda_config': data_module.lambda_config,
+        'cube_shape': data_module.cube_shape, 'wavelength_config': data_module.wavelength_config,
         'data_range': data_module.data_range,
         'ref_time': data_module.ref_time, 'times': data_module.times, 'seconds_per_dt': data_module.seconds_per_dt,
         'pixel_per_ds': data_module.pixel_per_ds

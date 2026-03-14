@@ -5,6 +5,8 @@ import torch
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, LambdaCallback
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.utilities import rank_zero_only
 
 from pme.loader.spherical import SphericalDataModule
 from pme.train.me_spherical_module import MESphericalModule
@@ -27,7 +29,12 @@ os.makedirs(work_directory, exist_ok=True)
 logging_config = config['logging'] if 'logging' in config else {}
 # init logging
 wandb_logger = WandbLogger(**logging_config, save_dir=work_directory)
-wandb_logger.experiment.config.update(config, allow_val_change=True)
+
+@rank_zero_only
+def _log_hparams(cfg):
+    wandb_logger.log_hyperparams(cfg)
+
+_log_hparams(config)
 
 data_config = config['data']
 # type = data_config.pop('type')
@@ -36,11 +43,10 @@ data_module_save_path = os.path.join(work_directory, 'data_module.pt')
 if os.path.exists(data_module_save_path) and not args.reload:
     data_module = torch.load(data_module_save_path)
     # update batch settings
-    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     if 'batch_size' in data_config:
-        data_module.batch_size = data_config['batch_size'] * n_gpus
+        data_module.batch_size = data_config['batch_size']
     if 'dataset_batch_size' in data_config:
-        data_module.dataset_batch_size = data_config['dataset_batch_size'] * n_gpus
+        data_module.dataset_batch_size = data_config['dataset_batch_size']
 else:
     data_module = SphericalDataModule(**data_config, work_directory=work_directory)
     torch.save(data_module, data_module_save_path)
@@ -51,12 +57,16 @@ check_val_every_n_epoch = training_config.pop('check_val_every_n_epoch', None)
 val_check_interval = training_config.pop('val_check_interval', None)
 epochs = training_config.pop('epochs', 50)
 instrument_config = config['instrument'] if 'instrument' in config else {}
+lambda_config = config['lambda'] if 'lambda' in config else {}
+normalization_config = config['normalization'] if 'normalization' in config else {}
+normalization_config['value_range'] = data_module.value_range
+artifact_correction_config = config['artifact_correction'] if 'artifact_correction' in config else {}
 
-me_module = MESphericalModule(image_shape=data_module.image_shape, lambda_config=data_module.lambda_config,
-                              model_config=model_config, normalization_config={'value_range': data_module.value_range},
+me_module = MESphericalModule(image_shape=data_module.image_shape, wavelength_config=data_module.wavelength_config,
+                              model_config=model_config, normalization_config=normalization_config,
                               instrument_config=instrument_config,
                               Rs_per_ds=data_module.Rs_per_ds, seconds_per_dt=data_module.seconds_per_dt,
-                              gauss_per_dB=data_module.gauss_per_dB,
+                              gauss_per_dB=data_module.gauss_per_dB, lambda_config=lambda_config,
                               **training_config)
 
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
@@ -66,11 +76,11 @@ checkpoint_callback = ModelCheckpoint(dirpath=base_path,
 # save callback
 save_path = os.path.join(base_path, 'inversion.pme')
 
-
+@rank_zero_only
 def save(*args, **kwargs):
     torch.save({
         'parameter_model': me_module.parameter_model,
-        'cube_shape': data_module.image_shape, 'lambda_config': data_module.lambda_config,
+        'cube_shape': data_module.image_shape, 'wavelength_config': data_module.wavelength_config,
         'data_range': data_module.data_range,
         'ref_time': data_module.ref_time, 'times': data_module.times,
         'seconds_per_dt': data_module.seconds_per_dt,
@@ -82,18 +92,28 @@ def save(*args, **kwargs):
 save_callback = LambdaCallback(on_validation_epoch_end=save)
 
 torch.set_float32_matmul_precision('medium')  # for A100 GPUs
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 n_gpus = torch.cuda.device_count()
+
+# from torchrun:
+WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))          # total processes (16)
+LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(n_gpus)))  # procs on this node (4)
+
+# fallbacks & safety
+devices_per_node = max(1, LOCAL_WORLD_SIZE if n_gpus > 0 else 0)
+num_nodes = max(1, WORLD_SIZE // devices_per_node)
+
 trainer = Trainer(max_epochs=int(epochs),
                   logger=wandb_logger,
-                  devices=n_gpus if n_gpus > 0 else None,
                   accelerator='gpu' if n_gpus >= 1 else None,
-                  strategy='dp' if n_gpus > 1 else None,  # ddp breaks memory and wandb
+                  devices=devices_per_node if n_gpus > 0 else None,
+                  num_nodes=num_nodes,
+                  strategy=DDPStrategy(find_unused_parameters=False) if (num_nodes > 1 or devices_per_node > 1) else 'auto',
                   num_sanity_val_steps=-1,
                   check_val_every_n_epoch=check_val_every_n_epoch,
                   val_check_interval=val_check_interval,
-                  gradient_clip_val=2,
-                  # reload dataloaders to avoid oscillating loss
-                  reload_dataloaders_every_n_epochs=check_val_every_n_epoch if check_val_every_n_epoch is not None else 0,
-                  callbacks=[checkpoint_callback, save_callback], )
+                  gradient_clip_val=0.5,
+                  callbacks=[checkpoint_callback, save_callback])
 
 trainer.fit(me_module, data_module, ckpt_path='last')

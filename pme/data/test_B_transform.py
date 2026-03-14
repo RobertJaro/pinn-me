@@ -37,17 +37,18 @@ if __name__ == '__main__':
 
     carrington_coords = map_coords.transform_to(frames.HeliographicCarrington)
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
+    co_lat = np.pi / 2 - lat
     r = carrington_coords.radius
 
     r = r * u.solRad if r.unit == u.dimensionless_unscaled else r
-    carrington_coords = np.stack([r.to_value(u.solRad), lat, lon], -1)
+    carrington_coords = np.stack([r.to_value(u.solRad), co_lat, lon], -1)
     cartesian_coords = spherical_to_cartesian(carrington_coords)
 
     # create observer transform
     latc, lonc = s_map.carrington_latitude.to_value(u.rad), s_map.carrington_longitude.to_value(u.rad)
     pAng = -np.deg2rad(s_map.meta.get('CROTA2', 0))
     a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
-    rtp_to_img_transform = np.linalg.inv(a_matrix)
+    rtp_to_img_transform = np.transpose(a_matrix, (0, 1, 3, 2))
 
     # create xyz transform
     rtp_to_xyz_transform = spherical_to_cartesian_matrix(carrington_coords)
@@ -56,7 +57,6 @@ if __name__ == '__main__':
     # apply img transformation
 
     b_rtp = np.stack([ref_B_r.data, ref_B_t.data, ref_B_p.data], -1)
-    b_rtp[..., 1] *= -1 # HMI vector field convention
     b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
 
     # b_xi = - field * sin(gamma) * sin(psi)
@@ -97,8 +97,8 @@ if __name__ == '__main__':
     plt.colorbar(im, ax=ax)
 
     ax = axs[1, 1]
-    im = ax.imshow(np.rad2deg(carrington_coords[..., 1]), cmap='PiYG', vmin=-90, vmax=90)
-    ax.set_title('Latitude')
+    im = ax.imshow(np.rad2deg(carrington_coords[..., 1]), cmap='PiYG', vmin=0, vmax=180)
+    ax.set_title('Co-Latitude')
     plt.colorbar(im, ax=ax)
 
     ax = axs[1, 2]
@@ -107,7 +107,7 @@ if __name__ == '__main__':
     plt.colorbar(im, ax=ax)
 
     plt.tight_layout()
-    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison_rtp.jpg', dpi=300)
+    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test2/comparison_rtp.jpg', dpi=300)
     plt.close(fig)
 
 
@@ -147,7 +147,7 @@ if __name__ == '__main__':
     plt.colorbar(im, ax=ax)
 
     plt.tight_layout()
-    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison.jpg', dpi=300)
+    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test2/comparison.jpg', dpi=300)
     plt.close(fig)
 
     ####################################################################################################################
@@ -186,5 +186,5 @@ if __name__ == '__main__':
     plt.colorbar(im, ax=ax)
 
     plt.tight_layout()
-    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test/comparison_xyz.jpg', dpi=300)
+    fig.savefig('/glade/work/rjarolim/data/hmi_stokes/test2/comparison_xyz.jpg', dpi=300)
     plt.close(fig)

@@ -1,11 +1,9 @@
+from typing import Iterable
+
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import Identity
 from torch.nn.functional import linear
-
-from pme.encoding import GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding, \
-    SpatiotemporalEncoding, ProgressiveSpatiotemporalEncoding
 
 
 class SirenLayer(nn.Module):
@@ -39,36 +37,25 @@ class SirenLayer(nn.Module):
 
 # siren network
 class SirenModel(nn.Module):
-    def __init__(self, in_dim, out_dim, dim=512, n_layers=8, w0=1., encoding_config=None, skip_layers=(2, 5)):
+    def __init__(self, in_dim, out_dim, dim=256, n_layers=8, w0=1., encoding_config=None, skip_layers=[]):
         super().__init__()
 
         encoding_config = {'type': 'default', 'w0': 30.} if encoding_config is None else encoding_config
         encoding_type = encoding_config.pop('type', 'default')
 
-        if encoding_type == "positional":
-            self.posenc = PositionalEncoding(num_freqs=20, d_input=in_dim)
-            posenc_dim = self.posenc.d_output
-        elif encoding_type == "spatiotemporal":
-            self.posenc = SpatiotemporalEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.d_output
-        elif encoding_type == "gaussian":
-            self.posenc = GaussianPositionalEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.d_output
-        elif encoding_type == "progressive_fourier":
-            self.posenc = ProgressiveFourierEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.d_output
-        elif encoding_type == "progressive_spatiotemporal":
-            self.posenc = ProgressiveSpatiotemporalEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.d_output
-        elif encoding_type == "identity":
-            self.posenc = Identity()
-            posenc_dim = in_dim
-        elif encoding_type == "default":
+        if encoding_type == "default":
             self.posenc = SirenLayer(in_dim=in_dim, out_dim=dim, is_first=True, **encoding_config)
             posenc_dim = dim
-        elif encoding_type == "time_split":
-            self.posenc = TimeSplitEncoding(in_dim=in_dim, **encoding_config)
-            posenc_dim = self.posenc.d_output
+        elif encoding_type == "multi_spectral":
+            self.posenc = MultispectralEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "multi_frequency":
+            self.posenc = MultiFrequencyEncoding(in_dim=in_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
+        elif encoding_type == "weighted":
+            enc_dim = int(encoding_config.pop('num_dims', dim))
+            self.posenc = WeightedEncoding(in_dim=in_dim, dim=enc_dim, **encoding_config)
+            posenc_dim = self.posenc.out_dim
         else:
             raise ValueError(f"Unknown encoding: {encoding_type}")
 
@@ -92,7 +79,7 @@ class SirenModel(nn.Module):
         self.layers = nn.ModuleList(layers)
 
         # initialize the output layer
-        self.out_layer = SirenLayer(in_dim=dim, out_dim=out_dim, w0=w0, activation=nn.Identity())
+        self.out_layer = nn.Linear(dim, out_dim)
 
     def forward(self, inp):
         inp_encoded = self.posenc(inp)  # apply positional encoding
@@ -101,9 +88,9 @@ class SirenModel(nn.Module):
         for i, layer in enumerate(self.layers):
             if i in self.skip_layers:
                 x = torch.cat([x, inp_encoded], dim=-1)
-                x = layer(x)               # layer expects dim + ref_dim
+                x = layer(x)  # layer expects dim + ref_dim
             else:
-                x = layer(x)               # standard SIREN layer
+                x = layer(x)  # standard SIREN layer
 
         x = self.out_layer(x)
         return x
@@ -122,17 +109,77 @@ class Sine(nn.Module):
         return torch.sin(self.w0 * x)
 
 
-class TimeSplitEncoding(nn.Module):
-    def __init__(self, in_dim, dim=256, w0_spatial=100.0, w0_temporal=1.0):
+class WeightedEncoding(nn.Module):
+
+    def __init__(self, in_dim, dim=512, weights=30.0):
         super().__init__()
-        self.spatial_layer = SirenLayer(in_dim=in_dim - 1, out_dim=dim, w0=w0_spatial, is_first=True)
-        self.temporal_layer = SirenLayer(in_dim=1, out_dim=dim, w0=w0_temporal, is_first=True)
-        self.d_output = dim * 2
+
+        weights = [weights] * in_dim if not isinstance(weights, Iterable) else weights
+        assert len(weights) == in_dim, 'weights length must match input dimension (in_dim)'
+
+        self.register_buffer('weights', torch.tensor(weights, dtype=torch.float32))
+        self.layer = SirenLayer(in_dim=in_dim, out_dim=dim, w0=1, is_first=True)
+
+        self.out_dim = dim
 
     def forward(self, x):
-        time = x[..., :1]
-        spatial = x[..., 1:]
-        spatial_encoded = self.spatial_layer(spatial)
-        time_encoded = self.temporal_layer(time)
-        encoded = torch.cat([spatial_encoded, time_encoded], dim=-1)
+        # apply weights to each coordinate
+        x = x * self.weights  # shape: [batch_size, in_dim]
+        x = self.layer(x)
+        return x
+
+class MultispectralEncoding(nn.Module):
+
+    def __init__(self, in_dim, num_dims=64, weights=30.0):
+        super().__init__()
+        num_dims = [num_dims] * in_dim if not isinstance(num_dims, Iterable) else num_dims
+        weights = [weights] * in_dim if not isinstance(weights, Iterable) else weights
+
+        assert len(num_dims) == in_dim, 'num_dims length must match input dimension (in_dim)'
+        assert len(weights) == in_dim, 'weights length must match input dimension (in_dim)'
+
+        layers = []
+        for nd, w in zip(num_dims, weights):
+            l = SirenLayer(in_dim=1, out_dim=nd, w0=w, is_first=True)
+            layers.append(l)
+        self.layers = nn.ModuleList(layers)
+
+        self.out_dim = sum(num_dims) + in_dim
+
+    def forward(self, x):
+        encoded_coordinates = []
+        for i, layer in enumerate(self.layers):
+            coord = x[..., i:i + 1]
+            encoded = layer(coord)
+            encoded_coordinates.append(encoded)
+
+        encoded = torch.cat(encoded_coordinates + [x], -1)
+        return encoded
+
+
+class MultiFrequencyEncoding(nn.Module):
+
+    def __init__(self, in_dim, num_dims=32, weights=None):
+        super().__init__()
+        weights = [1, 10, 100, 1000] if weights is None else weights
+
+        num_dims = [num_dims] * len(weights) if not isinstance(num_dims, Iterable) else num_dims
+
+        assert len(num_dims) == len(weights), 'num_dims length must match weights length'
+
+        layers = []
+        for nd, w in zip(num_dims, weights):
+            l = SirenLayer(in_dim=in_dim, out_dim=nd, w0=w, is_first=True)
+            layers.append(l)
+        self.layers = nn.ModuleList(layers)
+
+        self.out_dim = sum(num_dims)
+
+    def forward(self, x):
+        encoded_coordinates = []
+        for i, layer in enumerate(self.layers):
+            encoded = layer(x)
+            encoded_coordinates.append(encoded)
+
+        encoded = torch.cat(encoded_coordinates, -1)
         return encoded

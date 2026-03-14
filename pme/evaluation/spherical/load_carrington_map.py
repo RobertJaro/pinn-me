@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from matplotlib import pyplot as plt
+from matplotlib import pyplot as plt, dates
 from matplotlib.colors import Normalize, SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
@@ -30,9 +30,9 @@ if __name__ == '__main__':
     end_time = pinnme.times[-1]
     times = pd.date_range(start_time, end_time, freq=timedelta(hours=.5))
 
-    latitudes = np.linspace(-90, 90, 1800)
-    # latitudes = np.linspace(-1, 1, 1800)
-    # latitudes = np.rad2deg(np.arcsin(latitudes))
+    # latitudes = np.linspace(-90, 90, 1800)
+    latitudes = np.linspace(-1, 1, 1800)
+    latitudes = np.rad2deg(np.arcsin(latitudes))
 
     longitudes = []
     for t in times:
@@ -61,8 +61,9 @@ if __name__ == '__main__':
 
     ########################################################################################################################
     # Plot subframe in B_r, B_theta, B_phi
-    extent = [longitudes.min(), longitudes.max(), -np.pi/2, np.pi/2]
-    extent = np.rad2deg(extent)
+    x_min = dates.date2num(start_time)
+    x_max = dates.date2num(end_time)
+    extent = [x_min, x_max, -1, 1]
 
     v_min_max = np.max(np.abs(b_rtp))
     norm = SymLogNorm(linthresh=1, vmin=-1000, vmax=1000)
@@ -70,31 +71,37 @@ if __name__ == '__main__':
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
 
     ax = axs[0]
-    im = ax.imshow(b_rtp[..., 0], cmap='RdBu', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 0], cmap='RdBu', norm=norm, origin='lower', extent=extent, aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('B_r')
 
     ax = axs[1]
-    im = ax.imshow(b_rtp[..., 1], cmap='RdBu', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 1], cmap='RdBu', norm=norm, origin='lower', extent=extent, aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('B_theta')
 
     ax = axs[2]
-    im = ax.imshow(b_rtp[..., 2], cmap='RdBu', norm=norm, origin='lower', extent=extent)
+    im = ax.imshow(b_rtp[..., 2], cmap='RdBu', norm=norm, origin='lower', extent=extent, aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_title('B_phi')
 
-    axs[0].set_ylabel('Latitude [deg]')
-    [ax.set_xlabel('Longitude [deg]') for ax in axs]
+    axs[0].set_ylabel('Latitude')
 
     # add subtitle with date
     plt.suptitle(f'Carrington map {start_time} -- {end_time}', fontsize=16)
+
+    # make time axis show dates
+    for ax in axs:
+        date_format = dates.DateFormatter('%Y-%m')
+        ax.xaxis.set_major_formatter(date_format)
+        fig.autofmt_xdate()
+        ax.set_xlabel('Time [UTC]')
 
     plt.tight_layout()
     plt.savefig(os.path.join(args.output, 'carrington.jpg'), dpi=300)

@@ -15,7 +15,7 @@ from tqdm import tqdm
 from astropy import units as u
 
 
-def plot_all_Stokes(lambda_grid, atmos):
+def plot_all_Stokes(wavelength_grid, atmos):
     """
     Plot all the stokes profiles from an atmosphere
 
@@ -24,16 +24,16 @@ def plot_all_Stokes(lambda_grid, atmos):
     """
 
     fig, ax = pl.subplots(2, 2, dpi=150)
-    ax[0, 0].plot(lambda_grid, atmos[0, :])
+    ax[0, 0].plot(wavelength_grid, atmos[0, :])
     ax[0, 0].set_title("Stokes I")
 
-    ax[0, 1].plot(lambda_grid, atmos[1, :])
+    ax[0, 1].plot(wavelength_grid, atmos[1, :])
     ax[0, 1].set_title("Stokes Q/I")
 
-    ax[1, 0].plot(lambda_grid, atmos[2, :])
+    ax[1, 0].plot(wavelength_grid, atmos[2, :])
     ax[1, 0].set_title("Stokes U/I")
 
-    ax[1, 1].plot(lambda_grid, atmos[3, :])
+    ax[1, 1].plot(wavelength_grid, atmos[3, :])
     ax[1, 1].set_title("Stokes V/I")
 
     for el in ax.flatten():
@@ -66,7 +66,7 @@ def convert_rt_to_xy(r, t):
 
 def create_tstep(time_step, r0_inital=1, b_field_0=4000,
                  chi_rot_speed=1,
-                 test_dataset_dir = "/glade/work/rjarolim/data/inversion/parameters_MEset_v4_nt_100_spatial_400_400_withPSF_11x11_s_4.npz"):
+                 test_dataset_dir="/glade/work/rjarolim/data/inversion/parameters_MEset_v4_nt_100_spatial_400_400_withPSF_11x11_s_4.npz"):
     """
     Create the test set for the PINNME code. The inputs
     time_step and r0_initial determine the shape of the
@@ -107,19 +107,19 @@ def create_tstep(time_step, r0_inital=1, b_field_0=4000,
     b_field = b_field_0 * (r0 / (r + r0)) ** 2
 
     # The field inclination goes through jumps every r0 pixels
-    t_arr =  0.3 * r / r # ((r % r0) / r0 * np.pi)
-    ch_arr =  0.5 * r / r #(t + time_step / 180 * np.pi / chi_rot_speed) # slow down the rotation
+    t_arr = 0.3 * r / r  # ((r % r0) / r0 * np.pi)
+    ch_arr = 0.5 * r / r  # (t + time_step / 180 * np.pi / chi_rot_speed) # slow down the rotation
 
     b0_arr = b0 * (10 * r0 / (r + 10 * r0)) ** 2
     b1_arr = b1 * (10 * r0 / (r + 10 * r0)) ** 2
 
     lambda_end = (lambda_start + lambda_step * (-1 + n_lambda))
 
-    lambda_grid = np.linspace(-.5 * (lambda_end - lambda_start),
-                              .5 * (lambda_end - lambda_start),
-                              num=n_lambda)
+    wavelength_grid = np.linspace(-.5 * (lambda_end - lambda_start),
+                                  .5 * (lambda_end - lambda_start),
+                                  num=n_lambda)
 
-    atmos = MEAtmosphere(lambda0, jUp, jLow, gUp, gLow, lambda_grid)
+    atmos = MEAtmosphere(wavelength_center, jUp, jLow, gUp, gLow, wavelength_grid)
     print(f"tarr shape is {t_arr.shape}")
 
     with np.load(test_dataset_dir) as blah:
@@ -129,7 +129,7 @@ def create_tstep(time_step, r0_inital=1, b_field_0=4000,
         azi = blah["chi"][:, :, time_step, :]
         S0 = blah["B0"][:, :, time_step, :]
         S1 = blah["B1"][:, :, time_step, :]
-        vDop = blah["vmac"][:, :, time_step, :]   # make it in AA
+        vDop = blah["vmac"][:, :, time_step, :]  # make it in AA
         damping = blah["damping"][:, :, time_step, :]
         eta_l = blah["kl"][:, :, time_step, :]
         vlos = blah["vdop"][:, :, time_step, :]  # make it in km/s
@@ -141,12 +141,11 @@ def create_tstep(time_step, r0_inital=1, b_field_0=4000,
     ch_arr = torch.tensor(azi, dtype=torch.float32)
     b0_arr = torch.tensor(S0, dtype=torch.float32)
     b1_arr = torch.tensor(S1, dtype=torch.float32)
-    vmac_arr = torch.tensor(vDop, dtype=torch.float32) * 1e3 * 1.35 # make it in meters!
+    vmac_arr = torch.tensor(vDop, dtype=torch.float32) * 1e3 * 1.35  # make it in meters!
     damping_arr = torch.tensor(damping, dtype=torch.float32) / 10
     mu_arr = mu * torch.ones_like(b_field)
     vdop_arr = torch.tensor(vlos, dtype=torch.float32)
     kl_arr = torch.tensor(eta_l, dtype=torch.float32)
-
 
     I, Q, U, V = atmos.forward(b_field, t_arr, ch_arr,
                                vmac_arr, damping_arr,
@@ -157,12 +156,12 @@ def create_tstep(time_step, r0_inital=1, b_field_0=4000,
 
     return {'stokes_profiles': stokes_profiles, 'b_field': b_field, 'theta': t_arr, 'chi': ch_arr,
             'b0': b0_arr, 'b1': b1_arr, 'vmac': vmac_arr, 'damping': damping_arr, 'mu': mu_arr,
-            'vdop': vdop_arr, 'kl': kl_arr, 'lambda_grid':lambda_grid}
+            'vdop': vdop_arr, 'kl': kl_arr, 'wavelength_grid': wavelength_grid}
 
 
 if __name__ == '__main__':
 
-    lambda0 = 6302.4931 * u.AA
+    wavelength_center = 6302.4931 * u.AA
     jUp = 1
     jLow = 0
     gUp = 2.49
@@ -192,13 +191,12 @@ if __name__ == '__main__':
     with Pool(1) as p:
         profiles = list(tqdm(p.imap(create_tstep, range(nTime)), total=nTime))
 
-
     stokes_profiles = np.stack([p['stokes_profiles'] for p in profiles],
                                axis=1)
-    lambda_grid = profiles[0]['lambda_grid']
+    wavelength_grid = profiles[0]['wavelength_grid']
 
     print(stokes_profiles.shape)
-    plot_all_Stokes(lambda_grid,
+    plot_all_Stokes(wavelength_grid,
                     stokes_profiles[:, 0, 0, 0, :])
 
     pl.savefig('/glade/u/home/mmolnar/PINNME_results/test_stokes.png')
@@ -257,18 +255,16 @@ if __name__ == '__main__':
         pl.savefig(f"/glade/work/mmolnar/data/inversion/test/ch_arr_{el:03d}.png")
         pl.close()
 
-
-
     nameTestCase = "dataset_PINNME_synthesis_PINNME_format"
 
     np.savez(f"/glade/work/mmolnar/PINN-ME/pymilne_comparison_v1/data/{nameTestCase}.npz",
-             wavelength=lambda_grid,
+             wavelength=wavelength_grid,
              stokes_parameters=stokes_profiles)
 
     nameTestCase = "dataset_PINNME_synthesis_pymilne_format"
 
     np.savez(f"/glade/work/mmolnar/PINN-ME/pymilne_comparison_v1/data/{nameTestCase}.npz",
-             wavelength=lambda_grid,
+             wavelength=wavelength_grid,
              stokes_parameters=np.swapaxes(np.swapaxes(stokes_profiles, 0, -2), 1, 2))
 
     # np.savez(f"/glade/work/mmolnar/data/inversion/{nameTestCase}_{nTime}_spatial_{nx}_{ny}.npz",
