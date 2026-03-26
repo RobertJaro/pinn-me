@@ -5,7 +5,7 @@ from torch.nn import Identity, Sequential
 from pme.encoding import PeriodicBoundary, GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding, \
     ProgressiveSpatiotemporalEncoding, SpatiotemporalEncoding, ProgressiveGaussianEncoding, \
     ProgressivePositionalEncoding, SphericalEncoding, BankGaussianEncoding
-from pme.train.siren import SirenModel
+from pme.train.siren import Siren
 
 
 class Swish(nn.Module):
@@ -176,12 +176,13 @@ class GenericModel(nn.Module):
         return out
 
 
-class MESphericalModel(SirenModel):
+class MESphericalModel(GenericModel):
 
     def __init__(self, vector_potential=False, scale=False, **kwargs):
-        super().__init__(in_dim=4, out_dim=14, **kwargs)
+        super().__init__(in_dim=4, out_dim=13, **kwargs)
         self.vector_potential = vector_potential
         self.scale = scale
+        self.softplus = nn.Softplus()
 
     def forward(self, x):
         # forward pass through generic model
@@ -208,7 +209,7 @@ class MESphericalModel(SirenModel):
             b_z = params[..., 2:3] * b_scale
             a_jac_matrix = None
 
-        vmac = torch.exp(params[..., 4:5] + 9)
+        vmac = self.softplus(params[..., 4:5]) * 1000.0
         damping = torch.sigmoid(params[..., 5:6]) * 1
         b0 = torch.sigmoid(params[..., 6:7])
         b1 = torch.sigmoid(params[..., 7:8])
@@ -217,9 +218,7 @@ class MESphericalModel(SirenModel):
         v_x = params[..., 9:10] * v_scale
         v_y = params[..., 10:11] * v_scale
         v_z = params[..., 11:12] * v_scale
-        kl = torch.sigmoid(params[..., 12:13]) * 100
-        #
-        eta = torch.exp(params[..., 13:14])
+        kl = 1e-3 + self.softplus(params[..., 12:13])
         #
         output = {
             "b_x": b_x,
@@ -233,8 +232,7 @@ class MESphericalModel(SirenModel):
             "v_y": v_y,
             "v_z": v_z,
             "kl": kl,
-            "a_jac_matrix": a_jac_matrix,
-            "eta": eta
+            "a_jac_matrix": a_jac_matrix
         }
 
         return output
@@ -269,10 +267,14 @@ class NormalizationModule(nn.Module):
         U = U / Ic
         V = V / Ic
 
+        # line depression scaling for intensity
+        # I = 1 - I
+
         # asinh scaling for polarization
-        # Q = torch.asinh(Q / self.alphas[1]) / torch.asinh(1 / self.alphas[1])
-        # U = torch.asinh(U / self.alphas[2]) / torch.asinh(1 / self.alphas[2])
-        # V = torch.asinh(V / self.alphas[3]) / torch.asinh(1 / self.alphas[3])
+        # I = torch.asinh(I / self.alphas[0]) #/ torch.asinh(1 / self.alphas[0])
+        # Q = torch.asinh(Q / self.alphas[1]) #/ torch.asinh(1 / self.alphas[1])
+        # U = torch.asinh(U / self.alphas[2]) #/ torch.asinh(1 / self.alphas[2])
+        # V = torch.asinh(V / self.alphas[3]) #/ torch.asinh(1 / self.alphas[3])
 
         return torch.cat([I, Q, U, V], dim=-2)
 
@@ -301,7 +303,7 @@ class LimbCorrectionModel(GenericModel):
         return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vdop': c_vdop}
 
 
-class DisambiguationModel(SirenModel):
+class DisambiguationModel(Siren):
     def __init__(self, **kwargs):
         encoding_config = {'type': 'spatiotemporal'}
         super().__init__(4, 1, dim=64, encoding_config=encoding_config, **kwargs)

@@ -44,7 +44,6 @@ class SphericalDataModule(LightningDataModule):
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
         train_configs = train_configs if isinstance(train_configs, list) else [train_configs]
         train_datasets = []
-        pix_normalization = 1024
         for i, train_config in enumerate(train_configs):
             train_config = copy.deepcopy(train_config)
             ds_type = train_config.pop('type').lower()
@@ -88,7 +87,6 @@ class SphericalDataModule(LightningDataModule):
                                                          work_directory=work_directory,
                                                          oversample_factor=oversample_factor,
                                                          stokes_normalization=ds_normalization,
-                                                         pix_normalization=pix_normalization,
                                                          **train_config)
                 max_samples = 10
                 sample_step = max(1, len(train_files) // max_samples)
@@ -132,7 +130,6 @@ class SphericalDataModule(LightningDataModule):
                                                      seconds_per_dt=seconds_per_dt,
                                                      Rs_per_ds=Rs_per_ds, ref_time=ref_time,
                                                      stokes_normalization=ds_normalization,
-                                                     pix_normalization=pix_normalization,
                                                      batch_size=self.batch_size, work_directory=work_directory,
                                                      filter_nans=False, shuffle=False, resolution=resolution)
         elif valid_ds_type == 'phi-hrt':
@@ -143,7 +140,6 @@ class SphericalDataModule(LightningDataModule):
                                                         seconds_per_dt=seconds_per_dt,
                                                         Rs_per_ds=Rs_per_ds, ref_time=ref_time,
                                                         stokes_normalization=ds_normalization,
-                                                        pix_normalization=pix_normalization,
                                                         batch_size=self.batch_size, work_directory=work_directory,
                                                         filter_nans=False, shuffle=False)
         elif valid_ds_type == 'phi-fdt':
@@ -154,7 +150,6 @@ class SphericalDataModule(LightningDataModule):
                                                         seconds_per_dt=seconds_per_dt,
                                                         Rs_per_ds=Rs_per_ds, ref_time=ref_time,
                                                         stokes_normalization=ds_normalization,
-                                                        pix_normalization=pix_normalization,
                                                         fix_header=valid_config.pop('fix_header', True),
                                                         batch_size=self.batch_size, work_directory=work_directory,
                                                         filter_nans=False, shuffle=False)
@@ -166,7 +161,6 @@ class SphericalDataModule(LightningDataModule):
                                                       seconds_per_dt=seconds_per_dt,
                                                       Rs_per_ds=Rs_per_ds, ref_time=ref_time,
                                                       stokes_normalization=ds_normalization,
-                                                      pix_normalization=pix_normalization,
                                                       batch_size=self.batch_size, work_directory=work_directory,
                                                       filter_nans=False, shuffle=False)
         else:
@@ -213,15 +207,46 @@ class SphericalDataModule(LightningDataModule):
         plt.close(fig)
 
     def _load_IQUV_files(self, data_path, num_wl=6):
-        # load maps
-        I = np.stack([sorted(glob.glob(os.path.join(data_path, f'*I{int(i)}.fits')))
-                      for i in range(num_wl)], -1)  # t, wl
-        Q = np.stack([sorted(glob.glob(os.path.join(data_path, f'*Q{int(i)}.fits')))
-                      for i in range(num_wl)], -1)  # t, wl
-        U = np.stack([sorted(glob.glob(os.path.join(data_path, f'*U{int(i)}.fits')))
-                      for i in range(num_wl)], -1)  # t, wl
-        V = np.stack([sorted(glob.glob(os.path.join(data_path, f'*V{int(i)}.fits')))
-                      for i in range(num_wl)], -1)  # t, wl
+        if isinstance(data_path, str):
+            if os.path.isdir(data_path):
+                candidate_files = sorted(glob.glob(os.path.join(data_path, '*.fits')))
+            else:
+                candidate_files = sorted(glob.glob(data_path))
+        elif isinstance(data_path, Iterable):
+            candidate_files = []
+            for path in data_path:
+                if os.path.isdir(path):
+                    candidate_files.extend(sorted(glob.glob(os.path.join(path, '*.fits'))))
+                else:
+                    candidate_files.extend(sorted(glob.glob(path)))
+        else:
+            raise ValueError(f'Unknown data path type: {type(data_path)}. Expected str or Iterable[str].')
+
+        if len(candidate_files) == 0:
+            raise ValueError(f'No FITS files matched data_path={data_path!r}.')
+
+        # Support both directory inputs and glob patterns that already constrain the timestamp.
+        stokes_files = {}
+        for stokes_id in 'IQUV':
+            files_by_wl = [sorted(f for f in candidate_files if f.endswith(f'{stokes_id}{int(wl_idx)}.fits'))
+                           for wl_idx in range(num_wl)]
+            counts = {len(files) for files in files_by_wl}
+            if counts != {max(counts)}:
+                raise ValueError(
+                    f'Incomplete {stokes_id} file set for data_path={data_path!r}: '
+                    f'counts per wavelength={list(map(len, files_by_wl))}.'
+                )
+            stokes_files[stokes_id] = np.stack(files_by_wl, -1)  # t, wl
+
+        n_times = {stokes_id: stokes_files[stokes_id].shape[0] for stokes_id in 'IQUV'}
+        if len(set(n_times.values())) != 1:
+            raise ValueError(f'Mismatched I/Q/U/V file counts for data_path={data_path!r}: {n_times}.')
+
+        I = stokes_files['I']
+        Q = stokes_files['Q']
+        U = stokes_files['U']
+        V = stokes_files['V']
+
         files = np.stack([I, Q, U, V], 1)  # t, stokes, wl
         return files
 
@@ -257,7 +282,7 @@ class SphericalDataModule(LightningDataModule):
 class SphericalDataset(TensorsDataset):
 
     def __init__(self, stokes, map_data, wavelength_config, ds_id, instrument_id, seconds_per_dt, Rs_per_ds, ref_time,
-                 stokes_normalization, pix_normalization, work_directory, oversample_factor=1,
+                 stokes_normalization, work_directory, oversample_factor=1,
                  store_plot_image=False, mu_limit=1e-3,
                  **kwargs):
         self.ds_id = ds_id
@@ -292,8 +317,8 @@ class SphericalDataset(TensorsDataset):
         # normalize stokes vector
         stokes /= stokes_normalization
 
-        # normalize pix coordinates
-        pix /= pix_normalization
+        # normalize centered pixel coordinates per frame
+        pix /= max((pix.shape[0] - 1) / 2, (pix.shape[1] - 1) / 2, 1.0)
 
         # remove off limb pixels
         spherical_coords[(mu < mu_limit) | np.isnan(mu)] = np.nan
@@ -533,9 +558,11 @@ def load_map_data(s_map):
     # load observer velocity
     v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
 
-    # load observer HPC
-    pix_coords = np.stack(np.mgrid[0:s_map.data.shape[0], 0:s_map.data.shape[1]], -1)  # x, y
+    # centered pixel coordinates; SphericalDataset applies the final scalar normalization
+    pix_coords = np.stack(np.mgrid[0:s_map.data.shape[0], 0:s_map.data.shape[1]], -1)  # y, x
     pix_coords = pix_coords.astype(np.float32)
+    pix_coords[..., 0] -= (s_map.data.shape[0] - 1) / 2
+    pix_coords[..., 1] -= (s_map.data.shape[1] - 1) / 2
 
     return {'mu': mu, 'v_obs_los': v_obs_los, 'pix': pix_coords,
             'obs_lat': obs_lat, 'obs_lon': obs_lon, 'pAng': pAng,

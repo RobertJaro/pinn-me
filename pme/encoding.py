@@ -315,7 +315,7 @@ class BankGaussianEncoding(nn.Module):
 
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, in_dim, num_frequencies=64, min_frequencies=0, max_frequencies=8):
+    def __init__(self, in_dim, num_frequencies=128, min_frequencies=0, max_frequencies=8):
         super().__init__()
         num_frequencies = [num_frequencies] * in_dim if not isinstance(num_frequencies, Iterable) else num_frequencies
         min_frequencies = [min_frequencies] * in_dim if not isinstance(min_frequencies, Iterable) else min_frequencies

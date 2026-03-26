@@ -22,6 +22,7 @@ from pme.model import MESphericalModel, VelocityCorrectionModel, LimbCorrectionM
 from pme.train.artifact_correction import ArtifactCorrectionModule
 from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
 from pme.train.physics import compute_physics_losses
+from pme.train.soap import SOAP
 from pme.train.util import acos_safe, atan2_safe, log_wandb_image, get_random_coordinates, random_time_shift_coords
 
 
@@ -34,7 +35,7 @@ class MESphericalModule(LightningModule):
                  time_shift_config=None,
                  lambda_config=None, **kwargs):
         super().__init__()
-        lr_params = lr_params if lr_params is not None else {"start": 5e-4, "end": 5e-5, "iterations": 1e5}
+        lr_params = lr_params if lr_params is not None else {"start": 1e-3, "end": 1e-4, "iterations": 1e5}
 
         self.image_shape = image_shape
 
@@ -141,7 +142,7 @@ class MESphericalModule(LightningModule):
             self.lr_params = {'start': lr_start, 'end': lr_end, 'iterations': iterations}
         else:
             raise ValueError(f"Invalid lr_params: {self.lr_params}, must be dict or float/int")
-        optimizer = torch.optim.Adam(parameters, lr=lr_start)
+        optimizer = SOAP(parameters, lr=lr_start)
         scheduler = ExponentialLR(optimizer, gamma=(lr_end / lr_start) ** (1 / iterations))
 
         return [optimizer], [scheduler]
@@ -209,8 +210,8 @@ class MESphericalModule(LightningModule):
 
         #################################################
         # compute stokes loss
-        stokes_pred_normalized = torch.cat(stokes_pred_normalized, dim=0)
         stokes_true_normalized = torch.cat(stokes_true_normalized, dim=0)
+        stokes_pred_normalized = torch.cat(stokes_pred_normalized, dim=0)
         stokes_loss = self.stokes_loss_function(stokes_pred_normalized, stokes_true_normalized)
 
         # sum over wavelength axis
@@ -237,10 +238,9 @@ class MESphericalModule(LightningModule):
             b = torch.cat([physics_out['b_x'], physics_out['b_y'], physics_out['b_z']], dim=-1)
             v = torch.cat([physics_out['v_x'], physics_out['v_y'], physics_out['v_z']], dim=-1)
             a_jac_matrix = physics_out['a_jac_matrix']
-            eta = physics_out['eta']
 
             # compute physics losses
-            physics_losses = compute_physics_losses(b, v, eta, a_jac_matrix, random_coords)
+            physics_losses = compute_physics_losses(b, v, a_jac_matrix, random_coords)
 
         #################################################
         # compute total loss
@@ -379,7 +379,8 @@ class MESphericalModule(LightningModule):
             scheduler.step()
         self.log('Learning Rate', scheduler.get_last_lr()[0])
 
-        self.parameter_model.step(self.global_step)
+        if hasattr(self.parameter_model, 'step'):
+            self.parameter_model.step(self.global_step)
         if hasattr(self.parameter_model, 'fine_weight'):
             self.log('fine_weight', self.parameter_model.fine_weight.item())
 
@@ -471,9 +472,8 @@ class MESphericalModule(LightningModule):
 
         b = transformed_output['b_xyz']
         v = transformed_output['v_xyz']
-        eta = output['eta']
         a_jac_matrix = output['a_jac_matrix']
-        # physics_losses = compute_physics_losses(b, v, eta, a_jac_matrix, coords)
+        # physics_losses = compute_physics_losses(b, v, a_jac_matrix, coords)
 
         res = {'diff': diff,
                'stokes_true': stokes_true_normalized, 'stokes_pred': stokes_pred_normalized,

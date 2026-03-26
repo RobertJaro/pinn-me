@@ -4,7 +4,7 @@ from pme.data.util import cartesian_to_spherical
 from pme.model import jacobian
 
 
-def compute_physics_losses(b, v, eta, a_jac_matrix, coords):
+def compute_physics_losses(b, v, a_jac_matrix, coords):
     # compute B derivatives
     jac_matrix = jacobian(b, coords)
     dBx_dt = jac_matrix[..., 0, 0]
@@ -69,7 +69,7 @@ def compute_physics_losses(b, v, eta, a_jac_matrix, coords):
         dAz_dz = a_jac_matrix[:, 2, 3]
         dA_dt = torch.stack([dAx_dt, dAy_dt, dAz_dt], -1)
 
-        induction_equation = dA_dt - vxB + eta * j
+        induction_equation = dA_dt - vxB
         induction_loss = induction_equation.pow(2).sum(-1)
 
         # compute Coulomb gauge condition

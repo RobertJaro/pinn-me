@@ -129,7 +129,7 @@ if __name__ == '__main__':
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
         ax = axs[1, 2]
-        im = ax.imshow(np.rad2deg(azi % (2 * np.pi)), cmap='twilight', origin='lower', vmin=0, vmax=360)
+        im = ax.imshow(np.rad2deg(azi % np.pi), cmap='twilight', origin='lower', vmin=0, vmax=180)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')

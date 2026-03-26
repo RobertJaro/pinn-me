@@ -1,10 +1,10 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/subframe_v32"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/subframe_v27"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/subframe_v44"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi/subframe_v43"
 data:
   train_configs:
-    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_subframe", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
-  valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_subframe", sample_idx: 8, stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
+    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_subframe/*20240507_12*", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
+  valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/202405_subframe/*20240507_120000_TAI*", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
   ref_time: "2024-05-09T00:00:00"
   num_workers: 8
   batch_size: 131072
@@ -24,21 +24,17 @@ logging:
 
 model:
   dim: 512
-  encoding_config: { type: weighted, weights: [4, 1024, 1024, 1024]}
+#  w0_initial: 100
+  encoding_config: { type: 'positional', max_frequencies: [1, 10, 10, 10] }
 
 training:
-  epochs: 1000
-  check_val_every_n_epoch: 5
-#  time_shift_config:
-#    scale: 3600
-#    iterations: 50000
+  epochs: 100000
+  check_val_every_n_epoch: 100
 
 lambda:
   I: 1.0
   Q: 10.0
   U: 10.0
   V: 5.0
-  divergence: { type: step, iterations: 1.0e+4, start: 1.0e-5, end: 0.0 }
-  potential: { type: step, iterations: 1.0e+4, start: 1.0e-5, end: 0.0 }
-#  force_free: 1.0e-3
-#  induction: 1.0e-3
+#  divergence: { type: step, iterations: 1.0e+4, start: 1.0e-5, end: 0.0 }
+#  potential: { type: step, iterations: 1.0e+4, start: 1.0e-5, end: 0.0 }

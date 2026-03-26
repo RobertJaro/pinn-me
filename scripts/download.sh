@@ -24,6 +24,7 @@ python3 -m pme.data.download_hmi --download_dir /glade/work/rjarolim/data/hmi_st
 # test data
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test --email "robert.jarolim@uni-graz.at" --t_start "2024-05-01T00:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-08T00:00:00"
+python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-07T12:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_05_09 --email "robert.jarolim@uni-graz.at" --t_start "2024-05-09T01:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_03_24 --email "robert.jarolim@uni-graz.at" --t_start "2024-03-24T01:00:00"
 python3 -m pme.data.download_hmi_test --download_dir /glade/work/rjarolim/data/hmi_stokes/test_2024_03_15 --email "robert.jarolim@uni-graz.at" --t_start "2024-03-15T06:00:00"
