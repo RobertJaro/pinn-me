@@ -56,22 +56,26 @@ class TestSetGenerator:
 
         return {'stokes_profiles': stokes_profiles}, parameters
 
-    def convert_to_profiles(self, b0, b1, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, damping, kl, mu, vdop, vmac):
+    def convert_to_profiles(self, b0, b1, b_field, sin_inc2_cos2azi, sin_inc2_sin2azi,
+                            sin_inc2, cos_inc, damping, kl, mu, vdop, vmac):
         atmos = MEAtmosphere(self.wavelength_center, self.jUp, self.jLow, self.gUp, self.gLow)
         # flatten and forward
         b_field = b_field.reshape(-1, 1)  # used as reference
         wavelength_grid = torch.tensor(self.wavelength_grid.to_value(u.m), dtype=torch.float32, device=b_field.device)
         wavelength_grid = torch.ones_like(b_field) * wavelength_grid[None, :]
-        I, Q, U, V = atmos.forward(wavelength_grid,
-                                   b_field,
-                                   cos2azi.reshape(-1, 1), sin2azi.reshape(-1, 1),
-                                   sin_inc2.reshape(-1, 1), cos_inc.reshape(-1, 1),
-                                   vmac.reshape(-1, 1), damping.reshape(-1, 1),
-                                   b0.reshape(-1, 1), b1.reshape(-1, 1), mu.reshape(-1, 1),
-                                   vdop.reshape(-1, 1), kl.reshape(-1, 1))
+        I, Q, U, V = atmos.forward(
+            wavelength_grid=wavelength_grid,
+            b_field=b_field,
+            sin_inc2_cos2azi=sin_inc2_cos2azi.reshape(-1, 1),
+            sin_inc2_sin2azi=sin_inc2_sin2azi.reshape(-1, 1),
+            sin_inc2=sin_inc2.reshape(-1, 1), cos_inc=cos_inc.reshape(-1, 1),
+            vmac=vmac.reshape(-1, 1), damping=damping.reshape(-1, 1),
+            b0=b0.reshape(-1, 1), b1=b1.reshape(-1, 1), mu=mu.reshape(-1, 1),
+            vdop=vdop.reshape(-1, 1), kl=kl.reshape(-1, 1),
+        )
         stokes_profiles = torch.stack([I, Q, U, V], -2).cpu().numpy()
         # (x, y, n_lambda, n_stokes)
-        stokes_profiles = stokes_profiles.reshape(*cos2azi.shape, 4, *self.wavelength_grid.shape)
+        stokes_profiles = stokes_profiles.reshape(*sin_inc2_cos2azi.shape, 4, *self.wavelength_grid.shape)
         return stokes_profiles
 
     def _load_parameters(self, time_step, resolution=None):

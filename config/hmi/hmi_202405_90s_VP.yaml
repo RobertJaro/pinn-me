@@ -22,14 +22,18 @@ logging:
   name: "2024-05 90s no physics"
 
 model:
-  vector_potential: True
-  encoding: "time_split"
+  type: mlp
+  dim: 256
+  n_layers: 6
+  vector_potential: true
+  scale: true
 
 training:
   epochs: 500
-  lambda_stokes: [ 1, 2, 2, 2 ]
-  lambda_induction: 0.0
-  lambda_divergence: 0.0
-  lambda_force_free: 0.0
-  lambda_static: 0.0
   val_check_interval: 5000
+
+lambda:
+  I: 1.0
+  Q: 2.0
+  U: 2.0
+  V: 2.0

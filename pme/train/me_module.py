@@ -27,6 +27,10 @@ class MEModule(LightningModule):
 
         # init model
         model_config = model_config if model_config is not None else {}
+        model_config = dict(model_config)
+        model_type = model_config.pop('type', None)
+        if model_type != 'mlp':
+            raise ValueError("The model configuration must specify type: mlp.")
         self.parameter_model = MEModel(3, **model_config)
 
         psf_type = psf_config.pop('type')
@@ -61,7 +65,8 @@ class MEModule(LightningModule):
         self.lr_params = lr_params
         #
         self.validation_outputs = {}
-        self.normalization = NormalizationModule(value_range)
+        # Cartesian training uses linear continuum-normalized Stokes profiles.
+        self.normalization = NormalizationModule()
         self.loss_function = nn.MSELoss(reduction='none')
         self.lambda_stokes = nn.Parameter(torch.tensor(lambda_stokes, dtype=torch.float32), requires_grad=False)
 
@@ -95,18 +100,16 @@ class MEModule(LightningModule):
         # expand mu for PSF (TODO adapt mu for PSF sampling)
         mu = mu[:, None, None, :].repeat(1, *self.coords_psf.shape[1:3], 1).reshape(-1, 1)
 
-        I, Q, U, V = self.forward_model(**output, mu=mu)
-        I = I.reshape(*coords_shape[:-1], -1)
-        Q = Q.reshape(*coords_shape[:-1], -1)
-        U = U.reshape(*coords_shape[:-1], -1)
-        V = V.reshape(*coords_shape[:-1], -1)
+        stokes_components = self.forward_model(**output, mu=mu)
+        stokes_components = tuple(
+            component.reshape(*coords_shape[:-1], -1) for component in stokes_components
+        )
 
-        I, Q, U, V = self.convolve_psf(I, Q, U, V)
-        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
+        stokes_components = self.convolve_psf(*stokes_components)
+        stokes_pred = torch.stack(stokes_components, dim=-2)
 
-        Ic = torch.quantile(stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
-        stokes_true = self.normalization(stokes_true, Ic=Ic)
-        stokes_pred = self.normalization(stokes_pred, Ic=Ic)
+        stokes_true = self.normalization(stokes_true)
+        stokes_pred = self.normalization(stokes_pred)
 
         loss = self.loss_function(stokes_pred, stokes_true)
         loss = loss.sum(-1)  # sum over wavelength axis
@@ -118,21 +121,16 @@ class MEModule(LightningModule):
         total_loss = loss * self.lambda_stokes[None, :]
         total_loss = total_loss.mean()
 
-        assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
+        assert not torch.isnan(total_loss), "Encountered invalid value. Loss is NaN"
 
         return {"loss": total_loss,
                 "I_loss": I_loss, "Q_loss": Q_loss,
                 "U_loss": U_loss, "V_loss": V_loss}
 
-    def convolve_psf(self, I, Q, U, V):
+    def convolve_psf(self, *stokes_components):
         psf = self.psf()
         psf = psf[None, :, :, None]
-        I = (I * psf).sum(dim=(1, 2))
-        Q = (Q * psf).sum(dim=(1, 2))
-        U = (U * psf).sum(dim=(1, 2))
-        V = (V * psf).sum(dim=(1, 2))
-
-        return I, Q, U, V
+        return tuple((component * psf).sum(dim=(1, 2)) for component in stokes_components)
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
@@ -156,25 +154,18 @@ class MEModule(LightningModule):
         # expand mu for PSF (TODO adapt mu for PSF sampling)
         mu = mu[:, None, None, :].repeat(1, *self.coords_psf.shape[1:3], 1).reshape(-1, 1)
 
-        I, Q, U, V = self.forward_model(**output, mu=mu)
-
-        # reshape to original coords shape
-
-
-        I = I.reshape(*coords_shape[:-1], -1)
-        Q = Q.reshape(*coords_shape[:-1], -1)
-        U = U.reshape(*coords_shape[:-1], -1)
-        V = V.reshape(*coords_shape[:-1], -1)
+        stokes_components = self.forward_model(**output, mu=mu)
+        stokes_components = tuple(
+            component.reshape(*coords_shape[:-1], -1) for component in stokes_components
+        )
 
         output = {k: v.reshape(*coords_shape[:-1], -1) for k, v in output.items()}
 
-        I, Q, U, V = self.convolve_psf(I, Q, U, V)
+        stokes_components = self.convolve_psf(*stokes_components)
+        stokes_pred = torch.stack(stokes_components, dim=-2)
 
-        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
-
-        Ic = torch.quantile(stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
-        stokes_true = self.normalization(stokes_true, Ic=Ic)
-        stokes_pred = self.normalization(stokes_pred, Ic=Ic)
+        stokes_true = self.normalization(stokes_true)
+        stokes_pred = self.normalization(stokes_pred)
 
         diff = torch.abs(stokes_true - stokes_pred)
 

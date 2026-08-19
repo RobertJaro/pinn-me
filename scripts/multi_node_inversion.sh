@@ -12,10 +12,8 @@
 set -euo pipefail
 
 # ===== Env =====
-module load conda/latest
 module load cuda/12.3.2
 module load openmpi || true          # let Lmod handle swaps if needed
-conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 
@@ -44,10 +42,8 @@ mpiexec -np "$NNODES" --map-by ppr:1:node --bind-to none \
     cd "$PBS_O_WORKDIR"
     RANK=${OMPI_COMM_WORLD_RANK}
     echo "node $(hostname -s): node_rank=${RANK}"
-    module load conda/latest
     module load cuda/12.3.2
     module load openmpi || true          # let Lmod handle swaps if needed
-    conda activate lightning
     cd /glade/u/home/rjarolim/projects/PINN-ME
     exec torchrun \
       --nnodes='"$NNODES"' \

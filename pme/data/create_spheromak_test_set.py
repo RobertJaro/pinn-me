@@ -21,6 +21,7 @@ from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.test_set_generator import TestSetGenerator, load_parameters, load_fits_profiles
 from pme.data.util import image_to_spherical_matrix, vector_spherical_to_cartesian, vector_cartesian_to_spherical, \
     spherical_to_cartesian, cartesian_to_spherical
+from pme.instrument import hmi_wavelength_config
 
 
 class SpheromakTestSetGenerator(TestSetGenerator):
@@ -179,8 +180,9 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         sin_inc2 = (b_img[..., 0] ** 2 + b_img[..., 1] ** 2) / (b_field ** 2 + 1e-8)
         cos_inc = b_img[..., 2] / (b_field + 1e-8)
         # AZI
-        sin2azi = -2 * b_img[..., 0] * b_img[..., 1] / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
-        cos2azi = -(b_img[..., 0] ** 2 - b_img[..., 1] ** 2) / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
+        field_denominator = b_field ** 2 + 1e-8
+        sin_inc2_sin2azi = -2 * b_img[..., 0] * b_img[..., 1] / field_denominator
+        sin_inc2_cos2azi = -(b_img[..., 0] ** 2 - b_img[..., 1] ** 2) / field_denominator
         azi = np.arctan2(-b_img[..., 0:1], b_img[..., 1:2])
 
         # add rotation of carrington frame
@@ -195,8 +197,8 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         transformed_parameters['b_field'] = b_field
         transformed_parameters['sin_inc2'] = sin_inc2
         transformed_parameters['cos_inc'] = cos_inc
-        transformed_parameters['sin2azi'] = sin2azi
-        transformed_parameters['cos2azi'] = cos2azi
+        transformed_parameters['sin_inc2_sin2azi'] = sin_inc2_sin2azi
+        transformed_parameters['sin_inc2_cos2azi'] = sin_inc2_cos2azi
         transformed_parameters['azi'] = azi
         transformed_parameters['vdop'] = vdop
 
@@ -254,8 +256,9 @@ if __name__ == '__main__':
     t_end = datetime(2025, 1, 2)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
-    wavelength_center = 6173.3433 * u.AA
-    wavelength_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) * u.AA
+    wavelength_config = hmi_wavelength_config()
+    wavelength_center = wavelength_config['wavelength_center']
+    wavelength_grid = wavelength_config['wavelength_grid']
 
     data_generator = SpheromakTestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
                                                wavelength_center=wavelength_center, wavelength_grid=wavelength_grid,

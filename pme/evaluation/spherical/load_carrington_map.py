@@ -46,7 +46,7 @@ if __name__ == '__main__':
                                 axis=-1)
     spherical_coords = spherical_coords[0, :, :]
 
-    cartesian_coords = spherical_to_cartesian(spherical_coords)
+    cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_times[None, :, None]
     coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
 

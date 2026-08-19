@@ -18,6 +18,41 @@ from pme.data.create_cartesian_test_set import plot_parameters, plot_stokes, plo
 from pme.data.test_set_generator import TestSetGenerator, load_parameters, load_fits_profiles
 from pme.data.util import image_to_spherical_matrix
 from pme.data.util import solar_differential_rotation_velocity
+from pme.instrument import hmi_wavelength_config
+
+
+def image_frame_inclination(b_img):
+    """Return ME inclination quantities for an image-frame magnetic field.
+
+    The image ``+z`` axis points toward the observer, so an observer-directed
+    field has ``cos(inclination) > 0``.
+    """
+    b_field = np.linalg.norm(b_img, axis=-1)
+    transverse_b2 = b_img[..., 0] ** 2 + b_img[..., 1] ** 2
+    sin_inc2 = np.divide(
+        transverse_b2,
+        b_field ** 2,
+        out=np.zeros_like(b_field),
+        where=b_field > 0,
+    )
+    cos_inc = np.divide(
+        b_img[..., 2],
+        b_field,
+        out=np.zeros_like(b_field),
+        where=b_field > 0,
+    )
+    inc = np.arccos(np.clip(cos_inc, -1.0, 1.0))
+    return b_field, sin_inc2, cos_inc, inc
+
+
+def disk_center_doppler_to_radial_velocity(vdop):
+    """Convert positive-redshift Doppler velocity to radial velocity.
+
+    Positive radial velocity points outward, hence toward an Earth-like
+    observer at disk center. Positive Doppler velocity points away from the
+    observer, so the two conventions have opposite signs.
+    """
+    return -vdop
 
 
 class SphericalTestSetGenerator(TestSetGenerator):
@@ -48,9 +83,11 @@ class SphericalTestSetGenerator(TestSetGenerator):
         input_parameters['b_theta'] = b_theta
         input_parameters['b_phi'] = b_phi
 
-        # convert velocity to spherical coordinates
+        # Convert the inherited positive-redshift LOS velocity into the radial
+        # velocity that produces it at disk center. Away from disk center its
+        # LOS projection naturally decreases with mu.
         vdop = input_parameters['vdop']
-        v_r = vdop
+        v_r = disk_center_doppler_to_radial_velocity(vdop)
         v_theta = np.zeros_like(v_r)
         v_phi = np.zeros_like(v_r)
         # add differential rotation
@@ -119,22 +156,16 @@ class SphericalTestSetGenerator(TestSetGenerator):
         # transform b vector to image frame
         b_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)  # in image xyz
 
-        b_field = np.linalg.norm(b_img, axis=-1)
+        b_field, sin_inc2, cos_inc, inc = image_frame_inclination(b_img)
 
         # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
         # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
         # 2 * sin(x) * cos(x) = sin(2*x)
         # sin(x)**2 - cos(x)**2 = -cos(2*x)
-        sin2azi = 2 * b_img[..., 0] * b_img[..., 1] / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
-        cos2azi = (b_img[..., 0] ** 2 - b_img[..., 1] ** 2) / (b_img[..., 0] ** 2 + b_img[..., 1] ** 2 + 1e-8)
+        field_denominator = b_field ** 2 + 1e-8
+        sin_inc2_sin2azi = 2 * b_img[..., 0] * b_img[..., 1] / field_denominator
+        sin_inc2_cos2azi = (b_img[..., 0] ** 2 - b_img[..., 1] ** 2) / field_denominator
 
-        # sin(pi - x) = sin(x)
-        # cos(pi - x) = -cos(x)
-        sin_inc2 = (b_img[..., 0] ** 2 + b_img[..., 1] ** 2) / (b_field ** 2 + 1e-8)
-        cos_inc = -b_img[..., 2] / (b_field + 1e-8)  # flipped inclination angle
-
-
-        inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
         azi = np.arctan2(-b_img[..., 0], b_img[..., 1])
 
         # stack v vector
@@ -143,15 +174,17 @@ class SphericalTestSetGenerator(TestSetGenerator):
         v_phi = transformed_parameters.pop('v_phi')
         v_rtp = np.stack([v_r, v_theta, v_phi], -1)
 
-        # transform b vector to image frame
+        # transform velocity vector to image frame
         v_img = np.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp)  # in image xyz
         # convert to ME parameters
-        vdop = v_img[..., 2]
+        # Positive Doppler velocity is a redshift (motion away from the
+        # observer); the image z axis points toward the observer.
+        vdop = -v_img[..., 2]
 
         transformed_parameters['b_field'] = b_field
 
-        transformed_parameters['sin2azi'] = sin2azi
-        transformed_parameters['cos2azi'] = cos2azi
+        transformed_parameters['sin_inc2_sin2azi'] = sin_inc2_sin2azi
+        transformed_parameters['sin_inc2_cos2azi'] = sin_inc2_cos2azi
         transformed_parameters['azi'] = azi
         transformed_parameters['sin_inc2'] = sin_inc2
         transformed_parameters['cos_inc'] = cos_inc
@@ -220,8 +253,9 @@ if __name__ == '__main__':
     t_end = datetime(2025, 2, 1)
     t_range = pd.date_range(t_start, t_end, periods=args.n_time_steps)
 
-    wavelength_grid = np.array([-0.1695, -0.1017, -0.0339, +0.0339, +0.1017, +0.1695]) / 10 * u.nm  # From Phillip Scherrer
-    wavelength_center = 617.33433 * u.nm  # From Phillip Scherrer
+    wavelength_config = hmi_wavelength_config()
+    wavelength_grid = wavelength_config['wavelength_grid']
+    wavelength_center = wavelength_config['wavelength_center']
 
     data_generator = SphericalTestSetGenerator(nx=args.resolution[0], ny=args.resolution[1],
                                                wavelength_center=wavelength_center, wavelength_grid=wavelength_grid, g_up=2.50)

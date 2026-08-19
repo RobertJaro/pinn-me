@@ -23,13 +23,17 @@ logging:
   name: "spheromak - 1 observers - v01"
 
 model:
-  encoding: "gaussian"
+  type: mlp
+  dim: 256
+  n_layers: 6
+  scale: true
 
 training:
   epochs: 500
-  lambda_stokes: [1, 1, 1, 1]
-  lambda_induction: 0.0
-  lambda_divergence: 0.0
-  lambda_force_free: 0.0
-  lambda_static: 0.0
   check_val_every_n_epoch: 10
+
+lambda:
+  I: 1.0
+  Q: 1.0
+  U: 1.0
+  V: 1.0

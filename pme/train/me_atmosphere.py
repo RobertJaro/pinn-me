@@ -97,25 +97,25 @@ class MEAtmosphere(nn.Module):
         eta_I *= kl
         return eta_I
 
-    def eta_Q(self, phi_p, phi_r, phi_b, sin_inc2, cos2azi, kl, **kwargs):
-        eta_Q = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2 * cos2azi) * kl
+    def eta_Q(self, phi_p, phi_r, phi_b, sin_inc2_cos2azi, kl, **kwargs):
+        eta_Q = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2_cos2azi) * kl
 
         return eta_Q
 
-    def eta_U(self, phi_p, phi_r, phi_b, sin_inc2, sin2azi, kl, **kwargs):
-        eta_U = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2 * sin2azi) * kl
+    def eta_U(self, phi_p, phi_r, phi_b, sin_inc2_sin2azi, kl, **kwargs):
+        eta_U = ((phi_p - 0.5 * (phi_r + phi_b)) * sin_inc2_sin2azi) * kl
         return eta_U
 
     def eta_V(self, phi_r, phi_b, cos_inc, kl, **kwargs):
         eta_V = (phi_r - phi_b) * cos_inc * kl
         return eta_V
 
-    def rho_Q(self, psi_p, psi_r, psi_b, sin_inc2, cos2azi, kl, **kwargs):
-        rho_Q = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2 * cos2azi) * kl
+    def rho_Q(self, psi_p, psi_r, psi_b, sin_inc2_cos2azi, kl, **kwargs):
+        rho_Q = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2_cos2azi) * kl
         return rho_Q
 
-    def rho_U(self, psi_p, psi_r, psi_b, sin_inc2, sin2azi, kl, **kwargs):
-        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2 * sin2azi) * kl
+    def rho_U(self, psi_p, psi_r, psi_b, sin_inc2_sin2azi, kl, **kwargs):
+        rho_U = ((psi_p - 0.5 * (psi_r + psi_b)) * sin_inc2_sin2azi) * kl
 
         return rho_U
 
@@ -132,8 +132,10 @@ class MEAtmosphere(nn.Module):
         return delta
 
     def compute_I(self, b0, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, **kwargs):
-        I = b0 + mu * b1 / delta * ((1 + eta_I) * ((1 + eta_I) ** 2 + rho_Q ** 2 + rho_U ** 2 + rho_V ** 2))
-        return I
+        stokes_i = b0 + mu * b1 / delta * (
+            (1 + eta_I) * ((1 + eta_I) ** 2 + rho_Q ** 2 + rho_U ** 2 + rho_V ** 2)
+        )
+        return stokes_i
 
     def compute_Q(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
         Q = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_Q
@@ -149,6 +151,7 @@ class MEAtmosphere(nn.Module):
 
     def compute_V(self, b1, delta, mu, eta_I, rho_Q, rho_U, rho_V, eta_Q, eta_V, eta_U, **kwargs):
         V = - mu * b1 / delta * ((1 + eta_I) ** 2 * eta_V
+                                 + (1 + eta_I) * (eta_U * rho_Q - eta_Q * rho_U)
                                  + rho_V * (eta_Q * rho_Q + eta_U * rho_U + eta_V * rho_V))
         return V
 
@@ -165,14 +168,18 @@ class MEAtmosphere(nn.Module):
     def nu(self, d_lambda, wavelength_grid, **kwargs):
         return wavelength_grid / d_lambda
 
-    def forward(self, wavelength_grid, b_field, cos2azi, sin2azi, sin_inc2, cos_inc, vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
-        # sin2azi = sin(2 * azi)
-        # cos2azi = cos(2 * azi)
+    def _forward_monochromatic(self, wavelength_grid, b_field, sin_inc2_cos2azi, sin_inc2_sin2azi,
+                               sin_inc2, cos_inc,
+                               vmac, damping, b0, b1, mu, vdop, kl, **kwargs):
         # sin_inc2 = sin(inc) ** 2
+        # The azimuth inputs already contain sin(inc) ** 2, avoiding a
+        # singular division by the transverse field strength.
         # cos_inc = cos(inc)
         # init state
         state = {'b_field': b_field,
-                 'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'cos2azi': cos2azi, 'sin2azi': sin2azi,
+                 'sin_inc2': sin_inc2, 'cos_inc': cos_inc,
+                 'sin_inc2_cos2azi': sin_inc2_cos2azi,
+                 'sin_inc2_sin2azi': sin_inc2_sin2azi,
                  'vmac': vmac, 'damping': damping,
                  'b0': b0, 'b1': b1, 'mu': mu, 'vdop': vdop, 'kl': kl,
                  'wavelength_grid': wavelength_grid}
@@ -197,13 +204,67 @@ class MEAtmosphere(nn.Module):
         # delta
         state['delta'] = self.delta(**state)
 
-        I = self.compute_I(**state)
-        Q = self.compute_Q(**state)
-        U = self.compute_U(**state)
-        V = self.compute_V(**state)
+        stokes_i = self.compute_I(**state)
+        stokes_q = self.compute_Q(**state)
+        stokes_u = self.compute_U(**state)
+        stokes_v = self.compute_V(**state)
 
         # return the Stokes parameters
-        return I, Q, U, V
+        return stokes_i, stokes_q, stokes_u, stokes_v
+
+    def forward(self, wavelength_grid, b_field, sin_inc2_cos2azi, sin_inc2_sin2azi,
+                sin_inc2, cos_inc,
+                vmac, damping, b0, b1, mu, vdop, kl,
+                spectral_offsets=None, spectral_weights=None, continuum_weights=None, **kwargs):
+        atmosphere_parameters = {
+            'b_field': b_field,
+            'sin_inc2_cos2azi': sin_inc2_cos2azi,
+            'sin_inc2_sin2azi': sin_inc2_sin2azi,
+            'sin_inc2': sin_inc2,
+            'cos_inc': cos_inc,
+            'vmac': vmac,
+            'damping': damping,
+            'b0': b0,
+            'b1': b1,
+            'mu': mu,
+            'vdop': vdop,
+            'kl': kl,
+            **kwargs,
+        }
+        response_values = (spectral_offsets, spectral_weights, continuum_weights)
+        if all(value is None for value in response_values):
+            return self._forward_monochromatic(wavelength_grid=wavelength_grid, **atmosphere_parameters)
+        if any(value is None for value in response_values):
+            raise ValueError(
+                'spectral_offsets, spectral_weights, and continuum_weights must be provided together.'
+            )
+        if spectral_offsets.ndim == 2:
+            spectral_offsets = spectral_offsets.unsqueeze(0)
+        if spectral_weights.ndim == 2:
+            spectral_weights = spectral_weights.unsqueeze(0)
+        if spectral_offsets.shape != spectral_weights.shape:
+            raise ValueError('spectral_offsets and spectral_weights must have matching shapes.')
+        if spectral_offsets.ndim != 3:
+            raise ValueError('Batch spectral responses must have shape [batch, filter, sample].')
+        if continuum_weights.shape != spectral_weights.shape[:-1]:
+            raise ValueError('continuum_weights must have shape [batch, filter].')
+        if spectral_offsets.shape[-2] not in (1, wavelength_grid.shape[-1]):
+            raise ValueError(
+                f'Tabulated profile has {spectral_offsets.shape[-2]} filters, but wavelength grid has '
+                f'{wavelength_grid.shape[-1]} positions.'
+            )
+
+        sampled_grid = wavelength_grid[..., :, None] + spectral_offsets
+        n_profile_samples = sampled_grid.shape[-1]
+        flat_grid = sampled_grid.reshape(*wavelength_grid.shape[:-1], -1)
+        monochromatic = self._forward_monochromatic(wavelength_grid=flat_grid, **atmosphere_parameters)
+
+        output_shape = (*wavelength_grid.shape, n_profile_samples)
+        integrated = [(component.reshape(output_shape) * spectral_weights).sum(dim=-1)
+                      for component in monochromatic]
+        continuum_intensity = b0 + mu * b1
+        integrated[0] = integrated[0] + continuum_weights * continuum_intensity
+        return tuple(integrated)
 
 
 class HMIMEAtmosphere(MEAtmosphere):
@@ -216,18 +277,17 @@ class HMIMEAtmosphere(MEAtmosphere):
         g_low = 0.0
         super().__init__(j_up=j_up, j_low=j_low, g_up=g_up, g_low=g_low, **kwargs)
 
-    def forward(self, cos_inc, sin2azi, cos2azi, vdop, **kwargs):
+    def forward(self, sin_inc2_sin2azi, sin_inc2_cos2azi, **kwargs):
         # apply angle transformation to the HMI polarizer
-        # sin(pi - x) = sin(x)
-        # cos(pi - x) = -cos(x)
-        cos_inc = -cos_inc
         # sin(2*(x + pi/2)) = sin(2*x + pi) = -sin(2*x)
         # cos(2*(x + pi/2)) = cos(2*x + pi) = -cos(2*x)
-        sin2azi = -sin2azi
-        cos2azi = -cos2azi
-        # flip the vdop sign, analogous to inclination angle
-        vdop = -vdop
-        return super().forward(cos_inc=cos_inc, sin2azi=sin2azi, cos2azi=cos2azi, vdop=vdop, **kwargs)
+        sin_inc2_sin2azi = -sin_inc2_sin2azi
+        sin_inc2_cos2azi = -sin_inc2_cos2azi
+        return super().forward(
+            sin_inc2_sin2azi=sin_inc2_sin2azi,
+            sin_inc2_cos2azi=sin_inc2_cos2azi,
+            **kwargs,
+        )
 
 class PHIMEAtmosphere(MEAtmosphere):
     ''' Class to contain the PHI ME atmosphere properties'''

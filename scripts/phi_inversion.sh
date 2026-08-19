@@ -9,9 +9,7 @@
 #PBS -o /dev/null
 #PBS -e /dev/null
 
-module load conda/latest
 module load cuda/12.3.2
-conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 

@@ -23,13 +23,10 @@ logging:
   name: "Solar Cycle 2011 - 2013"
 
 model:
+  type: mlp
   dim: 512
-  encoding_config:
-    type: gated_siren
-    banks:
-      - { step: 0, weights: [1, 16, 16, 16] }
-      - { step: 1.0e+4, weights: [10, 256, 256, 256] }
-      - { step: 2.0e+4, weights: [30, 2048, 2048, 2048] }
+  n_layers: 6
+  scale: true
 
 training:
   epochs: 1000

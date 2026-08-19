@@ -1,196 +1,246 @@
-import torch
-from torch import nn
-from torch.nn import Identity, Sequential
+from collections.abc import Iterable
+from copy import deepcopy
+import math
 
-from pme.encoding import PeriodicBoundary, GaussianPositionalEncoding, ProgressiveFourierEncoding, PositionalEncoding, \
-    ProgressiveSpatiotemporalEncoding, SpatiotemporalEncoding, ProgressiveGaussianEncoding, \
-    ProgressivePositionalEncoding, SphericalEncoding, BankGaussianEncoding
-from pme.train.siren import Siren
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+
+def _per_dimension(value, in_dim, name, cast):
+    values = list(value) if isinstance(value, Iterable) and not isinstance(value, (str, bytes)) \
+        else [value] * in_dim
+    if len(values) != in_dim:
+        raise ValueError(f'{name} must contain one value per input dimension ({in_dim}); got {values}.')
+    return [cast(item) for item in values]
+
+
+class FourierEncoding(nn.Module):
+    """Deterministic, coordinate-wise multiresolution Fourier features."""
+
+    def __init__(self, in_dim, num_frequencies=None, max_frequencies=None,
+                 min_frequency=1.0, include_input=True):
+        super().__init__()
+        if num_frequencies is None:
+            num_frequencies = [8, *([64] * (in_dim - 1))] if in_dim == 4 else 64
+        if max_frequencies is None:
+            max_frequencies = [2, *([2048] * (in_dim - 1))] if in_dim == 4 else 2048
+
+        counts = _per_dimension(num_frequencies, in_dim, 'num_frequencies', int)
+        maxima = _per_dimension(max_frequencies, in_dim, 'max_frequencies', float)
+        minima = _per_dimension(min_frequency, in_dim, 'min_frequency', float)
+        if any(count < 0 for count in counts):
+            raise ValueError('num_frequencies cannot be negative.')
+
+        frequencies = []
+        for count, minimum, maximum in zip(counts, minima, maxima):
+            if count == 0:
+                values = torch.empty(0, dtype=torch.float32)
+            elif minimum <= 0 or maximum < minimum:
+                raise ValueError('Fourier frequencies require 0 < min_frequency <= max_frequencies.')
+            elif count == 1:
+                values = torch.tensor([maximum], dtype=torch.float32)
+            else:
+                values = 2 ** torch.linspace(
+                    torch.log2(torch.tensor(minimum)),
+                    torch.log2(torch.tensor(maximum)),
+                    count,
+                    dtype=torch.float32,
+                )
+            frequencies.append(nn.Parameter(values, requires_grad=False))
+
+        self.frequencies = nn.ParameterList(frequencies)
+        self.include_input = bool(include_input)
+        self.out_dim = (in_dim if self.include_input else 0) + 2 * sum(counts)
+
+    def forward(self, coords):
+        features = [coords] if self.include_input else []
+        for coordinate, frequencies in zip(coords.unbind(dim=-1), self.frequencies):
+            if frequencies.numel() == 0:
+                continue
+            phase = torch.pi * coordinate[..., None] * frequencies
+            features.extend((torch.sin(phase), torch.cos(phase)))
+        return torch.cat(features, dim=-1)
 
 
 class Swish(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.beta = nn.Parameter(torch.tensor(1., dtype=torch.float32), requires_grad=True)
+    """Element-wise Swish activation with fixed beta=1."""
 
     def forward(self, x):
-        return x * torch.sigmoid(self.beta * x)
+        return x * torch.sigmoid(x)
 
 
-class Sine(nn.Module):
-    def __init__(self, w0=1.):
+class MLPModel(nn.Module):
+    """Coordinate MLP with explicit multiresolution Fourier features."""
+
+    def __init__(self, in_dim, out_dim, dim=256, n_layers=6,
+                 encoding_config=None, activation='silu'):
         super().__init__()
-        self.w0 = w0
+        if n_layers < 1:
+            raise ValueError('n_layers must be at least one.')
 
-    def forward(self, x):
-        return torch.sin(self.w0 * x)
-
-
-class MEModel(nn.Module):
-
-    def __init__(self, in_coords, dim=256, encoding='gaussian_positional', activation='sine', num_layers=8):
-        super().__init__()
-        # encoding layer
-        if encoding == "periodic":
-            posenc = PeriodicBoundary()
-            d_in = nn.Linear(in_coords + 2, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        if encoding == "positional":
-            posenc = PositionalEncoding(num_freqs=20, d_input=in_coords)
-            d_in = nn.Linear(posenc.d_output, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "gaussian":
-            posenc = GaussianPositionalEncoding(d_input=in_coords)
-            d_in = nn.Linear(posenc.out_dim, dim)
-            self.d_in = nn.Sequential(posenc, d_in)
-        elif encoding == "linear":
-            self.d_in = nn.Linear(in_coords, dim)
+        encoding_config = deepcopy(encoding_config) if encoding_config is not None else {}
+        encoding_type = encoding_config.pop('type', 'fourier').lower()
+        if encoding_type == 'fourier':
+            self.encoding = FourierEncoding(in_dim, **encoding_config)
+            encoded_dim = self.encoding.out_dim
+        elif encoding_type in ('identity', 'none'):
+            if encoding_config:
+                raise TypeError(f'Identity encoding does not accept options: {sorted(encoding_config)}')
+            self.encoding = nn.Identity()
+            encoded_dim = in_dim
         else:
-            raise ValueError(f"Unknown encoding: {encoding}")
+            raise ValueError(f'Unknown MLP encoding: {encoding_type!r}.')
 
-        # hidden layers
-        lin = [nn.Linear(dim, dim) for _ in range(num_layers)]
-        self.linear_layers = nn.ModuleList(lin)
+        activations = {
+            'swish': Swish,
+            'silu': nn.SiLU,
+            'relu': nn.ReLU,
+            'gelu': nn.GELU,
+            'tanh': nn.Tanh,
+        }
+        try:
+            activation_class = activations[activation.lower()]
+        except KeyError as error:
+            raise ValueError(f'Unknown MLP activation: {activation!r}.') from error
 
-        # output layer
-        self.d_out = nn.Linear(dim, 9)
+        self.in_layer = nn.Linear(encoded_dim, dim)
+        self.hidden_layers = nn.ModuleList(nn.Linear(dim, dim) for _ in range(n_layers - 1))
+        self.activations = nn.ModuleList(activation_class() for _ in range(n_layers))
+        self.out_layer = nn.Linear(dim, out_dim)
 
-        # activation functions
-        if activation == "swish":
-            self.in_activation = Swish()
-            self.activations = nn.ModuleList([Swish() for _ in range(num_layers)])
-        elif activation == "sine":
-            self.in_activation = Sine()
-            self.activations = nn.ModuleList([Sine() for _ in range(num_layers)])
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
+    def forward(self, coords):
+        x = self.activations[0](self.in_layer(self.encoding(coords)))
+        for layer, activation in zip(self.hidden_layers, self.activations[1:]):
+            x = activation(layer(x))
+        return self.out_layer(x)
 
-        # output activations
-        self.softplus = nn.Softplus()
-        self.register_buffer("c", torch.tensor(3e8))
+
+class SineLayer(nn.Module):
+    """SIREN layer with the initialization from Sitzmann et al. (2020)."""
+
+    def __init__(self, in_dim, out_dim, omega_0=1.0, is_first=False):
+        super().__init__()
+        if omega_0 <= 0:
+            raise ValueError('SIREN omega_0 must be positive.')
+        self.omega_0 = float(omega_0)
+        self.linear = nn.Linear(in_dim, out_dim)
+        bound = 1 / in_dim if is_first else math.sqrt(6 / in_dim) / self.omega_0
+        with torch.no_grad():
+            self.linear.weight.uniform_(-bound, bound)
+            self.linear.bias.uniform_(-bound, bound)
 
     def forward(self, x):
-        x = self.in_activation(self.d_in(x))
-        for l, a in zip(self.linear_layers, self.activations):
-            x = a(l(x))
-        params = self.d_out(x)
-        #
-        b_field = params[..., 0:1] * 1e3
+        return torch.sin(self.omega_0 * self.linear(x))
+
+
+class SirenModel(nn.Module):
+    """SIREN with independent angular input frequencies per coordinate."""
+
+    def __init__(self, in_dim, out_dim, dim=256, n_layers=8,
+                 input_omegas=None, hidden_omega_0=1.0,
+                 output_init_scale=1.0):
+        super().__init__()
+        if n_layers < 1:
+            raise ValueError('n_layers must be at least one.')
+        if hidden_omega_0 <= 0:
+            raise ValueError('SIREN hidden_omega_0 must be positive.')
+        if output_init_scale <= 0:
+            raise ValueError('SIREN output_init_scale must be positive.')
+        if input_omegas is None:
+            input_omegas = [30.0] * in_dim
+        input_omegas = torch.tensor(
+            _per_dimension(input_omegas, in_dim, 'input_omegas', float), dtype=torch.float32
+        )
+        if torch.any(input_omegas <= 0):
+            raise ValueError('SIREN input_omegas must be positive.')
+        self.register_buffer('input_omegas', input_omegas)
+
+        self.in_layer = SineLayer(in_dim, dim, omega_0=1.0, is_first=True)
+        self.hidden_layers = nn.ModuleList(
+            SineLayer(dim, dim, omega_0=hidden_omega_0)
+            for _ in range(n_layers - 1)
+        )
+        self.out_layer = nn.Linear(dim, out_dim)
+        # The standard SIREN bound is appropriate for another sine layer, but
+        # is unnecessarily broad for physical outputs. Keep its dependence on
+        # the hidden frequency while allowing a smaller linear readout.
+        output_bound = (
+            math.sqrt(6 / dim) / float(hidden_omega_0) * float(output_init_scale)
+        )
+        with torch.no_grad():
+            self.out_layer.weight.uniform_(-output_bound, output_bound)
+            self.out_layer.bias.zero_()
+
+    def forward(self, coords):
+        x = self.in_layer(coords * self.input_omegas)
+        for layer in self.hidden_layers:
+            x = layer(x)
+        return self.out_layer(x)
+
+
+class MEModel(MLPModel):
+
+    def __init__(self, in_coords, **kwargs):
+        super().__init__(in_dim=in_coords, out_dim=9, **kwargs)
+
+    def forward(self, x):
+        params = super().forward(x)
         theta = params[..., 1:2] * torch.pi
         chi = params[..., 2:3] * torch.pi
-        vmac = torch.sigmoid(params[..., 3:4]) * 20e3
-        damping = torch.sigmoid(params[..., 4:5]) * 1
-        b0 = torch.sigmoid(params[..., 5:6])
-        b1 = torch.sigmoid(params[..., 6:7])
-        vdop = params[..., 7:8] * 1e4
-        kl = torch.sigmoid(params[..., 8:9]) * 100
-        #
-        output = {
-            "b_field": b_field,
-            "theta": theta,
-            "chi": chi,
-            "vmac": vmac,
-            "damping": damping,
-            "b0": b0,
-            "b1": b1,
-            "vdop": vdop,
-            "kl": kl,
+        sin_inc2 = torch.sin(theta).square()
+        return {
+            'b_field': params[..., 0:1] * 1e3,
+            'theta': theta,
+            'chi': chi,
+            'sin_inc2': sin_inc2,
+            'cos_inc': torch.cos(theta),
+            'sin_inc2_sin2azi': sin_inc2 * torch.sin(2 * chi),
+            'sin_inc2_cos2azi': sin_inc2 * torch.cos(2 * chi),
+            'vmac': torch.sigmoid(params[..., 3:4]) * 20e3,
+            'damping': torch.sigmoid(params[..., 4:5]),
+            'b0': torch.sigmoid(params[..., 5:6]),
+            'b1': torch.sigmoid(params[..., 6:7]),
+            'vdop': params[..., 7:8] * 1e4,
+            'kl': torch.sigmoid(params[..., 8:9]) * 100,
         }
 
-        return output
 
+class _BaseMESphericalModel:
 
-class GenericModel(nn.Module):
-
-    def __init__(self, in_dim, out_dim, dim=512, encoding_config=None, activation='sine', n_layers=8):
-        super().__init__()
-        # encoding layer
-        encoding_config = {'type': 'gaussian'} if encoding_config is None else encoding_config
-        encoding_type = encoding_config.pop('type')
-
-        if encoding_type == "positional":
-            self.posenc = PositionalEncoding(in_dim=in_dim, **encoding_config)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "spatiotemporal":
-            self.posenc = SpatiotemporalEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "gaussian":
-            self.posenc = GaussianPositionalEncoding(d_input=in_dim, **encoding_config)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "spherical":
-            spherical_encoding = SphericalEncoding()
-            gaussian_encoding = GaussianPositionalEncoding(d_input=spherical_encoding.out_dim, **encoding_config)
-            self.posenc = Sequential(spherical_encoding, gaussian_encoding)
-            posenc_dim = gaussian_encoding.out_dim
-        elif encoding_type == "progressive_fourier":
-            self.posenc = ProgressiveFourierEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "progressive_spatiotemporal":
-            self.posenc = ProgressiveSpatiotemporalEncoding(d_input=in_dim)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "progressive_gaussian":
-            self.posenc = ProgressiveGaussianEncoding(in_dim=in_dim, **encoding_config)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "bank_gaussian":
-            self.posenc = BankGaussianEncoding(in_dim=in_dim, **encoding_config)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "progressive_positional":
-            self.posenc = ProgressivePositionalEncoding(in_dim=in_dim, **encoding_config)
-            posenc_dim = self.posenc.out_dim
-        elif encoding_type == "none" or encoding_type == "identity":
-            self.posenc = Identity()
-            posenc_dim = in_dim
-        else:
-            raise ValueError(f"Unknown encoding: {encoding_type}")
-
-        self.d_in = nn.Linear(posenc_dim, dim)
-
-        # hidden layers
-        lin = [nn.Linear(dim, dim) for _ in range(n_layers)]
-        self.linear_layers = nn.ModuleList(lin)
-
-        # output layer
-        self.d_out = nn.Linear(dim, out_dim)
-
-        # activation functions
-        if activation == "swish":
-            self.in_activation = Swish()
-            self.activations = nn.ModuleList([Swish() for _ in range(n_layers)])
-        elif activation == "sine":
-            self.in_activation = Sine()
-            self.activations = nn.ModuleList([Sine() for _ in range(n_layers)])
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
-
-    def step(self, global_step):
-        if self.posenc is not None and hasattr(self.posenc, 'step'):
-            self.posenc.step(global_step)
-
-    def forward(self, x):
-        x = self.posenc(x)
-        x = self.in_activation(self.d_in(x))
-        for l, a in zip(self.linear_layers, self.activations):
-            x = a(l(x))
-        out = self.d_out(x)
-        return out
-
-
-class MESphericalModel(GenericModel):
-
-    def __init__(self, vector_potential=False, scale=False, **kwargs):
-        super().__init__(in_dim=4, out_dim=13, **kwargs)
+    def __init__(self, vector_potential=False, b_sinh_scale=None, v_sinh_scale=None):
+        if b_sinh_scale is not None and b_sinh_scale <= 0:
+            raise ValueError('b_sinh_scale must be positive or None.')
+        if v_sinh_scale is not None and v_sinh_scale <= 0:
+            raise ValueError('v_sinh_scale must be positive or None.')
+        if vector_potential and b_sinh_scale is not None:
+            raise ValueError(
+                'b_sinh_scale cannot be used with vector_potential because a nonlinear '
+                'post-curl mapping would no longer guarantee a divergence-free field.'
+            )
         self.vector_potential = vector_potential
-        self.scale = scale
-        self.softplus = nn.Softplus()
+        self.b_sinh_scale = b_sinh_scale
+        self.v_sinh_scale = v_sinh_scale
 
-    def forward(self, x):
-        # forward pass through generic model
-        params = super().forward(x)
-        #
+    def _scale_magnetic_vector(self, b):
+        if self.b_sinh_scale is None:
+            return b
+        return torch.sinh(b) * float(self.b_sinh_scale)
+
+    def _scale_velocity_vector(self, v):
+        if self.v_sinh_scale is None:
+            return v
+        return torch.sinh(v) * float(self.v_sinh_scale)
+
+    def _decode_output(self, params, x):
+        if params.shape[-1] != 11:
+            raise RuntimeError(
+                'Expected 11 spherical atmosphere outputs, '
+                f'received {params.shape[-1]}. '
+                'Legacy scale-channel checkpoints are incompatible with the linear parameterization.'
+            )
         if self.vector_potential:
-            a_scale = torch.exp(params[..., 3:4]) if self.scale else 1.0
-            a = params[..., 0:3] * a_scale
+            a = params[..., 0:3]
             a_jac_matrix = jacobian(a, x)
             dAy_dx = a_jac_matrix[:, 1, 1]
             dAz_dx = a_jac_matrix[:, 2, 1]
@@ -198,44 +248,58 @@ class MESphericalModel(GenericModel):
             dAz_dy = a_jac_matrix[:, 2, 2]
             dAx_dz = a_jac_matrix[:, 0, 3]
             dAy_dz = a_jac_matrix[:, 1, 3]
-            # B = curl(A)
             b_x = (dAz_dy - dAy_dz)[..., None]
             b_y = (dAx_dz - dAz_dx)[..., None]
             b_z = (dAy_dx - dAx_dy)[..., None]
         else:
-            b_scale = torch.exp(params[..., 3:4]) if self.scale else 1.0
-            b_x = params[..., 0:1] * b_scale
-            b_y = params[..., 1:2] * b_scale
-            b_z = params[..., 2:3] * b_scale
+            b = self._scale_magnetic_vector(params[..., 0:3])
+            b_x, b_y, b_z = b.split(1, dim=-1)
             a_jac_matrix = None
 
-        vmac = self.softplus(params[..., 4:5]) * 1000.0
-        damping = torch.sigmoid(params[..., 5:6]) * 1
-        b0 = torch.sigmoid(params[..., 6:7])
-        b1 = torch.sigmoid(params[..., 7:8])
-
-        v_scale = torch.exp(params[..., 8:9]) if self.scale else 1.0
-        v_x = params[..., 9:10] * v_scale
-        v_y = params[..., 10:11] * v_scale
-        v_z = params[..., 11:12] * v_scale
-        kl = 1e-3 + self.softplus(params[..., 12:13])
-        #
+        v = self._scale_velocity_vector(params[..., 7:10])
         output = {
-            "b_x": b_x,
-            "b_y": b_y,
-            "b_z": b_z,
-            "vmac": vmac,
-            "damping": damping,
-            "b0": b0,
-            "b1": b1,
-            "v_x": v_x,
-            "v_y": v_y,
-            "v_z": v_z,
-            "kl": kl,
-            "a_jac_matrix": a_jac_matrix
+            'b_x': b_x,
+            'b_y': b_y,
+            'b_z': b_z,
+            'vmac': F.softplus(params[..., 3:4]) * 1000.0,
+            'damping': torch.sigmoid(params[..., 4:5]),
+            'b0': torch.sigmoid(params[..., 5:6]),
+            'b1': torch.sigmoid(params[..., 6:7]),
+            'v_x': v[..., 0:1],
+            'v_y': v[..., 1:2],
+            'v_z': v[..., 2:3],
+            'kl': 1e-3 + F.softplus(params[..., 10:11]),
+            'a_jac_matrix': a_jac_matrix,
         }
-
         return output
+
+
+class MESphericalModel(MLPModel, _BaseMESphericalModel):
+
+    def __init__(self, vector_potential=False, b_sinh_scale=None,
+                 v_sinh_scale=None, **kwargs):
+        _BaseMESphericalModel.__init__(
+            self, vector_potential=vector_potential,
+            b_sinh_scale=b_sinh_scale, v_sinh_scale=v_sinh_scale,
+        )
+        MLPModel.__init__(self, in_dim=4, out_dim=11, **kwargs)
+
+    def forward(self, x):
+        return self._decode_output(MLPModel.forward(self, x), x)
+
+
+class MESphericalSirenModel(SirenModel, _BaseMESphericalModel):
+
+    def __init__(self, vector_potential=False, b_sinh_scale=None,
+                 v_sinh_scale=None, **kwargs):
+        _BaseMESphericalModel.__init__(
+            self, vector_potential=vector_potential,
+            b_sinh_scale=b_sinh_scale, v_sinh_scale=v_sinh_scale,
+        )
+        SirenModel.__init__(self, in_dim=4, out_dim=11, **kwargs)
+
+    def forward(self, x):
+        return self._decode_output(SirenModel.forward(self, x), x)
 
 
 def jacobian(output, coords):
@@ -243,72 +307,66 @@ def jacobian(output, coords):
                                       grad_outputs=torch.ones_like(output[:, i]).to(output),
                                       retain_graph=True, create_graph=True, allow_unused=True)[0]
                   for i in range(output.shape[1])]
-    jac_matrix = torch.stack(jac_matrix, dim=1)
-    return jac_matrix
+    return torch.stack(jac_matrix, dim=1)
 
 
 class NormalizationModule(nn.Module):
 
-    def __init__(self, alphas=None, **kwargs):
+    def __init__(self, asinh_alphas=None):
         super().__init__()
-        alphas = [1e-1, 1e-2, 1e-2, 1e-2] if alphas is None else alphas
-        self.register_buffer("alphas", torch.tensor(alphas, dtype=torch.float32))
 
-    def forward(self, stokes, Ic):
-        I = stokes[..., 0:1, :]
-        Q = stokes[..., 1:2, :]
-        U = stokes[..., 2:3, :]
-        V = stokes[..., 3:4, :]
+        if isinstance(asinh_alphas, dict):
+            asinh_alphas = [asinh_alphas[k] for k in ('Q', 'U', 'V')]
+        elif isinstance(asinh_alphas, (float, int)):
+            asinh_alphas = [asinh_alphas] * 3
 
-        # normalize to continuum
-        # Ic = Ic.clamp_min(1e-3)  # prevent division by zero or very small numbers
-        I = I / Ic
-        Q = Q / Ic
-        U = U / Ic
-        V = V / Ic
+        if asinh_alphas is not None:
+            if len(asinh_alphas) != 3:
+                raise ValueError('asinh_alphas must contain the Q, U, and V transition scales')
+            if any(alpha <= 0 for alpha in asinh_alphas):
+                raise ValueError('asinh_alphas must be strictly positive')
+            asinh_alphas = torch.tensor(asinh_alphas, dtype=torch.float32).reshape(1, 3, 1)
 
-        # line depression scaling for intensity
-        # I = 1 - I
+        self.register_buffer('asinh_alphas', asinh_alphas)
 
-        # asinh scaling for polarization
-        # I = torch.asinh(I / self.alphas[0]) #/ torch.asinh(1 / self.alphas[0])
-        # Q = torch.asinh(Q / self.alphas[1]) #/ torch.asinh(1 / self.alphas[1])
-        # U = torch.asinh(U / self.alphas[2]) #/ torch.asinh(1 / self.alphas[2])
-        # V = torch.asinh(V / self.alphas[3]) #/ torch.asinh(1 / self.alphas[3])
+    def forward(self, stokes):
+        stokes_i = stokes[..., 0:1, :]
+        stokes_q = stokes[..., 1:2, :]
+        stokes_u = stokes[..., 2:3, :]
+        stokes_v = stokes[..., 3:4, :]
 
-        return torch.cat([I, Q, U, V], dim=-2)
+        if self.asinh_alphas is not None:
+            polarization = torch.cat([stokes_q, stokes_u, stokes_v], dim=-2)
+            polarization = torch.asinh(polarization / self.asinh_alphas) / torch.asinh(1 / self.asinh_alphas)
+            stokes_q, stokes_u, stokes_v = polarization.split(1, dim=-2)
+
+        return torch.cat([stokes_i, stokes_q, stokes_u, stokes_v], dim=-2)
 
 
-class VelocityCorrectionModel(GenericModel):
+class VelocityCorrectionModel(MLPModel):
+
     def __init__(self, **kwargs):
-        encoding_config = {'type': 'none'}
-        super().__init__(1, 1, dim=16, n_layers=3, encoding_config=encoding_config, **kwargs)
+        super().__init__(in_dim=1, out_dim=1, dim=16, n_layers=3,
+                         encoding_config={'type': 'identity'}, **kwargs)
 
     def forward(self, x):
-        x = super().forward(x) * 1e3  # scale to m/s
-        return x
+        return super().forward(x) * 1e3
 
 
-class LimbCorrectionModel(GenericModel):
+class LimbCorrectionModel(MLPModel):
+
     def __init__(self, **kwargs):
-        encoding_config = {'type': 'identity'}
-        super().__init__(1, 6, dim=16, n_layers=3, encoding_config=encoding_config, **kwargs)
+        super().__init__(in_dim=1, out_dim=4, dim=16, n_layers=3,
+                         encoding_config={'type': 'identity'}, **kwargs)
+        with torch.no_grad():
+            self.out_layer.weight[3].zero_()
+            self.out_layer.bias[3] = torch.logit(torch.tensor(0.99))
 
     def forward(self, mu):
         x = super().forward(mu)
-        c_b0 = torch.sigmoid(x[..., 0:1])  # limb correction for B0
-        c_b1 = torch.sigmoid(x[..., 1:2])  # limb correction for B1
-        c_vdop = x[..., 5:6] * 100  # limb correction for convective blue shift
-        # c_vdop = self.limb_shift_velocity(mu)
-        return {'c_b0': c_b0, 'c_b1': c_b1, 'c_vdop': c_vdop}
-
-
-class DisambiguationModel(Siren):
-    def __init__(self, **kwargs):
-        encoding_config = {'type': 'spatiotemporal'}
-        super().__init__(4, 1, dim=64, encoding_config=encoding_config, **kwargs)
-
-    def forward(self, x):
-        x = super().forward(x)
-        x = torch.tanh(x)
-        return x
+        return {
+            'c_b0': torch.sigmoid(x[..., 0:1]),
+            'c_b1': torch.sigmoid(x[..., 1:2]),
+            'c_vdop': x[..., 2:3] * 100,
+            'filling_factor': torch.sigmoid(x[..., 3:4]),
+        }

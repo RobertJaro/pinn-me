@@ -1,78 +1,78 @@
-import os.path
-
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
 from scipy.special import voigt_profile, wofz
 from torch import nn
 
 
 def polyval(x, coeffs):
-    """Implementation of the Horner scheme to evaluate a polynomial
-
-    taken from https://discuss.pytorch.org/t/polynomial-evaluation-by-horner-rule/67124
-
-    Args:
-        x (torch.Tensor): variable
-        coeffs (torch.Tensor): coefficients of the polynomial
-    """
-    curVal = 0
-    for curValIndex in range(len(coeffs) - 1):
-        curVal = (curVal + coeffs[curValIndex]) * x[0]
-    return (curVal + coeffs[len(coeffs) - 1])
+    """Evaluate a polynomial with coefficients ordered highest degree first."""
+    value = torch.zeros_like(x)
+    for coefficient in coeffs:
+        value = value * x + coefficient
+    return value
 
 
-class Faddeeva(torch.nn.Module):
-    """Class to compute the error function of a complex number (extends torch.special.erf behavior)
+class Faddeeva(nn.Module):
+    """Differentiable Weideman approximation of the Faddeeva function.
 
-    This class is based on the algorithm proposed in:
-    Weideman, J. Andre C. "Computation of the complex error function." SIAM Journal on Numerical Analysis 31.5 (1994): 1497-1518
+    The approximation is intended for the upper half-plane used by Voigt
+    profiles (non-negative damping). The reflection identity is used for
+    lower-half-plane inputs so the module remains a general ``w(z)`` helper.
     """
 
-    def __init__(self, n_coefs):
-        """Defaul constructor
-
-        Args:
-            n_coefs (integer): The number of polynomial coefficients to use in the approximation
-        """
+    def __init__(self, n_coefs=32):
         super().__init__()
-        # compute polynomial coefficients and other constants
-        self.N = n_coefs
-        self.i = torch.complex(torch.tensor(0.), torch.tensor(1.))
-        self.M = 2 * self.N
-        self.M2 = 2 * self.M
-        self.k = torch.linspace(-self.M + 1, self.M - 1, self.M2 - 1)
-        self.L = torch.sqrt(self.N / torch.sqrt(torch.tensor(2.)))
-        self.theta = self.k * torch.pi / self.M
-        self.t = self.L * torch.tan(self.theta / 2)
-        self.f = torch.exp(-self.t ** 2) * (self.L ** 2 + self.t ** 2)
-        self.a = torch.fft.fft(torch.fft.fftshift(self.f)).real / self.M2
-        self.a = torch.flipud(self.a[1:self.N + 1])
+        if n_coefs < 2:
+            raise ValueError("n_coefs must be at least 2")
+
+        n_coefs = int(n_coefs)
+        m = 2 * n_coefs
+        m2 = 2 * m
+        k = torch.arange(-m + 1, m, dtype=torch.float64)
+        length = torch.sqrt(torch.tensor(n_coefs / np.sqrt(2.0), dtype=torch.float64))
+        theta = k * torch.pi / m
+        t = length * torch.tan(theta / 2)
+
+        # The leading zero is part of Weideman's FFT construction. Omitting it
+        # shifts every coefficient and gives the previous ~4% error at z=0.
+        samples = torch.cat([
+            torch.zeros(1, dtype=torch.float64),
+            torch.exp(-t.square()) * (length.square() + t.square()),
+        ])
+        coefficients = torch.fft.fft(torch.fft.fftshift(samples)).real / m2
+        coefficients = torch.flip(coefficients[1:n_coefs + 1], dims=(0,))
+
+        self.register_buffer("length", length)
+        self.register_buffer("coefficients", coefficients)
+        self.register_buffer("inv_sqrt_pi", torch.tensor(1 / np.sqrt(np.pi), dtype=torch.float64))
+
+    def _upper_half_plane(self, z):
+        real_dtype = z.real.dtype
+        length = self.length.to(dtype=real_dtype)
+        coefficients = self.coefficients.to(dtype=real_dtype)
+        inv_sqrt_pi = self.inv_sqrt_pi.to(dtype=real_dtype)
+
+        denominator = length - 1j * z
+        transformed = (length + 1j * z) / denominator
+        polynomial = polyval(transformed, coefficients)
+        return 2 * polynomial / denominator.square() + inv_sqrt_pi / denominator
 
     def forward(self, z):
-        """Compute the Faddeeva function of a complex number
+        if not torch.is_complex(z):
+            z = torch.complex(z, torch.zeros_like(z))
 
-        The constant coefficients are computed in the constructor of the class.
-
-        Weideman, J. Andre C. "Computation of the complex error function." SIAM Journal on Numerical Analysis 31.5 (1994): 1497-1518
-
-        Args:
-            z (torch.Tensor): A tensor of complex numbers (any shape is allowed)
-
-        Returns:
-            torch.Tensor: w(z) for each element of z
-        """
-        Z = (self.L + self.i * z) / (self.L - self.i * z)
-        p = polyval(Z.unsqueeze(0), self.a)
-        w = 2 * p / (self.L - self.i * z) ** 2 + (1 / torch.sqrt(torch.tensor(torch.pi))) / (self.L - self.i * z)
-        return w
+        upper_half_plane = z.imag >= 0
+        upper_z = torch.where(upper_half_plane, z, -z)
+        upper_value = self._upper_half_plane(upper_z)
+        reflected_value = 2 * torch.exp(-z.square()) - upper_value
+        return torch.where(upper_half_plane, upper_value, reflected_value)
 
 
 class FaradayVoigt(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.faddeeva = Faddeeva(16)
+        self.faddeeva = Faddeeva()
 
     def forward(self, x, sigma, gamma):
         ''' Compute the Faraday-Voigt and anomalous dispersion profiles
@@ -91,7 +91,7 @@ class Voigt(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.faddeeva = Faddeeva(16)
+        self.faddeeva = Faddeeva()
 
     def forward(self, x, sigma, gamma):
         ''' Compute the Voigt and anomalous dispersion profiles
@@ -118,40 +118,3 @@ def voigt(nu, sigma, gamma, mu):
     '''
     phi_profile = voigt_profile(nu - mu, sigma, gamma)
     return phi_profile
-
-
-if __name__ == '__main__':
-    base_path = '/glade/u/home/mmolnar/Projects/PINNME/'
-    # # fit(voigt, base_path, 'voigt')
-    # # fit(faraday_voigt, base_path, 'faraday_voigt')
-    # model = Voigt()
-    # fit(voigt, model, base_path, 'voigt')
-
-    t_sigma, t_gamma, t_mu = 1e-6, 0.05, 0
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    test_nu = np.linspace(-2, 2, 10000)
-    test_gamma = np.ones_like(test_nu) * t_gamma
-    test_mu = np.ones_like(test_nu) * t_mu
-    test_sigma = np.ones_like(test_nu) * t_sigma
-
-    test_profile = faraday_voigt(test_nu, test_sigma, test_gamma, test_mu)
-    test_profile1 = faraday_voigt(test_nu, test_sigma, test_gamma, test_mu)
-
-    f = FaradayVoigt()
-
-    test_nu_t = torch.tensor(test_nu, dtype=torch.float32)[:, None].to(device)
-    test_gamma_t = torch.tensor(test_gamma, dtype=torch.float32)[:, None].to(device)
-    test_mu_t = torch.tensor(test_mu, dtype=torch.float32)[:, None].to(device)
-    test_sigma_t = torch.tensor(test_sigma, dtype=torch.float32)[:, None].to(device)
-    pred_profile = f(test_nu_t - test_mu_t, test_sigma_t, test_gamma_t)
-    pred_profile = pred_profile.cpu().detach().numpy()
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    ax.plot(test_nu, test_profile, label='ref')
-    ax.plot(test_nu, pred_profile, label='pred', linestyle='--')
-    ax.legend()
-    ax.grid(alpha=0.4)
-    plt.savefig(os.path.join(base_path, f'test_faraday_voigt_{t_gamma:02f}_{t_mu:02f}.jpg'), dpi=150)
-    plt.close()

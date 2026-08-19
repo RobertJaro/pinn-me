@@ -12,8 +12,8 @@ logging:
   tags: ["test_set"]
   name: "static_psf_{noise}"
 model:
+  type: mlp
   dim: 256
-  encoding: "gaussian_positional"
 training:
   epochs: 100
   check_val_every_n_epoch: 5

@@ -13,7 +13,10 @@ logging:
   tags: ["hmi"]
   name: "2010-02 - 6h"
 model:
-  encoding: "gaussian"
+  type: mlp
+  dim: 256
+  n_layers: 6
+  scale: true
 training:
   epochs: 500
   check_val_every_n_epoch: 10

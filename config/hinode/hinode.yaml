@@ -11,7 +11,7 @@ logging:
   tags: ["hinode"]
   name: "2007-01-05"
 model:
-  encoding: "gaussian_positional"
+  type: mlp
 training:
   epochs: 500
   check_val_every_n_epoch: 5

@@ -10,7 +10,7 @@ logging:
   project: pinn-me
   name: muram sunspot psf
 model:
-  encoding: "gaussian_positional"
+  type: mlp
 training:
   epochs: 100
   check_val_every_n_epoch: 5

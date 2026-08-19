@@ -51,7 +51,7 @@ def threej(j1, j2, j3, m1, m2, m3):
     kmax3 = j2 + m2
     kmax = np.minimum(np.minimum(kmax1, kmax2), kmax3)
 
-    if (kmin < kmax):
+    if kmin > kmax:
         return 0
 
     term1 = frontl(j1, j2, j3, m1, m2, m3)
@@ -114,7 +114,12 @@ def compute_zeeman_strength(JUp, JLow, MUp, MLow):
 
 
 def get_zeeman_lookup_id(j_up, j_low, MUp, MLow):
-    return f'{j_up}_{j_low}_{MUp}_{MLow}'.replace('.', '_')
+    # Normalize Python/NumPy scalars and scalar tensors to the same key. This
+    # preserves the historical float-formatted ParameterDict names while
+    # avoiding integer-vs-float lookup failures.
+    values = [float(value.item()) if hasattr(value, 'item') else float(value)
+              for value in (j_up, j_low, MUp, MLow)]
+    return '_'.join(str(value).replace('.', '_') for value in values)
 
 
 def load_zeeman_lookup(j_up, j_low):

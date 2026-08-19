@@ -10,8 +10,8 @@ logging:
   tags: ["test_set"]
   name: "clear"
 model:
+  type: mlp
   dim: 256
-  encoding: "gaussian_positional"
 
 training:
   epochs: 100

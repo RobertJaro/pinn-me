@@ -25,12 +25,17 @@ logging:
   name: "2024-05 embedded"
 
 model:
-  encoding_config: { type: spatiotemporal }
+  type: mlp
+  dim: 256
+  n_layers: 6
+  scale: true
 
 
 training:
   epochs: 500
-  lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0
-  lambda_divergence: 0
-  lambda_force_free: 0
+
+lambda:
+  I: 1.0
+  Q: 1.0
+  U: 1.0
+  V: 1.0

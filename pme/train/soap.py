@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 
 from itertools import chain
@@ -118,7 +117,11 @@ class SOAP(optim.Optimizer):
         if closure is None:
             loss = None
         else:
-            loss = closure()
+            # Lightning's automatic-optimization closure performs the forward
+            # pass and backward call here. The optimizer step itself runs under
+            # no_grad, so explicitly re-enable autograd for the closure.
+            with torch.enable_grad():
+                loss = closure()
 
         for group in self.param_groups:
             for p in group["params"]:

@@ -46,7 +46,7 @@ if __name__ == '__main__':
 
     spherical_coords = np.stack([r, np.pi / 2 - lat, lon], axis=-1)
     #
-    cartesian_coords = spherical_to_cartesian(spherical_coords)
+    cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
     coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
@@ -230,5 +230,4 @@ if __name__ == '__main__':
     fig.tight_layout()
     plt.savefig(os.path.join(out_path, 'b_los_comparison.jpg'), dpi=300)
     plt.close()
-
 

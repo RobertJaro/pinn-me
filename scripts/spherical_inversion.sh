@@ -6,12 +6,6 @@
 #PBS -l job_priority=economy
 #PBS -l select=1:ncpus=32:ngpus=4:mem=64gb
 #PBS -l walltime=12:00:00
-#PBS -o /dev/null
-#PBS -e /dev/null
-
-module load conda
-module load cuda
-conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 
@@ -24,7 +18,10 @@ cd /glade/u/home/rjarolim/projects/PINN-ME
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_physics.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/phi_fdt_202403.yaml
 #python3 -m pme.inversion_spherical --config config/hmi/phi_202404.yaml
-python3 -m pme.inversion_spherical --config config/hmi/hmi_subframe.yaml
+#python3 -m pme.inversion_spherical --config config/hmi/hmi_subframe_20240323.yaml
+python3 -m pme.inversion_spherical --config config/hmi/hmi_subframe_20240323_physics.yaml
+#python3 -m pme.inversion_spherical --config config/hmi/hmi_fd_20240323.yaml
+
 # finetune
 
 #python3 -m pme.inversion_spherical --config config/hmi/hmi_202405_90s.yaml
@@ -37,7 +34,8 @@ exit
 
 # preprocess HMI subframe data
 #python3 -m pme.data.subframe_hmi --input_files '/glade/work/rjarolim/data/hmi_stokes/202405_90s/*.fits' --out_path '/glade/work/rjarolim/data/phi_stokes/subframe' --longitude 347 --latitude -20 --size 1024 512 --overwrite
-python3 -m pme.data.subframe_hmi --input_files '/glade/work/rjarolim/data/hmi_stokes/202405/*.fits' --out_path '/glade/work/rjarolim/data/hmi_stokes/202405_subframe' --longitude 347 --latitude -20 --size 1024 512 --overwrite
+python3 -m pme.data.subframe_hmi --input_files '/glade/work/rjarolim/data/hmi_stokes/202405_12h/*.fits' --out_path '/glade/work/rjarolim/data/hmi_stokes/202405_12h_subframe' --longitude 347 --latitude -20 --size 1024 512 --overwrite
+python3 -m pme.data.subframe_hmi --input_files '/glade/work/rjarolim/data/hmi_stokes/20240323_720s/*.fits' --out_path '/glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe' --longitude 215 --latitude -12 --size 1024 512 --overwrite
 
 
 
@@ -138,6 +136,8 @@ python3 -m pme.evaluation.spherical.load_ref_series --input "/glade/work/rjaroli
 # cutouts
 #python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/subframe_v13/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_05_09/hmi.b_720s.20240509_010000_TAI.vlos_mag.fits" --hpc_range 100 600 -500 0
 #python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/subframe_no_physics_v01/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.vlos_mag.fits" --hpc_range -200 200 -200 100
+python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/subframe_20240323_mlp_v05/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.vlos_mag.fits" --hpc_range -50 50 -70 -20
+python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/subframe_20240323_mlp_v05/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24/hmi.b_720s.20240324_010000_TAI.vlos_mag.fits" --hpc_range -250 290 -230 60
 #python3 -m pme.evaluation.spherical.load_series --input "/glade/work/rjarolim/spinn_me/hmi/subframe_v08/inversion.pme" --longitude_range 90 140 --latitude_range -30 0 --resolution 0.1
 #python3 -m pme.evaluation.spherical.load_ref_series --input "/glade/work/rjarolim/spinn_me/hmi/subframe_v08/inversion.pme" --ref_maps "/glade/work/rjarolim/data/phi_stokes/subframe/*.I0.fits"
 
@@ -165,4 +165,4 @@ python3 -m pme.evaluation.phi.visualize_stokes
 python3 -m pme.evaluation.spherical.load_ref_series --input "/glade/work/rjarolim/spinn_me/combined/combined_fd_20240327_v01/inversion.pme" --ref_maps "/glade/work/rjarolim/data/phi_stokes/2024_04_flare/*.fits"
 
 
-python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/202405_v28/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.vlos_mag.fits" --hpc_range 0 200 -300 -200
+python3 -m pme.evaluation.spherical.load_ref_map --input "/glade/work/rjarolim/spinn_me/hmi/202405_four_days_v02/inversion.pme" --ref_map_fld "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.field.fits" --ref_map_inc "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.inclination.fits" --ref_map_azi "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.azimuth.fits" --ref_map_disambig "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.disambig.fits" --ref_map_vlos_mag "/glade/work/rjarolim/data/hmi_stokes/test_2/hmi.b_720s.20240507_120000_TAI.vlos_mag.fits" --hpc_range 0 200 -300 -200

@@ -14,7 +14,7 @@ logging:
   group: "hinode"
   name: "2024-05-09"
 model:
-  encoding: "gaussian_positional"
+  type: mlp
 training:
   epochs: 200
   check_val_every_n_epoch: 5

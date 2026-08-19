@@ -50,7 +50,7 @@ if __name__ == '__main__':
     longitude = np.deg2rad(np.linspace(longitude_range[0], longitude_range[1], int((longitude_range[1] - longitude_range[0] + 1) // resolution)))
     spherical_coords = np.stack(np.meshgrid([1], colatitude, longitude, indexing='ij'), -1)  # r, theta, phi
     spherical_coords = spherical_coords.squeeze(0)
-    cartesian_coords = spherical_to_cartesian(spherical_coords)
+    cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
 
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
 

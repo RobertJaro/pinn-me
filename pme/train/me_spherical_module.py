@@ -12,18 +12,33 @@ from matplotlib.colors import SymLogNorm, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pytorch_lightning import LightningModule
 from torch import nn
-from torch.optim.lr_scheduler import ExponentialLR
+from torch.optim.lr_scheduler import LambdaLR
 
-from pme.data.differential_rotation import carrington_rotation_velocity
-from pme.data.util import cartesian_to_spherical
 from pme.evaluation.loader import to_spherical, to_cartesian
-from pme.model import MESphericalModel, VelocityCorrectionModel, LimbCorrectionModel, \
-    NormalizationModule
+from pme.model import (
+    LimbCorrectionModel,
+    MESphericalModel,
+    MESphericalSirenModel,
+    NormalizationModule,
+    VelocityCorrectionModel,
+)
 from pme.train.artifact_correction import ArtifactCorrectionModule
 from pme.train.me_atmosphere import HMIMEAtmosphere, PHIMEAtmosphere
-from pme.train.physics import compute_physics_losses
+from pme.train.physics import PhysicsWeightSchedule
+from pme.train.physics_regularization import (
+    PhysicsRegularization,
+    split_stokes_and_physics_config,
+)
 from pme.train.soap import SOAP
-from pme.train.util import acos_safe, atan2_safe, log_wandb_image, get_random_coordinates, random_time_shift_coords
+from pme.train.spherical_synthesis import (
+    correct_spherical_limb_effects,
+    field_free_forward_parameters,
+    mix_magnetic_filling_factor,
+    scale_spherical_forward_parameters,
+    transform_spherical_parameters,
+)
+from pme.train.stokes_loss import StokesLossModule
+from pme.train.util import log_wandb_image, random_time_shift_coords
 
 
 class MESphericalModule(LightningModule):
@@ -32,8 +47,10 @@ class MESphericalModule(LightningModule):
                  gauss_per_dB, Rs_per_ds, seconds_per_dt,
                  instrument_config,
                  lr_params=None, model_config=None, normalization_config=None,
+                 stokes_loss_config=None,
+                 physics_config=None, physics_domain=None,
                  time_shift_config=None,
-                 lambda_config=None, **kwargs):
+                 lambda_config=None):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 1e-3, "end": 1e-4, "iterations": 1e5}
 
@@ -41,14 +58,24 @@ class MESphericalModule(LightningModule):
 
         # init model
         model_config = copy.deepcopy(model_config) if model_config is not None else {}
-        self.parameter_model = MESphericalModel(**model_config)
+        model_type = model_config.pop('type', None)
+        # Legacy configurations may still contain the removed exponential
+        # magnitude-scale switch. B/A and V now use direct linear outputs.
+        model_config.pop('scale', None)
+        if model_type == 'mlp':
+            self.parameter_model = MESphericalModel(**model_config)
+        elif model_type == 'siren':
+            self.parameter_model = MESphericalSirenModel(**model_config)
+        else:
+            raise ValueError("The spherical model configuration must specify type: mlp or siren.")
 
         # init instrument models
         forward_models = {}
         velocity_correction_models = {}
         limb_correction_models = {}
         artifact_correction_models = {}
-        for instrument in instrument_config:
+        hmi_instrument_ids = []
+        for instrument in copy.deepcopy(instrument_config):
             instrument_id = instrument.pop('instrument_id')
             instrument_type = instrument.pop('type')
             wavelength_center = wavelength_config[instrument_id]['wavelength_center']
@@ -58,6 +85,7 @@ class MESphericalModule(LightningModule):
 
             if instrument_type == 'hmi':
                 forward_models[instrument_id] = HMIMEAtmosphere(wavelength_center=wavelength_center, **instrument)
+                hmi_instrument_ids.append(instrument_id)
             elif instrument_type == 'phi':
                 forward_models[instrument_id] = PHIMEAtmosphere(wavelength_center=wavelength_center, **instrument)
             else:
@@ -74,43 +102,44 @@ class MESphericalModule(LightningModule):
         self.velocity_correction_models = nn.ModuleDict(velocity_correction_models)
         self.limb_correction_models = nn.ModuleDict(limb_correction_models)
         self.artifact_correction_models = nn.ModuleDict(artifact_correction_models)
+        self.hmi_instrument_ids = tuple(hmi_instrument_ids)
 
         self.lr_params = lr_params
 
         self.validation_outputs = {}
         normalization_config = normalization_config if normalization_config is not None else {}
-        self.normalization = NormalizationModule()
-        self.stokes_loss_function = nn.MSELoss(reduction='none')
-        #
-        scheduled_lambda_config = {}
-        lambdas = {}
-        available_lambdas = ['I', 'Q', 'U', 'V',
-                             'induction', 'divergence', 'force_free', 'potential', 'dB_dt']
-        lambda_config = lambda_config if lambda_config is not None else {}
-        # add default lambdas for stokes vectors if not specified
-        lambda_config['I'] = lambda_config.get('I', 1.0)
-        lambda_config['Q'] = lambda_config.get('Q', 1.0)
-        lambda_config['U'] = lambda_config.get('U', 1.0)
-        lambda_config['V'] = lambda_config.get('V', 1.0)
-        for k, v in lambda_config.items():
-            assert k in available_lambdas, f"Unknown lambda key: {k}, must be one of {available_lambdas}"
-            if isinstance(v, dict):
-                lambda_type = v.get('type', 'exponential')
-                if lambda_type == 'exponential':
-                    gamma = (v['end'] / v['start']) ** (1 / v['iterations'])
-                elif lambda_type == 'linear':
-                    gamma = (v['end'] - v['start']) / v['iterations']
-                elif lambda_type == 'step':
-                    gamma = 0
-                else:
-                    raise ValueError(f"Unknown lambda type: {lambda_type}")
-                scheduled_lambda_config[k] = {'end': v['end'], 'gamma': gamma, 'type': lambda_type,
-                                              'iterations': v['iterations']}
-                lambdas[k] = nn.Parameter(torch.tensor(v['start'], dtype=torch.float32), requires_grad=False)
-            else:
-                lambdas[k] = nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
-        self.scheduled_lambda_config = scheduled_lambda_config
-        self.lambdas = nn.ParameterDict(lambdas)
+        self.normalization = NormalizationModule(**normalization_config)
+        stokes_loss_config = copy.deepcopy(stokes_loss_config) if stokes_loss_config is not None else {}
+        self.stokes_loss = StokesLossModule(**stokes_loss_config)
+        self.stokes_loss_config = self.stokes_loss.configuration()
+        # Keep the data objective and continuous physics regularization as two
+        # independent components. Historical mixed lambda mappings are split by
+        # one compatibility adapter before either component is constructed.
+        lambda_config, physics_config = split_stokes_and_physics_config(
+            lambda_config, physics_config,
+        )
+        lambda_config = {
+            component: lambda_config.get(component, 1.0)
+            for component in ('I', 'Q', 'U', 'V')
+        }
+        self.stokes_lambda_schedules = {
+            component: PhysicsWeightSchedule.from_config(value)
+            for component, value in lambda_config.items()
+        }
+        self.stokes_lambda_config = {
+            component: schedule.configuration()
+            for component, schedule in self.stokes_lambda_schedules.items()
+        }
+        self.lambdas = nn.ParameterDict({
+            component: nn.Parameter(torch.tensor(schedule.start), requires_grad=False)
+            for component, schedule in self.stokes_lambda_schedules.items()
+        })
+        self.physics_regularization = PhysicsRegularization(
+            physics_config,
+            physics_domain,
+            vector_potential=self.parameter_model.vector_potential,
+        )
+        self.physics_config = self.physics_regularization.configuration()
 
         # time shift config
         time_shift_config = {'scale': 0.0, 'iterations': 0.0} if time_shift_config is None else time_shift_config
@@ -125,6 +154,64 @@ class MESphericalModule(LightningModule):
         #
         self.val_outputs = []
 
+    @torch.no_grad()
+    def _set_stokes_lambda_step(self, global_step):
+        for component, schedule in self.stokes_lambda_schedules.items():
+            self.lambdas[component].fill_(schedule.value_at(global_step))
+
+    def _get_spectral_response(self, batch, instrument_id):
+        keys = ('spectral_offsets', 'spectral_weights', 'continuum_weights')
+        missing = [key for key in keys if key not in batch]
+        if instrument_id in self.hmi_instrument_ids and missing:
+            raise KeyError(
+                f'HMI batch {instrument_id!r} is missing dataset-sampled response arrays: {missing}.'
+            )
+        if missing and len(missing) != len(keys):
+            raise KeyError(f'Incomplete spectral response for {instrument_id!r}: missing {missing}.')
+        return {} if missing else {key: batch[key] for key in keys}
+
+    def _synthesize_stokes(
+        self,
+        instrument_id,
+        forward_params,
+        mu,
+        wavelength_grid,
+        spectral_response,
+        filling_factor=None,
+    ):
+        """Synthesize one instrument and optionally mix a field-free component."""
+        magnetic_components = self.forward_models[instrument_id](
+            **forward_params,
+            mu=mu,
+            wavelength_grid=wavelength_grid,
+            **spectral_response,
+        )
+        stokes = torch.stack(magnetic_components, dim=-2)
+        if filling_factor is None:
+            return stokes
+
+        field_free_components = self.forward_models[instrument_id](
+            **field_free_forward_parameters(forward_params),
+            mu=mu,
+            wavelength_grid=wavelength_grid,
+            **spectral_response,
+        )
+        field_free_stokes = torch.stack(field_free_components, dim=-2)
+        stokes = mix_magnetic_filling_factor(
+            stokes,
+            field_free_stokes,
+            filling_factor,
+        )
+        return stokes
+
+    def _reduce_stokes_objective(self, wavelength_loss):
+        """Apply the established wavelength, sample, and Stokes reductions."""
+        sample_loss = wavelength_loss.sum(dim=-1)
+        component_loss = sample_loss.mean(dim=0)
+        weights = torch.stack([self.lambdas[key] for key in ('I', 'Q', 'U', 'V')])
+        total = torch.einsum('...i,i->...', sample_loss, weights).mean()
+        return component_loss, total
+
     def configure_optimizers(self):
         parameters = (list(self.parameter_model.parameters()) +
                       list(self.forward_models.parameters()) +
@@ -132,22 +219,38 @@ class MESphericalModule(LightningModule):
                       list(self.limb_correction_models.parameters()) +
                       list(self.artifact_correction_models.parameters()))
         if isinstance(self.lr_params, dict):
-            lr_start = self.lr_params['start']
-            lr_end = self.lr_params['end']
-            iterations = self.lr_params['iterations']
+            learning_rate = float(self.lr_params['start'])
+            end_learning_rate = float(self.lr_params['end'])
+            decay_iterations = int(self.lr_params['iterations'])
+            if learning_rate <= 0 or end_learning_rate <= 0:
+                raise ValueError('Learning rates must be positive.')
+            if decay_iterations <= 0:
+                raise ValueError('lr_params.iterations must be positive.')
         elif isinstance(self.lr_params, (float, int)):
-            lr_start = self.lr_params
-            lr_end = self.lr_params
-            iterations = 1
-            self.lr_params = {'start': lr_start, 'end': lr_end, 'iterations': iterations}
+            learning_rate = float(self.lr_params)
         else:
             raise ValueError(f"Invalid lr_params: {self.lr_params}, must be dict or float/int")
-        optimizer = SOAP(parameters, lr=lr_start)
-        scheduler = ExponentialLR(optimizer, gamma=(lr_end / lr_start) ** (1 / iterations))
 
-        return [optimizer], [scheduler]
+        optimizer = SOAP(parameters, lr=learning_rate, weight_decay=0.0)
+        if not isinstance(self.lr_params, dict):
+            return optimizer
+
+        decay_ratio = end_learning_rate / learning_rate
+        scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: decay_ratio ** min(step / decay_iterations, 1.0),
+        )
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'interval': 'step',
+                'frequency': 1,
+            },
+        }
 
     def training_step(self, batch, batch_nb):
+        self._set_stokes_lambda_step(int(self.global_step))
         instrument_ids = list(batch.keys())
 
         coords = torch.cat([batch[k]['coords'] for k in instrument_ids])
@@ -162,255 +265,121 @@ class MESphericalModule(LightningModule):
             coords = random_time_shift_coords(coords, self.seconds_per_dt, scale=self.time_shift_scale.item())
 
         # forward step
-        coords.requires_grad = True
+        # Physics collocation points manage their own derivative graph below.
+        if self.parameter_model.vector_potential:
+            coords.requires_grad_(True)
         output = self.parameter_model(coords)
 
-        transformed_output = self.transform_parameters(output, coords, cartesian_to_spherical_transform,
-                                                       rtp_to_img_transform)
-
         #################################################
-        # stokes profile synthesis
-        forward_params = self.scale_parameters(output, transformed_output, v_obs_los)
+        # Transform the physical Carrington-frame model outputs to each
+        # observer's image frame before Stokes synthesis.
+        transformed = self.transform_parameters(
+            output, coords, cartesian_to_spherical_transform, rtp_to_img_transform,
+        )
+        forward_params = self.scale_parameters(output, transformed, v_obs_los)
+
         current_idx = 0
-        stokes_pred_normalized = []
-        stokes_true_normalized = []
+        stokes_pred_profiles = []
+        stokes_true_profiles = []
         for instrument_id, n_samples in ds_lengths.items():
             ds_mu = batch[instrument_id]['mu']
             ds_wavelength_grid = batch[instrument_id]['wavelength_grid']
             ds_stokes_true = batch[instrument_id]['stokes']
+            ds_spectral_response = self._get_spectral_response(batch[instrument_id], instrument_id)
 
-            ds_forward_params = {k: v[current_idx:current_idx + n_samples] for k, v in forward_params.items()}
-            # apply velocity correction if available
+            ds_forward_params = {
+                key: value[current_idx:current_idx + n_samples]
+                for key, value in forward_params.items()
+            }
             if instrument_id in self.velocity_correction_models:
                 time_coords = batch[instrument_id]['coords'][..., 0:1]
-                v_obs_correction = self.velocity_correction_models[instrument_id](time_coords)
-                ds_forward_params['vdop'] += v_obs_correction
-
+                ds_forward_params['vdop'] = ds_forward_params['vdop'] + \
+                    self.velocity_correction_models[instrument_id](time_coords)
+            limb_correction = None
             if instrument_id in self.limb_correction_models:
                 limb_correction = self.limb_correction_models[instrument_id](ds_mu)
                 ds_forward_params = self.correct_limb_effects(ds_forward_params, limb_correction)
 
-            # compute stokes profiles for parameters
-            I, Q, U, V = self.forward_models[instrument_id](**ds_forward_params, wavelength_grid=ds_wavelength_grid,
-                                                            mu=ds_mu)
-            ds_stokes_pred = torch.stack([I, Q, U, V], dim=-2)
-
+            ds_stokes_pred = self._synthesize_stokes(
+                instrument_id,
+                ds_forward_params,
+                ds_mu,
+                ds_wavelength_grid,
+                ds_spectral_response,
+                None if limb_correction is None else limb_correction['filling_factor'],
+            )
             if instrument_id in self.artifact_correction_models:
-                assert 'pix' in batch[
-                    instrument_id], f"Artifact correction requires 'pix' in batch for instrument {instrument_id}"
-                pix = batch[instrument_id]['pix']
-                correction = self.artifact_correction_models[instrument_id](pix, ds_stokes_pred)
+                if 'pix' not in batch[instrument_id]:
+                    raise KeyError(
+                        f"Artifact correction requires 'pix' for instrument {instrument_id}."
+                    )
+                correction = self.artifact_correction_models[instrument_id](
+                    batch[instrument_id]['pix'], ds_stokes_pred
+                )
                 ds_stokes_pred = correction['stokes_corr']
+            stokes_pred_profiles.append(ds_stokes_pred)
 
             # stokes profiles
-            Ic = torch.quantile(ds_stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
-            stokes_true_normalized.append(self.normalization(ds_stokes_true, Ic=Ic))
-            stokes_pred_normalized.append(self.normalization(ds_stokes_pred, Ic=Ic))
+            stokes_true_profiles.append(ds_stokes_true)
             current_idx += n_samples
 
         #################################################
         # compute stokes loss
-        stokes_true_normalized = torch.cat(stokes_true_normalized, dim=0)
-        stokes_pred_normalized = torch.cat(stokes_pred_normalized, dim=0)
-        stokes_loss = self.stokes_loss_function(stokes_pred_normalized, stokes_true_normalized)
+        stokes_true_profiles = torch.cat(stokes_true_profiles, dim=0)
+        stokes_pred_profiles = torch.cat(stokes_pred_profiles, dim=0)
+        stokes_loss = self.stokes_loss(
+            stokes_pred_profiles, stokes_true_profiles, self.normalization,
+        )
 
-        # sum over wavelength axis
-        stokes_loss = stokes_loss.sum(-1)
-
-        # logging losses
-        I_loss, Q_loss, U_loss, V_loss = stokes_loss.mean(dim=0)
-
-        # weighted loss - apply lambda weights for each stokes parameter
-        lambda_stokes = torch.stack([self.lambdas['I'], self.lambdas['Q'], self.lambdas['U'], self.lambdas['V']])
-        stokes_loss = torch.einsum('...i,i->...', stokes_loss, lambda_stokes)
-
-        #################################################
-        # compute physics losses
-        if not any(k in ['induction', 'divergence', 'force_free', 'potential', 'dB_dt'] and self.lambdas[k].item() > 0
-                   for k, v in self.lambdas.items()):
-            # skip physics losses if not required
-            physics_losses = {}
-        else:
-            random_coords = get_random_coordinates(coords)
-
-            # forward pass of random coordinates
-            physics_out = self.parameter_model(random_coords)
-            b = torch.cat([physics_out['b_x'], physics_out['b_y'], physics_out['b_z']], dim=-1)
-            v = torch.cat([physics_out['v_x'], physics_out['v_y'], physics_out['v_z']], dim=-1)
-            a_jac_matrix = physics_out['a_jac_matrix']
-
-            # compute physics losses
-            physics_losses = compute_physics_losses(b, v, a_jac_matrix, random_coords)
-
-        #################################################
-        # compute total loss
-        total_loss = stokes_loss.mean()
+        (I_loss, Q_loss, U_loss, V_loss), stokes_total = \
+            self._reduce_stokes_objective(stokes_loss)
         logging_loss = {"I": I_loss, "Q": Q_loss, "U": U_loss, "V": V_loss,
-                        "stokes_loss": stokes_loss.mean()}
+                        "stokes_loss": stokes_total}
+        logging_loss.update({
+            f"lambda.{component}": value.detach()
+            for component, value in self.lambdas.items()
+        })
 
-        #################################################
-        # add physics losses to total loss with lambda weights if specified
-        if 'induction' in physics_losses and 'induction' in self.lambdas:
-            induction_loss = physics_losses['induction'].mean()
-            assert not torch.isnan(induction_loss), f"Encountered invalid value. Induction loss is NaN"
-            total_loss = total_loss + self.lambdas['induction'] * induction_loss
-            logging_loss['induction'] = induction_loss
-        if 'divergence' in physics_losses and 'divergence' in self.lambdas:
-            divergence_loss = physics_losses['divergence'].mean()
-            assert not torch.isnan(divergence_loss), f"Encountered invalid value. Divergence loss is NaN"
-            total_loss = total_loss + self.lambdas['divergence'] * divergence_loss
-            logging_loss['divergence'] = divergence_loss
-        if 'force_free' in physics_losses and 'force_free' in self.lambdas:
-            force_free_loss = physics_losses['force_free'].mean()
-            assert not torch.isnan(force_free_loss), f"Encountered invalid value. Force-free loss is NaN"
-            total_loss = total_loss + self.lambdas['force_free'] * force_free_loss
-            logging_loss['force_free'] = force_free_loss
-        if 'potential' in physics_losses and 'potential' in self.lambdas:
-            potential_loss = physics_losses['potential'].mean()
-            assert not torch.isnan(potential_loss), f"Encountered invalid value. Potential loss is NaN"
-            total_loss = total_loss + self.lambdas['potential'] * potential_loss
-            logging_loss['potential'] = potential_loss
-        if 'dB_dt' in physics_losses and 'dB_dt' in self.lambdas:
-            dB_dt_loss = physics_losses['dB_dt'].mean()
-            assert not torch.isnan(dB_dt_loss), f"Encountered invalid value. dB/dt loss is NaN"
-            total_loss = total_loss + self.lambdas['dB_dt'] * dB_dt_loss
-            logging_loss['dB_dt'] = dB_dt_loss
-
-        assert not torch.isnan(total_loss), f"Encountered invalid value. Loss is NaN"
+        physics = self.physics_regularization.evaluate(
+            self.parameter_model,
+            global_step=int(self.global_step),
+            reference=stokes_total,
+        )
+        total_loss = stokes_total + physics.total
+        logging_loss.update(physics.metrics)
+        assert torch.isfinite(total_loss), "Encountered non-finite total loss."
         logging_loss['loss'] = total_loss
         return logging_loss
 
     def scale_parameters(self, output, transformed_output, v_obs_los):
-        vdop = transformed_output['vdop'] * self.meters_per_ds / self.seconds_per_dt
-        vdop = vdop + v_obs_los  # add doppler correction - spacecraft velocity
-
-        forward_params = {'b_field': transformed_output['b_field'] * self.gauss_per_dB,
-                          'sin_inc2': transformed_output['sin_inc2'],
-                          'cos_inc': transformed_output['cos_inc'],
-                          'inc': transformed_output['inc'],
-                          'sin2azi': transformed_output['sin2azi'],
-                          'cos2azi': transformed_output['cos2azi'],
-                          'azi': transformed_output['azi'],
-                          'vdop': vdop,
-                          'vmac': output['vmac'], 'damping': output['damping'],
-                          'b0': output['b0'], 'b1': output['b1'], 'kl': output['kl']}
-        return forward_params
+        return scale_spherical_forward_parameters(
+            output, transformed_output, v_obs_los,
+            self.gauss_per_dB, self.meters_per_ds, self.seconds_per_dt,
+        )
 
     def transform_parameters(self, output, coords, cartesian_to_spherical_transform, rtp_to_img_transform):
-        # transform B
-        b_xyz = torch.cat([output['b_x'], output['b_y'], output['b_z']], dim=-1)
-        b_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, b_xyz)
-        b_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, b_rtp)
-
-        # b_img = (xi, eta, zeta)
-        # (field, inclination, azimuth) = field, gamma, psi = b_field, inc, azi
-        # b_xi = - field * sin(gamma) * sin(psi)
-        # b_eta = field * sin(gamma) * cos(psi)
-        # b_zeta = field * cos(gamma)
-        b_field = torch.norm(b_img, dim=-1, keepdim=True)
-
-        sin_inc2 = (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2) / (b_field ** 2 + 1e-8)
-        cos_inc = b_img[..., 2:3] / (b_field + 1e-8)
-
-        # 2 * sin(x) * cos(x) = sin(2*x)
-        # sin(x)**2 - cos(x)**2 = -cos(2*x)
-        sin2azi = -2 * b_img[..., 0:1] * b_img[..., 1:2] / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
-        cos2azi = -(b_img[..., 0:1] ** 2 - b_img[..., 1:2] ** 2) / (b_img[..., 0:1] ** 2 + b_img[..., 1:2] ** 2 + 1e-8)
-
-        # Shift polarizer position for HMI
-        inc = acos_safe(b_img[..., 2:3] / (b_field + 1e-8))
-        azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
-
-        # transform to carrington frame --> add rotation velocity
-        spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
-        colatitude = spherical_coords[..., 1]  # theta in spherical coordinates
-        latitude = torch.pi / 2 - colatitude  # convert to latitude
-        radius = spherical_coords[..., 0] * self.meters_per_ds  # r in spherical coordinates
-        v_rot = carrington_rotation_velocity(latitude, radius)  # in m/s
-        v_rot = v_rot / self.meters_per_ds * self.seconds_per_dt  # convert to ds/dt (model units)
-
-        # transform V
-        v_xyz = torch.cat([output['v_x'], output['v_y'], output['v_z']], dim=-1)
-        v_rtp = torch.einsum("...ij,...j->...i", cartesian_to_spherical_transform, v_xyz)
-        v_rtp_alt = torch.stack([v_rtp[..., 0], v_rtp[..., 1], v_rtp[..., 2] + v_rot], dim=-1)
-        v_img = torch.einsum("...ij,...j->...i", rtp_to_img_transform, v_rtp_alt)
-
-        vdop = -v_img[..., 2:3]  # negative because doppler shift is defined in the observer frame
-
-        return {'b_field': b_field,
-                'sin2azi': sin2azi, 'cos2azi': cos2azi, 'azi': azi,
-                'sin_inc2': sin_inc2, 'cos_inc': cos_inc, 'inc': inc,
-                'vdop': vdop,
-                'v_rtp': v_rtp, 'b_rtp': b_rtp, 'v_img': v_img, 'b_img': b_img,
-                'b_xyz': b_xyz, 'v_xyz': v_xyz}
+        return transform_spherical_parameters(
+            output, coords, cartesian_to_spherical_transform, rtp_to_img_transform,
+            self.meters_per_ds, self.seconds_per_dt,
+        )
 
     def correct_limb_effects(self, parameters, limb_correction):
-        # apply limb correction
-        c_b0 = limb_correction['c_b0']
-        c_b1 = limb_correction['c_b1']
-        # c_vmac = limb_correction['c_vmac']
-        # c_damping = limb_correction['c_damping']
-        # c_kl = limb_correction['c_kl']
-        c_vdop = limb_correction['c_vdop']
+        return correct_spherical_limb_effects(parameters, limb_correction)
 
-        # apply limb correction to parameters
-        b0 = parameters['b0'] * c_b0
-        b1 = parameters['b1'] * c_b1
-        # vmac = parameters['vmac'] * c_vmac
-        # damping = parameters['damping'] * c_damping
-        # kl = parameters['kl'] * c_kl
-        vdop = parameters['vdop'] + c_vdop
-
-        corrected_output = {k: v for k, v in parameters.items() if
-                            k not in ['b0', 'b1', 'vdop']}
-        corrected_output['b0'] = b0
-        corrected_output['b1'] = b1
-        # corrected_output['vmac'] = vmac
-        # corrected_output['damping'] = damping
-        # corrected_output['kl'] = kl
-        corrected_output['vdop'] = vdop
-
-        return corrected_output
+    @staticmethod
+    def _next_exponential_lambda(value, end, gamma):
+        end = value.new_tensor(end)
+        candidate = value * gamma
+        if value < end:
+            return torch.minimum(candidate, end)
+        if value > end:
+            return torch.maximum(candidate, end)
+        return value
 
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
-        scheduler = self.lr_schedulers()
-        if scheduler.get_last_lr()[0] > self.lr_params['end']:
-            scheduler.step()
-        self.log('Learning Rate', scheduler.get_last_lr()[0])
-
-        if hasattr(self.parameter_model, 'step'):
-            self.parameter_model.step(self.global_step)
-        if hasattr(self.parameter_model, 'fine_weight'):
-            self.log('fine_weight', self.parameter_model.fine_weight.item())
-
-        for k in self.scheduled_lambda_config.keys():
-            value = self.lambdas[k]
-            gamma = self.scheduled_lambda_config[k]['gamma']
-            lambda_type = self.scheduled_lambda_config[k]['type']
-
-            if lambda_type == 'linear':
-                if value > self.scheduled_lambda_config[k]['end'] and gamma < 0:
-                    new_value = value + gamma
-                elif value < self.scheduled_lambda_config[k]['end'] and gamma > 0:
-                    new_value = value + gamma
-                else:
-                    new_value = self.scheduled_lambda_config[k]['end']
-            elif lambda_type == 'exponential':
-                if value > self.scheduled_lambda_config[k]['end']:
-                    # update lambda value
-                    new_value = value * gamma
-                else:
-                    new_value = value
-            elif lambda_type == 'step':
-                if self.global_step >= self.scheduled_lambda_config[k]['iterations']:
-                    new_value = self.scheduled_lambda_config[k]['end']
-                else:
-                    new_value = value
-            else:
-                raise ValueError(f"Unknown lambda type: {lambda_type}")
-            self.lambdas[k].copy_(new_value)
-            self.log(f"lambda.{k}", self.lambdas[k].item())
+        learning_rate = self.optimizers().param_groups[0]['lr']
+        self.log('Learning Rate', learning_rate)
 
         # update time shift scale
         new_scale = self.time_shift_scale - self.time_shift_scale_gamma
@@ -419,11 +388,24 @@ class MESphericalModule(LightningModule):
         self.time_shift_scale.copy_(new_scale)
         self.log('time_shift_scale', self.time_shift_scale.item() * self.seconds_per_dt)
 
-        # log results to WANDB
-        self.log_dict({f'train.{k}': v.mean() for k, v in outputs.items()})
+        # Physics partitions and time-stratified Stokes batches differ by rank.
+        # Synchronizing here reports the actual DDP objective rather than rank
+        # zero's current frame/partition.
+        lambda_metrics = {
+            key: value.mean() for key, value in outputs.items()
+            if key.startswith('lambda.')
+        }
+        train_metrics = {
+            f'train.{key}': value.mean() for key, value in outputs.items()
+            if not key.startswith('lambda.')
+        }
+        if lambda_metrics:
+            self.log_dict(lambda_metrics, sync_dist=True)
+        self.log_dict(train_metrics, sync_dist=True)
 
     @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
+        self._set_stokes_lambda_step(int(self.global_step))
         coords = batch['coords']
         mu = batch['mu']
         stokes_true = batch['stokes']
@@ -432,9 +414,11 @@ class MESphericalModule(LightningModule):
         v_obs_los = batch['v_obs_los']
         wavelength_grid = batch['wavelength_grid']
         instrument_id = batch['instrument_id']
+        spectral_response = self._get_spectral_response(batch, instrument_id)
 
         # forward step
-        coords.requires_grad = True
+        if self.parameter_model.vector_potential:
+            coords.requires_grad_(True)
         output = self.parameter_model(coords)
 
         transformed_output = self.transform_parameters(output, coords,
@@ -453,53 +437,62 @@ class MESphericalModule(LightningModule):
             v_obs_correction = self.velocity_correction_models[instrument_id](time_coords)
             forward_params['vdop'] += v_obs_correction
 
-        I, Q, U, V = self.forward_models[instrument_id](**forward_params, mu=mu, wavelength_grid=wavelength_grid)
-        stokes_pred = torch.stack([I, Q, U, V], dim=-2)
-
+        artifact_correction = None
+        stokes_pred = self._synthesize_stokes(
+            instrument_id,
+            forward_params,
+            mu,
+            wavelength_grid,
+            spectral_response,
+            None if limb_correction is None else limb_correction['filling_factor'],
+        )
         if instrument_id in self.artifact_correction_models:
-            assert 'pix' in batch, f"Artifact correction requires 'pix' in batch for instrument {instrument_id}"
-            pix = batch['pix']
-            artifact_correction = self.artifact_correction_models[instrument_id](pix, stokes_pred)
+            if 'pix' not in batch:
+                raise KeyError(
+                    f"Artifact correction requires 'pix' for instrument {instrument_id}."
+                )
+            artifact_correction = self.artifact_correction_models[instrument_id](
+                batch['pix'], stokes_pred
+            )
             stokes_pred = artifact_correction['stokes_corr']
-        else:
-            artifact_correction = None
 
-        Ic = torch.quantile(stokes_true[..., 0:1, :], 0.9, dim=-1, keepdim=True)
-        stokes_true_normalized = self.normalization(stokes_true, Ic=Ic)
-        stokes_pred_normalized = self.normalization(stokes_pred, Ic=Ic)
+        objective_wavelength = self.stokes_loss(
+            stokes_pred, stokes_true, self.normalization,
+        )
+
+        # Keep the established validation plots and MAE metrics in their baseline
+        # normalization space, independent of the selected training objective.
+        stokes_true_normalized = self.normalization(stokes_true)
+        stokes_pred_normalized = self.normalization(stokes_pred)
 
         diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
-
-        b = transformed_output['b_xyz']
-        v = transformed_output['v_xyz']
-        a_jac_matrix = output['a_jac_matrix']
-        # physics_losses = compute_physics_losses(b, v, a_jac_matrix, coords)
+        objective_components = objective_wavelength.sum(-1)
+        objective_weights = torch.stack([
+            self.lambdas['I'], self.lambdas['Q'], self.lambdas['U'], self.lambdas['V']
+        ])
+        objective = torch.einsum('...i,i->...', objective_components, objective_weights)
+        objective_valid = self.stokes_loss.valid_sample_mask(stokes_true)
 
         res = {'diff': diff,
+               'objective': objective,
+               'objective_valid': objective_valid,
                'stokes_true': stokes_true_normalized, 'stokes_pred': stokes_pred_normalized,
                **forward_params,
                'b_rtp': transformed_output['b_rtp'] * self.gauss_per_dB,
                'v_rtp': transformed_output['v_rtp'] * self.meters_per_ds / self.seconds_per_dt,
                'b_img': transformed_output['b_img'] * self.gauss_per_dB,
                'v_img': transformed_output['v_img'] * self.meters_per_ds / self.seconds_per_dt,
-               # 'induction': physics_losses['induction'],
-               # 'dB_dt': physics_losses['dB_dt'],
-               # 'curl_VxB': physics_losses['curl_VxB'],
-               # 'divergence': physics_losses['divergence'],
-               # 'force_free': physics_losses['force_free'],
-               # 'dB_dr': physics_losses['dB_dr'],
                'mu': mu, 'v_obs_los': v_obs_los,
                'v_obs_correction': v_obs_correction,
                }
         if limb_correction is not None:
             res['c_b0'] = limb_correction['c_b0']
             res['c_b1'] = limb_correction['c_b1']
-            # res['c_vmac'] = limb_correction['c_vmac']
-            # res['c_damping'] = limb_correction['c_damping']
-            # res['c_kl'] = limb_correction['c_kl']
             res['c_vdop'] = limb_correction['c_vdop']
+            res['limb_filling_factor'] = limb_correction['filling_factor']
         if artifact_correction is not None:
             res['artifact_correction_params'] = artifact_correction['correction_params']
+            res['artifact_filling_factor'] = artifact_correction['filling_factor']
 
         res["lin_idx"] = batch["lin_idx"].long()  # for assembling full images later
 
@@ -553,12 +546,23 @@ class MESphericalModule(LightningModule):
             outputs[k] = torch.cat([o[k] for o in outputs_list], dim=0)
 
         I_diff, Q_diff, U_diff, V_diff = torch.nanmean(outputs['diff'], dim=(0, 2))
+        objective_valid = outputs['objective_valid'].bool()
+        if torch.any(objective_valid):
+            objective_masked = torch.where(
+                objective_valid,
+                outputs['objective'],
+                torch.zeros_like(outputs['objective']),
+            )
+            objective_total = objective_masked.sum() / objective_valid.sum()
+        else:
+            objective_total = torch.tensor(torch.nan, dtype=outputs['objective'].dtype)
 
         parameters = {}
         for k in ['b_field', 'inc', 'azi', 'vmac', 'damping', 'b0', 'b1', 'vdop', 'kl',
                   'v_rtp', 'b_rtp', 'v_img', 'b_img', 'v_obs_correction',
                   'induction', 'dB_dt', 'curl_VxB', 'divergence', 'force_free', 'dB_dr', 'mu', 'v_obs_los',
-                  'c_b0', 'c_b1', 'c_vmac', 'c_damping', 'c_kl', 'c_vdop']:
+                  'c_b0', 'c_b1', 'c_vmac', 'c_damping', 'c_kl', 'c_vdop',
+                  'limb_filling_factor']:
             if k not in outputs:
                 continue
             v = outputs[k].reshape(*self.image_shape[:2], -1).numpy().squeeze()
@@ -581,16 +585,20 @@ class MESphericalModule(LightningModule):
         self.plot_stokes(stokes_pred, stokes_true)
 
         warnings.simplefilter("ignore")  # ignore warnings for distributed logging
-        self.log_dict({
+        validation_metrics = {
             # log total stokes loss
             "valid.diff": torch.nanmean(outputs['diff']),
             # log stokes differences
             'valid.I': I_diff, 'valid.Q': Q_diff, 'valid.U': U_diff, 'valid.V': V_diff,
+            # exact selected objective, using the same wavelength and Stokes
+            # reductions as the training Stokes term
+            'valid.objective': objective_total,
             # log physics losses
             # 'valid.induction': torch.nanmean(outputs['induction']),
             # 'valid.divergence': torch.nanmean(outputs['divergence']),
             # 'valid.force_free': torch.nanmean(outputs['force_free']),
-        })
+        }
+        self.log_dict(validation_metrics)
 
     def plot_physics_losses(self, parameters):
         induction = parameters['induction']
@@ -657,66 +665,46 @@ class MESphericalModule(LightningModule):
         plt.close(fig)
 
     def plot_limb_correction(self, outputs):
-        if 'c_b0' not in outputs or 'c_b1' not in outputs or 'c_vmac' not in outputs:
+        required = {'c_b0', 'c_b1', 'c_vdop', 'limb_filling_factor'}
+        if not required <= outputs.keys():
             return
         c_b0 = outputs['c_b0']
         c_b1 = outputs['c_b1']
-        # c_vmac = outputs['c_vmac']
         mu = outputs['mu']
-        # c_damping = outputs['c_damping']
-        # c_kl = outputs['c_kl']
         c_vdop = outputs['c_vdop']
+        filling_factor = outputs['limb_filling_factor']
 
-        fig, axs = plt.subplots(2, 4, figsize=(10, 5), dpi=100)
+        fig, axs = plt.subplots(1, 5, figsize=(12.5, 2.5), dpi=100)
 
-        ax = axs[0, 0]
+        ax = axs[0]
         im = ax.imshow(mu, origin='lower', cmap='cividis', vmin=0, vmax=1)
         ax.set_title("mu")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[0, 1]
-        ax.set_axis_off()
-        # im = ax.imshow(c_damping, origin='lower', cmap='magma')
-        # ax.set_title(r"$c_\text{damping}$")
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05)
-        # plt.colorbar(im, cax=cax)
+        ax = axs[4]
+        im = ax.imshow(filling_factor, origin='lower', cmap='viridis', vmin=0, vmax=1)
+        ax.set_title(r"$f(\mu)$")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
 
-        ax = axs[0, 2]
-        ax.set_axis_off()
-        # im = ax.imshow(c_kl, origin='lower', cmap='magma')
-        # ax.set_title(r"$c_\text{kl}$")
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05)
-        # plt.colorbar(im, cax=cax)
-
-        axs[0, 3].set_axis_off()
-
-        ax = axs[1, 0]
+        ax = axs[1]
         im = ax.imshow(c_b0, origin='lower', cmap='magma')
         ax.set_title(r"$c_\text{b0}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[1, 1]
+        ax = axs[2]
         im = ax.imshow(c_b1, origin='lower', cmap='magma')
         ax.set_title(r"$c_\text{b1}$")
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         plt.colorbar(im, cax=cax)
 
-        ax = axs[1, 2]
-        ax.set_axis_off()
-        # im = ax.imshow(c_vmac, origin='lower', cmap='magma')
-        # ax.set_title(r"$c_\text{vmac}$")
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes('right', size='5%', pad=0.05)
-        # plt.colorbar(im, cax=cax)
-
-        ax = axs[1, 3]
+        ax = axs[3]
         v_min_max = np.nanmax(np.abs(c_vdop))
         im = ax.imshow(c_vdop, origin='lower', cmap='RdBu_r', vmin=-v_min_max, vmax=v_min_max)
         ax.set_title(r"$c_\text{vdop}$")
@@ -1037,19 +1025,137 @@ class MESphericalModule(LightningModule):
         log_wandb_image(fig, "Artifact Correction Parameters")
         plt.close(fig)
 
+        if artifact_params.shape[-1] < 9:
+            return
+        fig, ax = plt.subplots(figsize=(4, 3), dpi=100)
+        im = ax.imshow(artifact_params[..., 8], origin='lower', cmap='viridis', vmin=0, vmax=1)
+        ax.set_title("Artifact Correction Filling Factor")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax)
+        log_wandb_image(fig, "Artifact Correction Filling Factor")
+        plt.close(fig)
+
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        checkpoint['pme_stokes_loss_config'] = copy.deepcopy(self.stokes_loss_config)
+        checkpoint['pme_stokes_lambda_config'] = copy.deepcopy(
+            self.stokes_lambda_config
+        )
+        checkpoint['pme_normalization_config'] = self._normalization_objective_config(
+            self.normalization.asinh_alphas
+        )
+        checkpoint['pme_physics_config'] = copy.deepcopy(self.physics_config)
+
+    @staticmethod
+    def _normalization_objective_config(asinh_alphas):
+        if asinh_alphas is None:
+            return {'asinh_alphas': None}
+        if isinstance(asinh_alphas, dict):
+            values = [asinh_alphas[key] for key in ('Q', 'U', 'V')]
+        elif isinstance(asinh_alphas, (float, int)):
+            values = [asinh_alphas] * 3
+        else:
+            values = torch.as_tensor(asinh_alphas).detach().cpu().reshape(-1).tolist()
+        if len(values) != 3:
+            raise ValueError('Normalization objective must provide Q, U, and V asinh alphas.')
+        return {'asinh_alphas': [float(value) for value in values]}
+
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         state_dict = checkpoint['state_dict']
-        # keep new lambdas
-        for k, v in self.lambdas.items():
-            if f"lambdas.{k}" not in state_dict:
-                print(f'Add lambda {k}: {v.data}')
-                state_dict[f'lambdas.{k}'] = v
-                continue
-            checkpoint_v = state_dict[f"lambdas.{k}"]
-            if k in self.scheduled_lambda_config or checkpoint_v == v:  # skip scheduled lambdas or same values
-                continue
-            print(f'Update lambda {k}: {checkpoint_v} --> {v.data}')
-            state_dict[f'lambdas.{k}'] = v
+        checkpoint_loss_config = checkpoint.get('pme_stokes_loss_config')
+        if checkpoint_loss_config is None:
+            if 'normalization.alphas' in state_dict:
+                raise RuntimeError(
+                    'This legacy checkpoint predates objective metadata and used a historical '
+                    'target-continuum loss that cannot be resumed safely. Use a fresh base_path.'
+                )
+            checkpoint_loss_config = StokesLossModule().configuration()
+        else:
+            try:
+                checkpoint_loss_config = StokesLossModule(
+                    **checkpoint_loss_config
+                ).configuration()
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    'This checkpoint uses a removed or unsupported Stokes objective. '
+                    'Use a fresh base_path.'
+                ) from error
+
+        checkpoint_normalization_config = checkpoint.get('pme_normalization_config')
+        if checkpoint_normalization_config is None:
+            checkpoint_normalization_config = self._normalization_objective_config(
+                state_dict.get('normalization.asinh_alphas')
+            )
+        else:
+            checkpoint_normalization_config = self._normalization_objective_config(
+                checkpoint_normalization_config.get('asinh_alphas')
+            )
+        current_normalization_config = self._normalization_objective_config(
+            self.normalization.asinh_alphas
+        )
+
+        if (checkpoint_loss_config != self.stokes_loss_config
+                or checkpoint_normalization_config != current_normalization_config):
+            raise RuntimeError(
+                'The configured Stokes objective does not match the checkpoint objective. '
+                f'Checkpoint loss/normalization: {checkpoint_loss_config}/'
+                f'{checkpoint_normalization_config}; current: {self.stokes_loss_config}/'
+                f'{current_normalization_config}. '
+                'Use a fresh base_path when changing the objective transform.'
+            )
+
+        checkpoint_lambda_config = checkpoint.get('pme_stokes_lambda_config')
+        if checkpoint_lambda_config is None:
+            checkpoint_lambda_config = {
+                component: PhysicsWeightSchedule.from_config(
+                    float(state_dict[f'lambdas.{component}'])
+                ).configuration()
+                for component in ('I', 'Q', 'U', 'V')
+            }
+        if checkpoint_lambda_config != self.stokes_lambda_config:
+            warnings.warn(
+                'The configured Stokes-weight schedules differ from the checkpoint; '
+                'the configured schedules will replace the checkpoint weights and '
+                'continue from its global step. '
+                f'Checkpoint: {checkpoint_lambda_config}; '
+                f'configured: {self.stokes_lambda_config}.',
+                UserWarning,
+                stacklevel=2,
+            )
+        checkpoint_step = int(checkpoint.get('global_step', 0))
+        for component, schedule in self.stokes_lambda_schedules.items():
+            key = f'lambdas.{component}'
+            configured_value = schedule.value_at(checkpoint_step)
+            reference = state_dict.get(key, self.lambdas[component].detach())
+            state_dict[key] = reference.new_tensor(configured_value)
+        checkpoint['pme_stokes_lambda_config'] = copy.deepcopy(
+            self.stokes_lambda_config
+        )
+
+        checkpoint_physics_config = checkpoint.get('pme_physics_config')
+        legacy_physics_keys = {
+            key.split('.', 1)[1]
+            for key in state_dict
+            if key.startswith('lambdas.') and key.split('.', 1)[1] not in ('I', 'Q', 'U', 'V')
+        }
+        if checkpoint_physics_config is None and legacy_physics_keys:
+            raise RuntimeError(
+                'This checkpoint used legacy batch-local physics regularization '
+                f'({sorted(legacy_physics_keys)}). It cannot be resumed with the new '
+                'global collocation objective; use a fresh base_path.'
+            )
+        if checkpoint_physics_config != self.physics_config:
+            warnings.warn(
+                'The configured physics objective or collocation domain differs from '
+                'the checkpoint; the current configuration will replace the checkpoint '
+                'settings and continue from its global step. '
+                f'Checkpoint: {checkpoint_physics_config}; '
+                f'configured: {self.physics_config}.',
+                UserWarning,
+                stacklevel=2,
+            )
+        checkpoint['pme_physics_config'] = copy.deepcopy(self.physics_config)
+
         # remove old lambdas
         remove_keys = []
         for k, v in state_dict.items():

@@ -7,9 +7,7 @@
 #PBS -l select=1:ncpus=16:ngpus=4:mem=64gb
 #PBS -l walltime=12:00:00
 
-module load conda/latest
 module load cuda/11.7.1
-conda activate lightning
 
 cd /glade/u/home/rjarolim/projects/PINN-ME
 

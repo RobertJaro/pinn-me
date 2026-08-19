@@ -24,10 +24,18 @@ logging:
   name: "2024-04 PHI-FDT"
 
 model:
-  encoding_config: { type: positional, max_frequencies: [2.0, 8.0, 8.0, 8.0], num_frequencies: [16, 64, 64, 64] }#{ type: progressive_positional, max_frequencies: [1.0, 8.0, 8.0, 8.0], num_frequencies: [8, 32, 32, 32] }#{ type: spherical, scales: [1.0, 1.0, 128.0, 128.0, 128.0, 128.0], num_frequencies: [16, 0, 64, 64, 64, 64]}
+  type: mlp
+  dim: 256
+  n_layers: 6
+  scale: true
 
 training:
   epochs: 1000
-  lambda_stokes: [ 10.0, 1.0, 1.0, 2.0 ]
   check_val_every_n_epoch: 50
   time_shift_config: {scale: 0.0, iterations: 0.0}
+
+lambda:
+  I: 10.0
+  Q: 1.0
+  U: 1.0
+  V: 2.0

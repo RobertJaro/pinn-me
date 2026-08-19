@@ -2,12 +2,14 @@ import gc
 import glob
 import itertools
 import os
+import shutil
 import uuid
 from datetime import datetime, timedelta
 from multiprocessing import Pool
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import wandb
 import zarr
 from astropy import units as u
@@ -22,30 +24,30 @@ from scipy.signal import fftconvolve
 from sklearn.utils import shuffle
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map, make_fitswcs_header
-from torch.utils.data import DataLoader, Dataset, RandomSampler
+from torch.utils.data import DataLoader, Dataset, RandomSampler, Sampler
 from tqdm import tqdm
-from zarr import NestedDirectoryStore
-
 
 class CombinedDataset(Dataset):
 
-    def __init__(self, datasets, n_samples):
+    def __init__(self, datasets):
         super().__init__()
         self.datasets = datasets
-        sample_indices = []
+        self.sample_indices_by_dataset = []
         for i, d in enumerate(datasets):
             indices = [(i, j) for j in range(len(d))] * d.oversample_factor
-            sample_indices += indices
-        self.sample_indices = shuffle(sample_indices)
-        self.n_samples = n_samples
+            self.sample_indices_by_dataset.append(indices)
+        self.sample_indices = [index for indices in self.sample_indices_by_dataset for index in indices]
 
     def __len__(self):
-        return len(self.sample_indices) // self.n_samples
+        return len(self.sample_indices)
 
-    def __getitem__(self, idx):
-        # get the samples for the current batch
+    def __getitem__(self, sample_indices):
+        # The sampler supplies one complete optimizer batch as dataset/chunk pairs.
+        if isinstance(sample_indices, tuple) and len(sample_indices) == 2 \
+                and all(isinstance(value, (int, np.integer)) for value in sample_indices):
+            sample_indices = [sample_indices]
         batch = {}
-        for i, j in self.sample_indices[idx * self.n_samples: (idx + 1) * self.n_samples]:
+        for i, j in sample_indices:
             instrument_id = self.datasets[i][j]['instrument_id']
             if instrument_id not in batch:
                 batch[instrument_id] = {}
@@ -64,6 +66,61 @@ class CombinedDataset(Dataset):
                      for tensor_key, tensor_value in ds_value.items()}
             concatenated_batch[ds_key] = value
         return concatenated_batch
+
+
+class TimeStratifiedBatchSampler(Sampler):
+    """Create newly shuffled, time-balanced chunk groups every epoch."""
+
+    def __init__(self, sample_indices_by_dataset, chunks_per_batch):
+        self.sample_indices_by_dataset = [list(indices) for indices in sample_indices_by_dataset]
+        self.chunks_per_batch = int(chunks_per_batch)
+        if self.chunks_per_batch <= 0:
+            raise ValueError('chunks_per_batch must be positive.')
+        self.epoch = 0
+
+    @staticmethod
+    def _distributed_context():
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank(), dist.get_world_size()
+        return 0, 1
+
+    def _global_batch_count(self):
+        return sum(map(len, self.sample_indices_by_dataset)) // self.chunks_per_batch
+
+    def __len__(self):
+        _, world_size = self._distributed_context()
+        return self._global_batch_count() // world_size
+
+    def __iter__(self):
+        rank, world_size = self._distributed_context()
+        generator = np.random.default_rng(self.epoch)
+        self.epoch += 1
+
+        queues = []
+        for indices in self.sample_indices_by_dataset:
+            permutation = generator.permutation(len(indices))
+            queues.append([indices[index] for index in permutation])
+
+        active = [index for index, queue in enumerate(queues) if queue]
+        ordered = []
+        while active:
+            generator.shuffle(active)
+            next_active = []
+            for dataset_index in active:
+                ordered.append(queues[dataset_index].pop())
+                if queues[dataset_index]:
+                    next_active.append(dataset_index)
+            active = next_active
+
+        global_batch_count = self._global_batch_count()
+        # Distributed ranks must execute exactly the same number of steps.
+        global_batch_count -= global_batch_count % world_size
+        batches = [
+            ordered[index * self.chunks_per_batch:(index + 1) * self.chunks_per_batch]
+            for index in range(global_batch_count)
+        ]
+        for batch_index in range(rank, global_batch_count, world_size):
+            yield batches[batch_index]
 
 
 class BatchDataset(Dataset):
@@ -101,7 +158,10 @@ class BatchesDataset(Dataset):
         """
         self.batches_file_paths = batches_file_paths
         self.batch_size = int(batch_size)
-        self.data = {k: zarr.open(NestedDirectoryStore(bf), mode='r') for k, bf in self.batches_file_paths.items()}
+        # Passing the path directly works with both Zarr 2 and Zarr 3. In Zarr 3,
+        # filesystem paths are backed by LocalStore; NestedDirectoryStore was
+        # removed from the public API.
+        self.data = {k: zarr.open_array(bf, mode='r') for k, bf in self.batches_file_paths.items()}
 
     def __len__(self):
         ref_data = list(self.data.values())[0]
@@ -116,18 +176,20 @@ class BatchesDataset(Dataset):
         return data
 
     def clear(self):
-        [os.remove(f) for f in self.batches_file_paths.values()]
+        for path in self.batches_file_paths.values():
+            shutil.rmtree(path)
 
     def shuffle(self):
-        ref_file = list(self.batches_file_paths.values())[0]
-        r = np.random.permutation(np.load(ref_file, mmap_mode='r').shape[0])
-        for bf in self.batches_file_paths.values():
-            data = np.load(bf)
-            data = data[r]
-            np.save(bf, data)
+        ref_data = next(iter(self.data.values()))
+        indices = np.random.permutation(ref_data.shape[0])
+        for path in self.batches_file_paths.values():
+            array = zarr.open_array(path, mode='r+')
+            array[:] = array[:][indices]
 
 
 class TensorsDataset(BatchesDataset):
+
+    STORAGE_CHUNK_SIZE = 65536
 
     def __init__(self, tensors, work_directory, batch_size, filter_nans=True, shuffle=True, ds_name=None, **kwargs):
         # filter nan entries
@@ -146,9 +208,11 @@ class TensorsDataset(BatchesDataset):
         for k, v in tensors.items():
             coords_zarr_path = os.path.join(work_directory, f'{ds_name}_{k}.zarr')
             # write data to zarr - chunks
-            store = NestedDirectoryStore(coords_zarr_path)
-            chunk_size = batch_size #max(batch_size, 524288) # 2 ** 19 entries per chunk, to avoid too many small files
-            z = zarr.open(store, mode='w', shape=v.shape, chunks=(chunk_size, *v.shape[1:]), dtype='float32')
+            # Keep physical storage chunks large regardless of the training
+            # microbatch size, which may be only a few hundred samples.
+            chunk_size = min(self.STORAGE_CHUNK_SIZE, max(1, v.shape[0]))
+            z = zarr.open_array(coords_zarr_path, mode='w', shape=v.shape,
+                                chunks=(chunk_size, *v.shape[1:]), dtype='float32')
             for i in range(0, v.shape[0], chunk_size):
                 z[i:i + chunk_size] = v[i:i + chunk_size]
             batches_paths[k] = coords_zarr_path
@@ -215,6 +279,15 @@ class GenericDataModule(LightningDataModule):
 
         self.value_range = np.stack([stokes_vector.min((0, 1, 2, -1)),
                                      stokes_vector.max((0, 1, 2, -1))], -1)
+        print('Dataset Dimensions')
+        print(f'Stokes vector: {stokes_vector.shape}')
+        print(f'Coordinates: {coordinates.shape}')
+        print(f'Mu: {mu.shape}')
+
+        print('Time Range')
+        print(f'Raw: {times.min().isoformat()} - {times.max().isoformat()} ({len(times)})')
+        print(f'Normalized: {normalized_times.min():.2f} - {normalized_times.max():.2f}')
+
         print('VALUE RANGE')
         print(f'Stokes-I: {self.value_range[0, 0]:.3f} - {self.value_range[0, 1]:.3f}')
         print(f'Stokes-Q: {self.value_range[1, 0]:.3f} - {self.value_range[1, 1]:.3f}')

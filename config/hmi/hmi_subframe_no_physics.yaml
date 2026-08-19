@@ -24,13 +24,19 @@ logging:
   name: "2024-03 subframe - no physics"
 
 model:
-  vector_potential: False
-  encoding_config: {type: time_split, w0_spatial: 100}
+  type: mlp
+  dim: 256
+  n_layers: 6
+  vector_potential: false
+  scale: true
+  activation: silu
+  encoding_config: { type: fourier, num_frequencies: [8, 64, 64, 64], max_frequencies: [2, 2048, 2048, 2048] }
 
 training:
   epochs: 500
-  lambda_stokes: [ 1, 1, 1, 1 ]
-  lambda_induction: 0.0
-  lambda_divergence: 0.0
-  lambda_force_free: 0.0
-  lambda_static: 0.0
+
+lambda:
+  I: 1.0
+  Q: 1.0
+  U: 1.0
+  V: 1.0
