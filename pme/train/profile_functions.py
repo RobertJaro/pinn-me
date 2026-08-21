@@ -64,7 +64,13 @@ class Faddeeva(nn.Module):
         upper_half_plane = z.imag >= 0
         upper_z = torch.where(upper_half_plane, z, -z)
         upper_value = self._upper_half_plane(upper_z)
-        reflected_value = 2 * torch.exp(-z.square()) - upper_value
+        if bool(torch.all(upper_half_plane)):
+            return upper_value
+        # torch.where evaluates both expressions eagerly. Evaluate the
+        # potentially unstable reflection exponential only for actual
+        # lower-half-plane entries; LTE Voigt inputs never enter this branch.
+        reflected_z = torch.where(upper_half_plane, torch.zeros_like(z), z)
+        reflected_value = 2 * torch.exp(-reflected_z.square()) - upper_value
         return torch.where(upper_half_plane, upper_value, reflected_value)
 
 

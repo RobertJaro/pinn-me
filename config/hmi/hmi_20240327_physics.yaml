@@ -33,10 +33,12 @@ training:
   epochs: 1000
   check_val_every_n_epoch: 10
 
-lambda:
+weight:
   I: 1.0
   Q: 0.1
   U: 0.1
   V: 1.0
-  divergence: 1.0e-4
-  potential: 1.0e-4
+physics:
+  constraints:
+    divergence: 1.0e-4
+    potential: 1.0e-4

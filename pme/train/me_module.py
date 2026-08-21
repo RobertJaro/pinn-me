@@ -117,7 +117,7 @@ class MEModule(LightningModule):
         # logging losses
         I_loss, Q_loss, U_loss, V_loss = loss.mean(dim=0)
 
-        # weighted loss - apply lambda weights for each stokes parameter
+        # Weighted loss for each Stokes component.
         total_loss = loss * self.lambda_stokes[None, :]
         total_loss = total_loss.mean()
 

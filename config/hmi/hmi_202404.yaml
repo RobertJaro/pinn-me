@@ -31,11 +31,13 @@ training:
   epochs: 1.0e+3
   check_val_every_n_epoch: 5
 
-lambda:
+weight:
   I: 1.0
   Q: 4.0
   U: 4.0
   V: 4.0
-  induction: 1.0e-3
-  divergence: 1.0e-3
-  force_free: 1.0e-3
+physics:
+  constraints:
+    induction: 1.0e-3
+    divergence: 1.0e-3
+    force_free: 1.0e-3

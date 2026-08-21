@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "window_air_angstrom": [6300.8, 6303.2],
+  "instrument": "Hinode/SOT-SP (spaceborne; no terrestrial telluric absorption)",
+  "purpose": "Document features inspected in the complete Hinode spectral window and the treatment used by the LTE inversion.",
+  "sources": {
+    "LOZITSKY_2017": {
+      "citation": "Lozitsky 2017, Advances in Space Research 59, 1416-1424",
+      "doi": "10.1016/j.asr.2016.11.034",
+      "use": "reported telluric features, the 6302.090-A molecular feature in sunspot umbrae, and extreme-field mutual blending of the Fe pair"
+    },
+    "SMITHA_ET_AL_2021": {
+      "citation": "Smitha et al. 2021, Astronomy & Astrophysics 653, A91",
+      "doi": "10.1051/0004-6361/202141447",
+      "use": "Hinode/SP evidence that unidentified molecular blends strengthen rapidly in cool sunspot umbrae"
+    }
+  },
+  "features": [
+    {
+      "id": "FeI_6301.5008",
+      "wavelength_air_angstrom": 6301.5008,
+      "origin": "solar atomic",
+      "treatment": "synthesized",
+      "line_record": "lines.json#FeI_6301.5008"
+    },
+    {
+      "id": "telluric_6302.000",
+      "wavelength_air_angstrom": 6302.0,
+      "origin": "terrestrial atmosphere",
+      "treatment": "excluded",
+      "reason": "Hinode is spaceborne, so this feature is absent from SOT-SP observations.",
+      "provenance": ["LOZITSKY_2017"]
+    },
+    {
+      "id": "molecular_6302.090",
+      "wavelength_air_angstrom": 6302.09,
+      "origin": "solar molecular; carrier not identified by the cited observational study",
+      "treatment": "mask_when_cool_umbra",
+      "recommended_exclusion_window_angstrom": [6302.04, 6302.14],
+      "reason": "The forward model contains no molecular line opacity and no authoritative transition parameters for this unidentified carrier are available in the reviewed sources; fitting this feature as Fe would bias the atmosphere.",
+      "provenance": ["LOZITSKY_2017", "SMITHA_ET_AL_2021"]
+    },
+    {
+      "id": "FeI_6302.4932",
+      "wavelength_air_angstrom": 6302.4932,
+      "origin": "solar atomic",
+      "treatment": "synthesized",
+      "line_record": "lines.json#FeI_6302.4932"
+    },
+    {
+      "id": "telluric_6302.764",
+      "wavelength_air_angstrom": 6302.764,
+      "origin": "terrestrial atmosphere",
+      "treatment": "excluded",
+      "reason": "Hinode is spaceborne, so this feature is absent from SOT-SP observations.",
+      "provenance": ["LOZITSKY_2017"]
+    }
+  ],
+  "extreme_conditions": {
+    "description": "At multi-kilogauss field strengths combined with Doppler speeds approaching tens of km/s, the Zeeman-shifted Fe I 6301/6302 profiles can overlap each other.",
+    "treatment": "Both Fe transitions are synthesized simultaneously, so mutual overlap remains in the forward calculation.",
+    "provenance": ["LOZITSKY_2017"]
+  }
+}

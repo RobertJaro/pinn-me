@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "bundle_type": "pinn-me-lte-runtime-resources",
+  "instrument": "Hinode/SOT-SP",
+  "source_manifest_sha256": "0d6d66c5ee4a4bfe94cffeb060eb2c6cb0bb4e7007bb8940f12fb27cf09f49d5",
+  "runtime_files": [
+    "abundances.json",
+    "barklem_collet_2016_ReadMe.txt",
+    "barklem_collet_2016_table4.dat",
+    "barklem_collet_2016_table8.dat",
+    "blend_inventory.json",
+    "eos_table.json",
+    "hminus_continuum.json",
+    "instrument_hinode_sp.json",
+    "lines.json",
+    "partition_functions.json",
+    "solar_reference_630nm.json",
+    "sources.json",
+    "stic_continuum_table.json"
+  ],
+  "training_contract": "offline-read-only; no downloads or table conversion",
+  "required_production_files": [
+    "abundances.json",
+    "blend_inventory.json",
+    "instrument_hinode_sp.json",
+    "lines.json",
+    "solar_reference_630nm.json",
+    "stic_continuum_table.json"
+  ],
+  "optional_reference_files": [
+    "barklem_collet_2016_ReadMe.txt",
+    "barklem_collet_2016_table4.dat",
+    "barklem_collet_2016_table8.dat",
+    "eos_table.json",
+    "hminus_continuum.json",
+    "partition_functions.json"
+  ],
+  "physical_depth_contract": {
+    "tau500_quantity": "total extinction = true absorption + scattering",
+    "scattering_is_stored_separately": true,
+    "physical_height_qualified": true,
+    "runtime_fallback": "none; missing or invalid STiC table is a hard error",
+    "source_function_limitation": "The current LTE formal solver applies B_lambda to total continuum extinction and does not iterate a coherent-scattering source. The tau500/geometric metric uses STiC total extinction, but upper-layer continuum intensities retain this explicit thermal-source approximation.",
+    "thermodynamic_population_contract": "Continuum coefficients, mass density, electron density, neutral atomic-H density, and n(Fe I)/U(Fe I) all come from the same converged pinned STiC/Wittmann (T, Pgas) state. Fe-I lower-level populations apply the LTE Boltzmann factor using reviewed line E_l and J_l at runtime.",
+    "legacy_eos_scope": "The separately packaged Barklem/Saha EOS remains available for atomic diagnostics and the inspectable H-minus-only continuum decomposition; production continuum, configured HSE, damping perturbers, and Fe-I line populations use this pinned STiC table."
+  },
+  "falc_top_boundary": {
+    "model": "FALC_82",
+    "target_log10_tau500": -5.0,
+    "gas_pressure_pa": 0.0903679135719897,
+    "temperature_k": 7456.57046516284,
+    "log10_column_mass_g_cm2": -4.483985744660035,
+    "gravity_cm_s2": 27542.28703338169,
+    "falc_log10_tau500_range": [
+      -5.405870771873386,
+      1.3948466796994528
+    ],
+    "bracketing_depth_indices": [
+      36,
+      37
+    ],
+    "integration": "STiC ceos::hydrostatic_cmass convention: tau[0]=m[0]*kappa[0]; subsequent tau increments use trapezoidal kappa500 over column mass",
+    "tau500_extinction": "true absorption plus scattering at vacuum 5000 Angstrom",
+    "pressure_interpolation": "linear in log10(Pgas) versus log10(tau500)",
+    "stic_state_at_interpolated_boundary": {
+      "total_extinction_m1": 2.8784599239306297e-11,
+      "true_absorption_m1": 5.268141807958203e-12,
+      "scattering_extinction_m1": 2.3516457431348094e-11,
+      "mass_density_kg_m3": 1.1239128335585617e-09,
+      "mass_extinction_m2_kg": 0.025611060199542127,
+      "required_metric_m_per_log10_tau": 799936.4777848955,
+      "dlog_pressure_dlog10_tau": 2.740147091229793,
+      "pressure_efold_width_log10_tau": 0.36494391239092006
+    }
+  }
+}

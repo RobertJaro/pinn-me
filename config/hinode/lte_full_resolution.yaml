@@ -1,0 +1,174 @@
+---
+# Full native Hinode/SOT-SP raster: 1024 scan positions x 512 slit pixels x
+# all 112 calibrated wavelength samples. Atomic/instrument resources must be
+# prepared before training; this run performs no network downloads.
+base_path: "/glade/work/rjarolim/lte/hinode_lte_v01"
+work_directory: "/glade/derecho/scratch/rjarolim/lte/hinode_lte_v01"
+
+# Deliberately no seed: initialize the coordinate network from fresh random
+# weights. Add `seed: <integer>` only for a reproducible comparison run.
+
+resources:
+  directory: "/glade/work/rjarolim/data/inversion/hinode_sp/resources"
+  instrument: "Hinode/SOT-SP"
+
+data:
+  type: hinode_lte
+  files: "/glade/work/rjarolim/data/inversion/hinode_sp/20110122_093128/*.fits"
+  # Explicit native detector extent. Python slice stops are exclusive.
+  scan_slice: [0, 1024]
+  slit_slice: [0, 512]
+  # One epoch traverses every valid inversion pixel exactly once.
+  batch_size: 256
+  validation_batch_size: 256
+  # A deterministic 1/16 diagnostic sample covers the full raster on a 4x4
+  # detector lattice (128x256 map samples for the native 512x1024 raster).
+  # It is not a held-out set. Set this to 1 only when the cost of synthesizing
+  # all 524,288 Stokes profiles at every validation epoch is acceptable.
+  validation_stride: 8
+  # Worker count is an operational choice for the target system. All loaders
+  # still use pin_memory=false as required.
+  num_workers: 8
+  continuum_edge_samples: 8
+  # Calibrate one detector response from a conservative quiet-Sun subset.
+  # The same scalar is applied to I,Q,U,V; no pixel or raster continuum is
+  # normalized away. Profiles are stored in fixed disk-center atlas-Ic units.
+  quiet_sun_max_fractional_polarization: 1.0e-2
+  quiet_sun_continuum_trim_quantiles: [0.05, 0.95]
+  minimum_quiet_sun_pixels: 1024
+
+atmosphere:
+  # One continuous coordinate network directly represents
+  # F(Solar-X, Solar-Y, log_tau500). These quadrature locations are evaluation
+  # samples, not fixed trainable atmospheric nodes.
+  coordinate_mode: log_tau
+  log_tau500: {min: -5.0, max: 1.0, count: 51}
+  # Smooth natural-log decoder constrained to the calibrated STiC table.
+  temperature_log10_bounds: [3.4, 4.0]
+  temperature_log_scale: 0.2
+  # Direct linear vector decoders, matching the spherical inversion convention.
+  # One raw network unit is 1000 m/s or 100 G. Hidden layers use
+  # variance-preserving random initialization; readout weights and biases also
+  # remain random. These explicit scales set the physical magnitude without
+  # special-casing any output channel.
+  velocity_scale_m_per_s: 1000.0
+  magnetic_scale_gauss: 100.0
+  microturbulence_log10_bounds: [1.0, 4.0]
+  # Exact calibrated STiC pressure-table bounds. The smooth decoder approaches
+  # but never crosses these endpoints. Natural-log sensitivity is one per raw
+  # network unit near initialization.
+  gas_pressure_log10_bounds: [-1.5, 6.0]
+  gas_pressure_log_scale: 1.0
+  # A slit scan mixes acquisition time with scan-x, so infer the requested
+  # static smooth field rather than an unidentifiable time dependence. Public
+  # coordinates are [time_hours, Solar-X Mm, Solar-Y Mm]; the entry point
+  # injects the raster-derived affine used to normalize Solar-X/Y. Optical
+  # depth is normalized linearly from [-5, 1] to [-1, 1].
+  model_config:
+    type: mlp
+    dim: 256
+    n_layers: 8
+    activation: swish
+    # Inputs are normalized Solar-X/Y and log_tau500. With the 512-pixel
+    # spatial normalization scale, fmax=16 gives a shortest encoded spatial
+    # period of about 64 native pixels. The same depth bandwidth gives a
+    # shortest encoded period of 0.375 dex over the six-dex interval.
+    encoding_config:
+      type: fourier
+      num_frequencies: [64, 64, 64]
+      max_frequencies: [16, 16, 16]
+      include_input: true
+
+synthesis:
+  # Joint synthesis of the complete Hinode/SP Fe I line pair.
+  line_ids: [FeI_6301.5008, FeI_6302.4932]
+
+instrument:
+  # Gaussian approximation to the approximately 25 mA pre-launch measured
+  # spectral response. The exact 112-point detector grid comes from the FITS.
+  fwhm_angstrom: 0.025
+  oversample: 4
+  truncate_sigma: 4.0
+
+training:
+  # Use 25 transfer points in every batch. The endpoints stay fixed; each
+  # interior base-grid point receives a uniform random shift bounded by half
+  # the spacing to its neighbors.
+  depth_sampling_config:
+    sample_count: 12
+  # Enforce hydrostatic equilibrium through optimization instead of an
+  # iterative pressure solve in every forward pass. Interior HSE points and
+  # top-pressure boundary points come from separate, freshly randomized
+  # datasets and do not reuse the radiative-transfer quadrature.
+  physics_config:
+    volume_points_per_step: 1024
+    # Sixteen random optical-depth surfaces per step, each normalized by the
+    # mean pressure of 64 independently sampled spatial points on that surface.
+    points_per_tau: 64
+    boundary_points_per_step: 256
+    validation_depth_points: 65
+    equations:
+      hse:
+        enabled: true
+        # Linear pressure HSE, normalized independently on every sampled tau
+        # surface by its spatial mean pressure.
+        weight: 1.0e-4
+      pressure_boundary:
+        enabled: true
+        # Fix the HSE integration constant using the verified FALC/STiC top
+        # pressure; this is a dimensionless log10 pressure-ratio residual.
+        weight: 1.0e-4
+  # Unsupported molecular absorption in cool umbrae is excluded from the fit.
+  wavelength_exclude_windows_angstrom: [[6302.04, 6302.14]]
+  lr_params:
+    start: 1.0e-3
+    end: 1.0e-4
+    iterations: auto
+
+# Requested HMI objective convention: linear I, asinh-scaled polarization and
+# equal component weights. This is a fit objective, not a Hinode noise chi^2.
+normalization:
+  asinh_alphas: {Q: 1.0e-2, U: 1.0e-2, V: 1.0e-2}
+
+stokes_loss:
+  type: mse
+
+weight:
+  I: 1.0
+  Q: 1.0
+  U: 1.0
+  V: 1.0
+
+check_val_every_n_epoch: 1
+visualization:
+  enabled: true
+  every_n_epochs: 1
+  # Four rows span the complete configured log_tau500 range and are ordered
+  # from high to low optical depth.
+  depth_layer_count: 4
+  evaluation_batch_size: 8192
+  # Caps the shared validation-derived grid used by both Stokes and atmosphere
+  # maps; they retain identical slit/scan shape and orientation.
+  max_map_pixels: 65536
+  # Full integrated maps use all validation samples; complete 4x112 spectra
+  # retained for percentile curves are bounded independently.
+  max_profile_samples: 4096
+  dpi: 220
+  # Additional optical-depth sections through the complete slit at the exact
+  # detector scan index. Each epoch logs parameter, B, and V Y-log(tau) panels.
+  yz_slice:
+    enabled: true
+    scan_index: 150
+  # Immediately log the randomly initialized atmosphere panels; Stokes
+  # comparison is added after each completed validation epoch.
+  include_initial: true
+
+trainer:
+  max_epochs: 100
+  log_every_n_steps: 1
+
+logging:
+  type: wandb
+  project: pinn-me-lte
+  tags: [hinode, sot-sp, lte, stratified, full-resolution]
+  name: hinode_lte_full_resolution

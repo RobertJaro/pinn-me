@@ -107,7 +107,7 @@ class PhysicsWeightSchedule:
 
     @classmethod
     def from_config(cls, config: Real | Mapping[str, Any]) -> "PhysicsWeightSchedule":
-        """Parse a fixed number or the existing scheduled-lambda mapping."""
+        """Parse a fixed number or a scheduled-weight mapping."""
         if isinstance(config, Real) and not isinstance(config, bool):
             value = float(config)
             return cls("fixed", value, value)
@@ -121,6 +121,23 @@ class PhysicsWeightSchedule:
                 f"Unknown physics-weight schedule {schedule_type!r}; "
                 f"expected one of {cls.SUPPORTED_TYPES}."
             )
+        allowed = (
+            {"type", "value", "start", "end", "warmup", "warmup_iterations"}
+            if schedule_type == "fixed"
+            else {
+                "type", "start", "end", "iterations", "warmup",
+                "warmup_iterations",
+            }
+        )
+        unknown = set(config) - allowed
+        if unknown:
+            raise TypeError(f"Unknown weight-schedule options: {sorted(unknown)}")
+        if (
+            "warmup" in config
+            and "warmup_iterations" in config
+            and config["warmup"] != config["warmup_iterations"]
+        ):
+            raise ValueError("warmup and warmup_iterations must match when both are set.")
         warmup_iterations = config.get("warmup_iterations", config.get("warmup", 0))
         if schedule_type == "fixed":
             supplied_values = [

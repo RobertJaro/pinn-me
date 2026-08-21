@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "abundance_scale": "log10(N_element/N_H) + 12",
+  "sources": {
+    "abundance": {
+      "citation": "Asplund, Amarsi & Grevesse 2021, A&A 653, A141, recommended solar photospheric abundances",
+      "doi": "10.1051/0004-6361/202140445",
+      "pinned_source": "asplund_2021_abundances",
+      "url": "https://arxiv.org/pdf/2105.01661v2",
+      "sha256": "b3aa4a0a2561992ce3f0aa75a6f9c14f9f2f4487de2bf3fe5eb8bf3782f7ef33"
+    },
+    "atomic_mass": {
+      "citation": "CIAAW 2024 standard and abridged standard atomic-weight tables; scalar representative/abridged values are used and published uncertainties are not propagated by this EOS",
+      "urls": [
+        "https://ciaaw.org/atomic-weights.htm",
+        "https://ciaaw.org/abridged-atomic-weights.htm"
+      ],
+      "pinned_sources": [
+        "ciaaw_standard_atomic_weights_2024",
+        "ciaaw_abridged_atomic_weights_2024"
+      ],
+      "sha256": [
+        "b48282594b1fb01eee3cbc9d469ce5e3483b628157ea1b09ede33e3476895cf2",
+        "f9e9554471749c55a624aec55151922470a7f4104c62811eb194fed9731b907d"
+      ]
+    },
+    "ionization_energy": {
+      "citation": "Barklem & Collet 2016, A&A 588, A96, CDS J/A+A/588/A96 table4",
+      "doi": "10.1051/0004-6361/201526961",
+      "vendored_file": "barklem_collet_2016_table4.dat"
+    }
+  },
+  "species": {
+    "H":  {"atomic_number": 1,  "abundance": 12.000, "atomic_mass_u": 1.008,      "ionization_ev": 13.5984, "second_ionization_ev": null},
+    "He": {"atomic_number": 2,  "abundance": 10.914, "atomic_mass_u": 4.002602,   "ionization_ev": 24.5874, "second_ionization_ev": 54.418},
+    "C":  {"atomic_number": 6,  "abundance": 8.46,   "atomic_mass_u": 12.011,     "ionization_ev": 11.2603, "second_ionization_ev": 24.385},
+    "N":  {"atomic_number": 7,  "abundance": 7.83,   "atomic_mass_u": 14.007,     "ionization_ev": 14.5341, "second_ionization_ev": 29.601},
+    "O":  {"atomic_number": 8,  "abundance": 8.69,   "atomic_mass_u": 15.999,     "ionization_ev": 13.6181, "second_ionization_ev": 35.121},
+    "Ne": {"atomic_number": 10, "abundance": 8.06,   "atomic_mass_u": 20.1797,    "ionization_ev": 21.5645, "second_ionization_ev": 40.963},
+    "Na": {"atomic_number": 11, "abundance": 6.22,   "atomic_mass_u": 22.989769,  "ionization_ev": 5.1391, "second_ionization_ev": 47.286},
+    "Mg": {"atomic_number": 12, "abundance": 7.55,   "atomic_mass_u": 24.305,     "ionization_ev": 7.6462, "second_ionization_ev": 15.035},
+    "Al": {"atomic_number": 13, "abundance": 6.43,   "atomic_mass_u": 26.981538,  "ionization_ev": 5.9858, "second_ionization_ev": 18.829},
+    "Si": {"atomic_number": 14, "abundance": 7.51,   "atomic_mass_u": 28.085,     "ionization_ev": 8.1517, "second_ionization_ev": 16.346},
+    "P":  {"atomic_number": 15, "abundance": 5.41,   "atomic_mass_u": 30.973762,  "ionization_ev": 10.4867, "second_ionization_ev": 19.769},
+    "S":  {"atomic_number": 16, "abundance": 7.12,   "atomic_mass_u": 32.06,      "ionization_ev": 10.3600, "second_ionization_ev": 23.338},
+    "K":  {"atomic_number": 19, "abundance": 5.07,   "atomic_mass_u": 39.0983,    "ionization_ev": 4.3407, "second_ionization_ev": 31.625},
+    "Ca": {"atomic_number": 20, "abundance": 6.30,   "atomic_mass_u": 40.078,     "ionization_ev": 6.1132, "second_ionization_ev": 11.872},
+    "Sc": {"atomic_number": 21, "abundance": 3.14,   "atomic_mass_u": 44.955908,  "ionization_ev": 6.5615, "second_ionization_ev": 12.800},
+    "Ti": {"atomic_number": 22, "abundance": 4.97,   "atomic_mass_u": 47.867,     "ionization_ev": 6.8281, "second_ionization_ev": 13.575},
+    "V":  {"atomic_number": 23, "abundance": 3.90,   "atomic_mass_u": 50.9415,    "ionization_ev": 6.7462, "second_ionization_ev": 14.620},
+    "Cr": {"atomic_number": 24, "abundance": 5.62,   "atomic_mass_u": 51.9961,    "ionization_ev": 6.7665, "second_ionization_ev": 16.486},
+    "Mn": {"atomic_number": 25, "abundance": 5.42,   "atomic_mass_u": 54.938044,  "ionization_ev": 7.4340, "second_ionization_ev": 15.640},
+    "Fe": {"atomic_number": 26, "abundance": 7.46,   "atomic_mass_u": 55.845,     "ionization_ev": 7.9025, "second_ionization_ev": 16.199},
+    "Co": {"atomic_number": 27, "abundance": 4.94,   "atomic_mass_u": 58.933194,  "ionization_ev": 7.8810, "second_ionization_ev": 17.084},
+    "Ni": {"atomic_number": 28, "abundance": 6.20,   "atomic_mass_u": 58.6934,    "ionization_ev": 7.6399, "second_ionization_ev": 18.169}
+  }
+}

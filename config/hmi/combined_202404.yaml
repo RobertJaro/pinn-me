@@ -37,7 +37,7 @@ training:
   check_val_every_n_epoch: 5
 #  val_check_interval: 2000
 
-lambda:
+weight:
   I: 1.0
   Q: 2.0
   U: 2.0

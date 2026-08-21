@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinn-me"
+version = "0.1.1"
+description = "Differentiable spectropolarimetric inversions with physics-informed neural networks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+  {name = "Robert Jarolim"},
+  {name = "Momchil Molnar"},
+]
+dependencies = [
+  "astropy>=5",
+  "drms>=0.6.2",
+  "matplotlib>=3.6",
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "python-dateutil>=2.8.2",
+  "pytorch-lightning>=2.6,<3",
+  "PyYAML>=6",
+  "scikit-image>=0.20",
+  "scikit-learn>=1.2",
+  "scipy>=1.10",
+  "sunpy>=5",
+  "torch>=2.6,<3",
+  "tqdm>=4.61.2",
+  "wandb>=0.13",
+  "zarr>=3.1,<4",
+]
+
+[project.optional-dependencies]
+test = [
+  "build>=1",
+  "pytest>=8",
+]
+
+[project.urls]
+Repository = "https://github.com/RobertJaro/pinn-me"
+
+[project.scripts]
+pinn-me-lte = "pme.inversion_lte:main"
+pinn-me-lte-export = "pme.evaluation.lte:main"
+pinn-me-lte-fetch-data = "pme.lte.fetch_data:main"
+pinn-me-lte-recovery = "pme.evaluation.lte_synthetic_recovery:main"
+
+[tool.setuptools.packages.find]
+include = ["pme*"]
+
+[tool.setuptools.package-data]
+"pme.lte" = [
+  "data/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: requires optional external scientific data or a comparatively slow end-to-end run",
+]

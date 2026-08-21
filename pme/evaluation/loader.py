@@ -67,7 +67,7 @@ class PINNMEOutput:
         self.spectral_response_by_acquisition = state.get('spectral_response_by_acquisition', {})
         self.stokes_normalization_by_instrument = state.get('stokes_normalization_by_instrument', {})
         self.stokes_loss_config = state.get('stokes_loss_config', {'type': 'mse'})
-        self.stokes_lambda_config = state.get('stokes_lambda_config')
+        self.stokes_weight_config = state.get('stokes_weight_config')
         self.physics_config = state.get('physics_config')
 
         self.times = state['times']

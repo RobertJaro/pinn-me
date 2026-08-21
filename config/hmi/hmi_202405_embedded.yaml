@@ -34,7 +34,7 @@ model:
 training:
   epochs: 500
 
-lambda:
+weight:
   I: 1.0
   Q: 1.0
   U: 1.0

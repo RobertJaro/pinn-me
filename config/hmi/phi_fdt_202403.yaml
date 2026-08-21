@@ -34,7 +34,7 @@ training:
   check_val_every_n_epoch: 50
   time_shift_config: {scale: 0.0, iterations: 0.0}
 
-lambda:
+weight:
   I: 10.0
   Q: 1.0
   U: 1.0

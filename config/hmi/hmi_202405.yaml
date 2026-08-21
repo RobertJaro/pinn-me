@@ -41,7 +41,7 @@ normalization:
   # Linear for weak polarization; compresses Q/U/V above 1% of the local continuum.
   asinh_alphas: { Q: 1.0e-3, U: 1.0e-3, V: 1.0e-3 }
 
-lambda:
+weight:
   I: 1.0
   Q: 1.0
   U: 1.0

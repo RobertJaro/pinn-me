@@ -33,7 +33,7 @@ training:
   epochs: 1000
   check_val_every_n_epoch: 10
 
-lambda:
+weight:
   I: 1.0
   Q: 1.0
   U: 1.0

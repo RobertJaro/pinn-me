@@ -44,55 +44,22 @@ class PhysicsRegularizationResult:
 
 
 def split_stokes_and_physics_config(
-    lambda_config: Mapping[str, Any] | None,
+    weight_config: Mapping[str, Any] | None,
     physics_config: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Separate legacy mixed lambdas into Stokes and physics configuration.
-
-    New configurations put constraint schedules under ``physics.constraints``.
-    Physics keys in the historical top-level ``lambda`` map remain supported so
-    existing experiments fail neither mysteriously nor halfway through parsing.
-    """
-    lambda_config = copy.deepcopy(dict(lambda_config or {}))
+    """Validate separate Stokes weights and physics configuration."""
+    weight_config = copy.deepcopy(dict(weight_config or {}))
     physics_config = (
         None if physics_config is None else copy.deepcopy(dict(physics_config))
     )
 
-    unknown = set(lambda_config).difference((*STOKES_COMPONENTS, *PHYSICS_CONSTRAINTS))
+    unknown = set(weight_config).difference(STOKES_COMPONENTS)
     if unknown:
         raise ValueError(
-            f"Unknown lambda keys {sorted(unknown)}; expected Stokes components "
-            f"{STOKES_COMPONENTS} or physics constraints {sorted(PHYSICS_CONSTRAINTS)}."
+            f"Unknown Stokes weight keys {sorted(unknown)}; expected "
+            f"{STOKES_COMPONENTS}. Physics weights belong under physics.constraints."
         )
-
-    legacy_constraints = {
-        name: lambda_config.pop(name)
-        for name in tuple(lambda_config)
-        if name in PHYSICS_CONSTRAINTS
-    }
-    if not legacy_constraints:
-        return lambda_config, physics_config
-
-    warnings.warn(
-        "Physics weights in the top-level lambda mapping are deprecated; move "
-        "them to physics.constraints.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    physics_config = {} if physics_config is None else physics_config
-    configured_constraints = physics_config.get("constraints")
-    if configured_constraints:
-        overlap = set(configured_constraints).intersection(legacy_constraints)
-        if overlap:
-            raise ValueError(
-                f"Physics constraints {sorted(overlap)} are configured in both lambda "
-                "and physics.constraints."
-            )
-        configured_constraints = {**legacy_constraints, **configured_constraints}
-    else:
-        configured_constraints = legacy_constraints
-    physics_config["constraints"] = configured_constraints
-    return lambda_config, physics_config
+    return weight_config, physics_config
 
 
 def _minimum_covering_longitude(

@@ -324,7 +324,7 @@ class GenericDataModule(LightningDataModule):
                                    vmax=stokes_min_max[i])
                 axs[i].set_title(label)
                 fig.colorbar(im, ax=axs[i])
-            fig.suptitle(f'lambda: {self.wavelength_grid[l]:.2f}')
+            fig.suptitle(f'wavelength: {self.wavelength_grid[l]:.2f}')
             fig.tight_layout()
             wandb.log({'Stokes vector': fig})
             plt.close('all')
@@ -374,13 +374,13 @@ class GenericDataModule(LightningDataModule):
 
         train_dataset = BatchDataset(coords, mu, stokes_profile, batch_size=self.batch_size)
 
-        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=False,
                                  sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
         return data_loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
-                                 pin_memory=True, shuffle=False)
+                                 pin_memory=False, shuffle=False)
         return data_loader
 
 
@@ -674,13 +674,13 @@ class SHARPDataModule(LightningDataModule):
 
         train_dataset = BatchDataset(coords, stokes_profile, batch_size=self.batch_size)
 
-        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=False,
                                  sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
         return data_loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
-                                 pin_memory=True, shuffle=False)
+                                 pin_memory=False, shuffle=False)
         return data_loader
 
 

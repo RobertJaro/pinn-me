@@ -50,7 +50,7 @@ class MESphericalModule(LightningModule):
                  stokes_loss_config=None,
                  physics_config=None, physics_domain=None,
                  time_shift_config=None,
-                 lambda_config=None):
+                 weight_config=None):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 1e-3, "end": 1e-4, "iterations": 1e5}
 
@@ -113,26 +113,25 @@ class MESphericalModule(LightningModule):
         self.stokes_loss = StokesLossModule(**stokes_loss_config)
         self.stokes_loss_config = self.stokes_loss.configuration()
         # Keep the data objective and continuous physics regularization as two
-        # independent components. Historical mixed lambda mappings are split by
-        # one compatibility adapter before either component is constructed.
-        lambda_config, physics_config = split_stokes_and_physics_config(
-            lambda_config, physics_config,
+        # independent components with independent schedules.
+        weight_config, physics_config = split_stokes_and_physics_config(
+            weight_config, physics_config,
         )
-        lambda_config = {
-            component: lambda_config.get(component, 1.0)
+        weight_config = {
+            component: weight_config.get(component, 1.0)
             for component in ('I', 'Q', 'U', 'V')
         }
-        self.stokes_lambda_schedules = {
+        self.stokes_weight_schedules = {
             component: PhysicsWeightSchedule.from_config(value)
-            for component, value in lambda_config.items()
+            for component, value in weight_config.items()
         }
-        self.stokes_lambda_config = {
+        self.stokes_weight_config = {
             component: schedule.configuration()
-            for component, schedule in self.stokes_lambda_schedules.items()
+            for component, schedule in self.stokes_weight_schedules.items()
         }
-        self.lambdas = nn.ParameterDict({
+        self.stokes_weights = nn.ParameterDict({
             component: nn.Parameter(torch.tensor(schedule.start), requires_grad=False)
-            for component, schedule in self.stokes_lambda_schedules.items()
+            for component, schedule in self.stokes_weight_schedules.items()
         })
         self.physics_regularization = PhysicsRegularization(
             physics_config,
@@ -155,9 +154,9 @@ class MESphericalModule(LightningModule):
         self.val_outputs = []
 
     @torch.no_grad()
-    def _set_stokes_lambda_step(self, global_step):
-        for component, schedule in self.stokes_lambda_schedules.items():
-            self.lambdas[component].fill_(schedule.value_at(global_step))
+    def _set_stokes_weight_step(self, global_step):
+        for component, schedule in self.stokes_weight_schedules.items():
+            self.stokes_weights[component].fill_(schedule.value_at(global_step))
 
     def _get_spectral_response(self, batch, instrument_id):
         keys = ('spectral_offsets', 'spectral_weights', 'continuum_weights')
@@ -208,7 +207,7 @@ class MESphericalModule(LightningModule):
         """Apply the established wavelength, sample, and Stokes reductions."""
         sample_loss = wavelength_loss.sum(dim=-1)
         component_loss = sample_loss.mean(dim=0)
-        weights = torch.stack([self.lambdas[key] for key in ('I', 'Q', 'U', 'V')])
+        weights = torch.stack([self.stokes_weights[key] for key in ('I', 'Q', 'U', 'V')])
         total = torch.einsum('...i,i->...', sample_loss, weights).mean()
         return component_loss, total
 
@@ -250,7 +249,7 @@ class MESphericalModule(LightningModule):
         }
 
     def training_step(self, batch, batch_nb):
-        self._set_stokes_lambda_step(int(self.global_step))
+        self._set_stokes_weight_step(int(self.global_step))
         instrument_ids = list(batch.keys())
 
         coords = torch.cat([batch[k]['coords'] for k in instrument_ids])
@@ -336,8 +335,8 @@ class MESphericalModule(LightningModule):
         logging_loss = {"I": I_loss, "Q": Q_loss, "U": U_loss, "V": V_loss,
                         "stokes_loss": stokes_total}
         logging_loss.update({
-            f"lambda.{component}": value.detach()
-            for component, value in self.lambdas.items()
+            f"weight.{component}": value.detach()
+            for component, value in self.stokes_weights.items()
         })
 
         physics = self.physics_regularization.evaluate(
@@ -366,16 +365,6 @@ class MESphericalModule(LightningModule):
     def correct_limb_effects(self, parameters, limb_correction):
         return correct_spherical_limb_effects(parameters, limb_correction)
 
-    @staticmethod
-    def _next_exponential_lambda(value, end, gamma):
-        end = value.new_tensor(end)
-        candidate = value * gamma
-        if value < end:
-            return torch.minimum(candidate, end)
-        if value > end:
-            return torch.maximum(candidate, end)
-        return value
-
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
         learning_rate = self.optimizers().param_groups[0]['lr']
@@ -391,21 +380,21 @@ class MESphericalModule(LightningModule):
         # Physics partitions and time-stratified Stokes batches differ by rank.
         # Synchronizing here reports the actual DDP objective rather than rank
         # zero's current frame/partition.
-        lambda_metrics = {
+        weight_metrics = {
             key: value.mean() for key, value in outputs.items()
-            if key.startswith('lambda.')
+            if key.startswith('weight.')
         }
         train_metrics = {
             f'train.{key}': value.mean() for key, value in outputs.items()
-            if not key.startswith('lambda.')
+            if not key.startswith('weight.')
         }
-        if lambda_metrics:
-            self.log_dict(lambda_metrics, sync_dist=True)
+        if weight_metrics:
+            self.log_dict(weight_metrics, sync_dist=True)
         self.log_dict(train_metrics, sync_dist=True)
 
     @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
-        self._set_stokes_lambda_step(int(self.global_step))
+        self._set_stokes_weight_step(int(self.global_step))
         coords = batch['coords']
         mu = batch['mu']
         stokes_true = batch['stokes']
@@ -468,7 +457,8 @@ class MESphericalModule(LightningModule):
         diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
         objective_components = objective_wavelength.sum(-1)
         objective_weights = torch.stack([
-            self.lambdas['I'], self.lambdas['Q'], self.lambdas['U'], self.lambdas['V']
+            self.stokes_weights['I'], self.stokes_weights['Q'],
+            self.stokes_weights['U'], self.stokes_weights['V']
         ])
         objective = torch.einsum('...i,i->...', objective_components, objective_weights)
         objective_valid = self.stokes_loss.valid_sample_mask(stokes_true)
@@ -1038,8 +1028,8 @@ class MESphericalModule(LightningModule):
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         checkpoint['pme_stokes_loss_config'] = copy.deepcopy(self.stokes_loss_config)
-        checkpoint['pme_stokes_lambda_config'] = copy.deepcopy(
-            self.stokes_lambda_config
+        checkpoint['pme_stokes_weight_config'] = copy.deepcopy(
+            self.stokes_weight_config
         )
         checkpoint['pme_normalization_config'] = self._normalization_objective_config(
             self.normalization.asinh_alphas
@@ -1104,46 +1094,33 @@ class MESphericalModule(LightningModule):
                 'Use a fresh base_path when changing the objective transform.'
             )
 
-        checkpoint_lambda_config = checkpoint.get('pme_stokes_lambda_config')
-        if checkpoint_lambda_config is None:
-            checkpoint_lambda_config = {
-                component: PhysicsWeightSchedule.from_config(
-                    float(state_dict[f'lambdas.{component}'])
-                ).configuration()
-                for component in ('I', 'Q', 'U', 'V')
-            }
-        if checkpoint_lambda_config != self.stokes_lambda_config:
+        checkpoint_weight_config = checkpoint.get('pme_stokes_weight_config')
+        if checkpoint_weight_config is None:
+            raise RuntimeError(
+                'This checkpoint predates the explicit Stokes-weight schema. '
+                'Start a fresh run with a top-level weight configuration.'
+            )
+        if checkpoint_weight_config != self.stokes_weight_config:
             warnings.warn(
                 'The configured Stokes-weight schedules differ from the checkpoint; '
                 'the configured schedules will replace the checkpoint weights and '
                 'continue from its global step. '
-                f'Checkpoint: {checkpoint_lambda_config}; '
-                f'configured: {self.stokes_lambda_config}.',
+                f'Checkpoint: {checkpoint_weight_config}; '
+                f'configured: {self.stokes_weight_config}.',
                 UserWarning,
                 stacklevel=2,
             )
         checkpoint_step = int(checkpoint.get('global_step', 0))
-        for component, schedule in self.stokes_lambda_schedules.items():
-            key = f'lambdas.{component}'
+        for component, schedule in self.stokes_weight_schedules.items():
+            key = f'stokes_weights.{component}'
             configured_value = schedule.value_at(checkpoint_step)
-            reference = state_dict.get(key, self.lambdas[component].detach())
+            reference = state_dict.get(key, self.stokes_weights[component].detach())
             state_dict[key] = reference.new_tensor(configured_value)
-        checkpoint['pme_stokes_lambda_config'] = copy.deepcopy(
-            self.stokes_lambda_config
+        checkpoint['pme_stokes_weight_config'] = copy.deepcopy(
+            self.stokes_weight_config
         )
 
         checkpoint_physics_config = checkpoint.get('pme_physics_config')
-        legacy_physics_keys = {
-            key.split('.', 1)[1]
-            for key in state_dict
-            if key.startswith('lambdas.') and key.split('.', 1)[1] not in ('I', 'Q', 'U', 'V')
-        }
-        if checkpoint_physics_config is None and legacy_physics_keys:
-            raise RuntimeError(
-                'This checkpoint used legacy batch-local physics regularization '
-                f'({sorted(legacy_physics_keys)}). It cannot be resumed with the new '
-                'global collocation objective; use a fresh base_path.'
-            )
         if checkpoint_physics_config != self.physics_config:
             warnings.warn(
                 'The configured physics objective or collocation domain differs from '
@@ -1155,14 +1132,6 @@ class MESphericalModule(LightningModule):
                 stacklevel=2,
             )
         checkpoint['pme_physics_config'] = copy.deepcopy(self.physics_config)
-
-        # remove old lambdas
-        remove_keys = []
-        for k, v in state_dict.items():
-            if 'lambdas' in k and k.split('.')[1] not in self.lambdas.keys():
-                print(f'Remove lambda: {k}')
-                remove_keys.append(k)
-        [state_dict.pop(k) for k in remove_keys]
 
         self.load_state_dict(state_dict, strict=False)
         self.validation_outputs = {}  # reset validation outputs

@@ -71,12 +71,12 @@ val_check_interval = training_config.pop('val_check_interval', None)
 num_sanity_val_steps = training_config.pop('num_sanity_val_steps', 0)
 epochs = training_config.pop('epochs', 50)
 instrument_config = copy.deepcopy(config.get('instrument', []))
-lambda_config = copy.deepcopy(config.get('lambda', {}))
+weight_config = copy.deepcopy(config.get('weight', {}))
 normalization_config = copy.deepcopy(config.get('normalization', {}))
 stokes_loss_config = copy.deepcopy(config.get('stokes_loss', {}))
 physics_config = copy.deepcopy(config.get('physics'))
-lambda_config, physics_config = split_stokes_and_physics_config(
-    lambda_config, physics_config,
+weight_config, physics_config = split_stokes_and_physics_config(
+    weight_config, physics_config,
 )
 physics_domain = None
 if physics_config is not None:
@@ -92,7 +92,7 @@ me_module = MESphericalModule(image_shape=data_module.image_shape, wavelength_co
                               physics_config=physics_config, physics_domain=physics_domain,
                               instrument_config=instrument_config,
                               Rs_per_ds=data_module.Rs_per_ds, seconds_per_dt=data_module.seconds_per_dt,
-                              gauss_per_dB=data_module.gauss_per_dB, lambda_config=lambda_config,
+                              gauss_per_dB=data_module.gauss_per_dB, weight_config=weight_config,
                               **training_config)
 
 checkpoint_callback = ModelCheckpoint(dirpath=base_path,
@@ -121,7 +121,7 @@ def save(*args, **kwargs):
         'instrument_config': instrument_config,
         'normalization_config': normalization_config,
         'stokes_loss_config': me_module.stokes_loss_config,
-        'stokes_lambda_config': me_module.stokes_lambda_config,
+        'stokes_weight_config': me_module.stokes_weight_config,
         'physics_config': me_module.physics_config,
         'spectral_response_files': data_module.spectral_response_files,
         'spectral_response_by_acquisition': data_module.spectral_response_by_acquisition,

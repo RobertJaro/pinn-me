@@ -33,10 +33,12 @@ training:
   check_val_every_n_epoch: 2
   time_shift_config: {scale: 0.0, iterations: 0.0}
 
-lambda:
+weight:
   I: 1.0
   Q: 0.2
   U: 0.2
   V: 1.0
-  divergence: 1.0e-3
-  force_free: 1.0e-3
+physics:
+  constraints:
+    divergence: 1.0e-3
+    force_free: 1.0e-3

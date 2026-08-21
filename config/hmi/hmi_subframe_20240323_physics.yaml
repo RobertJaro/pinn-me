@@ -68,7 +68,7 @@ physics:
     induction: 1.0e-4
     force_free: 1.0e-4
 
-lambda:
+weight:
   I: 1.0
   Q: { type: exponential, start: 1.0e-6, end: 1.0, iterations: 10000 }
   U: { type: exponential, start: 1.0e-6, end: 1.0, iterations: 10000 }
