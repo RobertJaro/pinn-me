@@ -19,6 +19,33 @@ def _validate_depth_grid(log_tau500: torch.Tensor, depth: int) -> torch.Tensor:
     return grid
 
 
+def _validate_geometric_height(
+    geometric_height_m: torch.Tensor,
+    depth: int,
+    batch_shape: torch.Size,
+) -> torch.Tensor:
+    """Validate a top-to-bottom geometric-height grid.
+
+    A learned height mapping may be different for every atmosphere column, so
+    the accepted shape is either ``[depth]`` or ``[*batch_shape, depth]``.
+    Monotonicity is deliberately enforced by the differentiable tau-mapping
+    objective rather than a hard runtime rejection: retaining signed layer
+    thicknesses lets a wrongly oriented mapping receive a corrective gradient.
+    """
+
+    height = torch.as_tensor(geometric_height_m)
+    if height.shape == (depth,):
+        height = torch.broadcast_to(height, (*batch_shape, depth))
+    elif height.shape != (*batch_shape, depth):
+        raise ValueError(
+            "geometric_height_m must have shape [depth] or "
+            f"{(*batch_shape, depth)}, received {tuple(height.shape)}"
+        )
+    if not torch.isfinite(height).all():
+        raise ValueError("geometric_height_m must contain only finite values")
+    return height
+
+
 def _broadcast_mu(mu: torch.Tensor | float, batch_shape: torch.Size, like: torch.Tensor) -> torch.Tensor:
     value = torch.as_tensor(mu, dtype=like.dtype, device=like.device)
     if value.ndim == len(batch_shape) + 1 and value.shape[-1] == 1:
@@ -44,12 +71,19 @@ class PolarizedFormalSolver(nn.Module):
     implementation.  It is deliberately kept independent of atmosphere, EOS,
     and neural-network code.
 
-    The transfer equation is
+    The optical-depth transfer equation is
 
     ``mu dI/dtau_500 = K_lambda (I - S)``
 
-    with optical depth increasing inward.  ``K_lambda`` is therefore normalized
-    per unit vertical ``tau_500``.
+    with optical depth increasing inward. ``K_lambda`` is normalized per unit
+    vertical ``tau_500``. When geometric height and ``alpha500`` are supplied,
+    the same solver instead evaluates
+
+    ``mu dI/dz = -K_lambda,z (I - S)``,
+
+    where ``K_lambda,z = alpha500 K_lambda`` is in inverse metres and height
+    increases upward. The atmosphere remains sampled in optical depth; only
+    the formal-solution line element changes.
     """
 
     def forward(
@@ -59,6 +93,9 @@ class PolarizedFormalSolver(nn.Module):
         log_tau500: torch.Tensor,
         mu: torch.Tensor | float = 1.0,
         bottom_boundary: torch.Tensor | None = None,
+        *,
+        geometric_height_m: torch.Tensor | None = None,
+        alpha500: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return emergent Stokes vectors with shape ``[..., wavelength, 4]``.
 
@@ -76,6 +113,13 @@ class PolarizedFormalSolver(nn.Module):
         bottom_boundary:
             Optional incident Stokes vector ``[..., wavelength, 4]``.  The
             bottom source vector is used when omitted.
+        geometric_height_m:
+            Optional physical height sampled on the same top-to-bottom depth
+            axis. May vary over the leading atmosphere batch dimensions.
+        alpha500:
+            Total 5000-Angstrom continuum extinction in inverse metres. It is
+            required with ``geometric_height_m`` and converts the normalized
+            propagation matrix to a dimensional one.
         """
 
         matrix = torch.as_tensor(propagation_matrix)
@@ -94,9 +138,36 @@ class PolarizedFormalSolver(nn.Module):
 
         depth = matrix.shape[-4]
         grid = _validate_depth_grid(log_tau500, depth).to(matrix)
-        tau = torch.pow(matrix.new_tensor(10.0), grid)
         batch_shape = matrix.shape[:-4]
         ray_mu = _broadcast_mu(mu, batch_shape, matrix)
+        use_geometric_height = geometric_height_m is not None or alpha500 is not None
+        if use_geometric_height:
+            if geometric_height_m is None or alpha500 is None:
+                raise ValueError(
+                    "geometric_height_m and alpha500 must be supplied together"
+                )
+            height = _validate_geometric_height(
+                geometric_height_m, depth, batch_shape
+            ).to(matrix)
+            reference_extinction = torch.as_tensor(
+                alpha500, dtype=matrix.dtype, device=matrix.device
+            )
+            if reference_extinction.shape != (*batch_shape, depth):
+                raise ValueError(
+                    "alpha500 must have shape "
+                    f"{(*batch_shape, depth)}, received "
+                    f"{tuple(reference_extinction.shape)}"
+                )
+            if not torch.isfinite(reference_extinction).all() or torch.any(
+                reference_extinction <= 0
+            ):
+                raise ValueError("alpha500 must be finite and strictly positive")
+            dimensional_matrix = (
+                matrix * reference_extinction[..., :, None, None, None]
+            )
+        else:
+            tau = torch.pow(matrix.new_tensor(10.0), grid)
+            dimensional_matrix = None
 
         stokes = source[..., -1, :, :] if bottom_boundary is None else bottom_boundary
         expected_boundary = matrix.shape[:-4] + matrix.shape[-3:-2] + (4,)
@@ -109,11 +180,18 @@ class PolarizedFormalSolver(nn.Module):
         identity = identity.expand(*matrix.shape[:-4], matrix.shape[-3], 4, 4)
         for upper in range(depth - 2, -1, -1):
             lower = upper + 1
-            delta_tau = tau[lower] - tau[upper]
-            midpoint_matrix = 0.5 * (
-                matrix[..., upper, :, :, :] + matrix[..., lower, :, :, :]
-            )
-            path_scale = delta_tau / ray_mu
+            if dimensional_matrix is None:
+                layer_measure = tau[lower] - tau[upper]
+                midpoint_matrix = 0.5 * (
+                    matrix[..., upper, :, :, :] + matrix[..., lower, :, :, :]
+                )
+            else:
+                layer_measure = height[..., upper] - height[..., lower]
+                midpoint_matrix = 0.5 * (
+                    dimensional_matrix[..., upper, :, :, :]
+                    + dimensional_matrix[..., lower, :, :, :]
+                )
+            path_scale = layer_measure / ray_mu
             attenuation = torch.matrix_exp(
                 -midpoint_matrix * path_scale[..., None, None, None]
             )

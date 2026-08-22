@@ -1,10 +1,11 @@
 """Smooth neural representation of a depth-stratified LTE atmosphere.
 
-The operational representation is one continuous coordinate network
-``F(x, y, log_tau500)``.  The retained Hinode scan time is deliberately ignored
-for a single-raster inversion because it is degenerate with scan position.
-An experimental geometric-height composition remains available explicitly,
-but is not part of the default Hinode inversion.
+The operational representation composes a learned optical-to-geometric mapping
+``Z(x, y, log_tau500)`` with one physical coordinate network ``F(x, y, z)``.
+Optical depth remains the sampling and top-boundary coordinate while radiative
+transfer and differential physics use the inferred geometric atmosphere. The
+retained Hinode scan time is deliberately ignored for a single-raster inversion
+because it is degenerate with scan position.
 """
 
 from __future__ import annotations
@@ -190,24 +191,21 @@ class StratifiedAtmosphere:
         return -self.velocity_field[..., 2]
 
 class GeometricHeightModel(nn.Module):
-    """Direct smooth mapping ``Z(x, y, log10(tau500)) -> z``.
+    """Linear tau-height mapping plus a learned geometric perturbation.
 
-    One ordinary coordinate MLP represents the complete mapping.  Its spatial
-    inputs and optical-depth input are normalized to order-unity intervals and
-    its scalar output is converted to metres by ``height_scale_m``.  The only
-    gauge condition removes the mean height at one optical depth over a fixed
-    FOV quadrature.  It fixes the unobservable global translation without
-    flattening that optical-depth surface or restricting its corrugation.
-
-    No hand-designed depth basis or monotonic transform is used.  The physical
-    optical-depth equation constrains both the magnitude and sign of ``-dz/dq``.
+    ``z = -m0 * (log_tau500 - gauge_log_tau500) + 0.1*m0*r(x, y, log_tau500)``.
+    The coordinate MLP represents the unconstrained dimensionless residual
+    ``r`` and starts at zero. The physical optical-depth equation then learns
+    departures from the positive base metric ``m0``. The gauge removes the
+    mean perturbation at the reference optical depth without suppressing
+    corrugation.
     """
 
     def __init__(
         self,
         log_tau500,
         *,
-        height_scale_m: float = 1_000_000.0,
+        base_scale_m_per_log_tau: float = 150_000.0,
         gauge_log_tau500: float = 0.0,
         gauge_reference_coords=None,
         spatial_coordinate_center_mm=(0.0, 0.0),
@@ -218,8 +216,8 @@ class GeometricHeightModel(nn.Module):
         grid = _as_float_tensor(log_tau500, name="log_tau500")
         if grid.ndim != 1 or grid.numel() < 2 or not torch.all(grid[1:] > grid[:-1]):
             raise ValueError("Geometric-height mapping requires an increasing depth grid.")
-        if not float(height_scale_m) > 0:
-            raise ValueError("height_scale_m must be positive.")
+        if not float(base_scale_m_per_log_tau) > 0:
+            raise ValueError("base_scale_m_per_log_tau must be positive.")
         gauge_log_tau500 = float(gauge_log_tau500)
         if not float(grid[0]) <= gauge_log_tau500 <= float(grid[-1]):
             raise ValueError("gauge_log_tau500 must lie inside the represented domain.")
@@ -255,7 +253,8 @@ class GeometricHeightModel(nn.Module):
                 raise ValueError("gauge_reference_coords must contain at least one point.")
             gauge_reference_type = "fixed valid-FOV equal-pixel quadrature"
         self.register_buffer("gauge_reference_coords", gauge_coords)
-        self.height_scale_m = float(height_scale_m)
+        self.base_scale_m_per_log_tau = float(base_scale_m_per_log_tau)
+        self.perturbation_scale_m = 0.1 * self.base_scale_m_per_log_tau
         self.gauge_log_tau500 = gauge_log_tau500
         self.gauge_reference_type = gauge_reference_type
         config = dict(model_config or {
@@ -283,6 +282,8 @@ class GeometricHeightModel(nn.Module):
             self.network,
             activation=str(config.get("activation", "silu")),
         )
+        nn.init.zeros_(self.network.out_layer.weight)
+        nn.init.zeros_(self.network.out_layer.bias)
 
     @property
     def top_log_tau500(self) -> torch.Tensor:
@@ -335,7 +336,11 @@ class GeometricHeightModel(nn.Module):
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *paired_q.shape, 1
         )
-        return self.height_scale_m * raw[..., 0]
+        base_height = -self.base_scale_m_per_log_tau * (
+            paired_q - paired_q.new_tensor(self.gauge_log_tau500)
+        )
+        perturbation = self.perturbation_scale_m * raw[..., 0]
+        return base_height + perturbation
 
     def _gauge_mean_m(self, reference: torch.Tensor) -> torch.Tensor:
         coords = self.gauge_reference_coords.to(reference)
@@ -362,7 +367,7 @@ class GeometricHeightModel(nn.Module):
         *,
         create_graph: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``z`` and ``-dz/dlog10(tau500)`` from the direct MLP."""
+        """Return total ``z`` and ``-dz/dlog10(tau500)``."""
 
         coords, paired_q = self._validate_inputs(coords, log_tau500)
         if not paired_q.requires_grad:
@@ -399,7 +404,7 @@ class GeometricHeightModel(nn.Module):
 
     def metadata(self) -> dict:
         return {
-            "type": "direct coordinate MLP Z(x,y,log10(tau500))",
+            "type": "linear base mapping plus coordinate-MLP height perturbation",
             "unit": "m",
             "orientation": "z increases upward; log_tau500 increases inward",
             "gauge": (
@@ -413,10 +418,20 @@ class GeometricHeightModel(nn.Module):
             "gauge_reference_type": self.gauge_reference_type,
             "gauge_reference_point_count": int(self.gauge_reference_coords.shape[0]),
             "gauge_log_tau500": self.gauge_log_tau500,
-            "height_scale_m": self.height_scale_m,
+            "base_scale_m_per_log_tau": self.base_scale_m_per_log_tau,
+            "perturbation_scale_m": self.perturbation_scale_m,
+            "perturbation_scale_fraction_of_base": 0.1,
+            "perturbation_parameterization": (
+                "unconstrained dimensionless MLP output multiplied by 0.1 times "
+                "base_scale_m_per_log_tau"
+            ),
+            "perturbation_initialization": "zero output readout",
             "optical_depth_transform": "linear configured interval -> [-1, 1]",
-            "monotonicity": "constrained by the configured tau-mapping physics loss",
-            "metric_api": "automatic differentiation of the direct coordinate MLP",
+            "monotonicity": (
+                "positive linear base metric plus perturbation constrained by the "
+                "configured tau-mapping physics loss"
+            ),
+            "metric_api": "automatic differentiation of base plus perturbation",
             "runtime_iterations": 0,
             "spatial_coordinates": {
                 "public_input": "helioprojective Solar-X/Solar-Y in Mm",

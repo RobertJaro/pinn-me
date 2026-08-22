@@ -106,7 +106,8 @@ class LTEPhysicsState:
     Spatial derivatives, when present, use SI geometric coordinates
     ``[x_m, y_m, z_m]``. Direct-tau HSE instead stores only
     ``dP/dlog10(tau500)``.
-    ``jacobian`` has shape ``[sample, primitive, xyz]`` and ``jacobian_slices``
+    Geometric force balance differentiates gas pressure itself, not its
+    logarithm. ``jacobian`` has shape ``[sample, primitive, xyz]`` and ``jacobian_slices``
     maps primitive names to its component slices. It is ``None`` when the
     active equations are algebraic and require no derivatives. Magnetic-field
     values and their Jacobian are in gauss and gauss per metre, respectively;
@@ -456,7 +457,7 @@ class LTEPhysicsModule(nn.Module):
         )
         derivative_names = set()
         if "hse" in active_equations:
-            derivative_names.add("log_pressure")
+            derivative_names.add("pressure")
         if "continuity" in active_equations:
             derivative_names.update(("log_density", "velocity"))
         if active_equations & {"divergence_b", "mhs", "induction", "momentum"}:
@@ -464,17 +465,17 @@ class LTEPhysicsModule(nn.Module):
         if active_equations & {"induction", "momentum"}:
             derivative_names.add("velocity")
         if active_equations & {"mhs", "momentum"}:
-            derivative_names.add("log_pressure")
+            derivative_names.add("pressure")
 
         candidates = {
-            "log_pressure": torch.log(pressure),
+            "pressure": pressure,
             "log_density": None if density is None else torch.log(density),
             "magnetic": magnetic_gauss,
             "velocity": velocity,
         }
         primitives = {
             name: candidates[name]
-            for name in ("log_pressure", "log_density", "magnetic", "velocity")
+            for name in ("pressure", "log_density", "magnetic", "velocity")
             if name in derivative_names
         }
         jacobian, slices = _joint_pointwise_jacobian(
@@ -550,21 +551,26 @@ class LTEPhysicsModule(nn.Module):
                     state.log_tau500,
                 )
             else:
-                grad_log_p = state.derivative("log_pressure")[:, 0]
-                force_unit = self.normalization.force_density_dyn_per_cm3
-                pressure_force = (
-                    N_PER_M3_TO_DYN_PER_CM3
-                    * state.gas_pressure
-                    * grad_log_p[:, 2]
-                    / force_unit
+                pressure_gradient = state.derivative("pressure")[:, 0, 2]
+                tiny = torch.finfo(state.gas_pressure.dtype).tiny
+                surface_pressure = _tau_surface_mean(
+                    state.gas_pressure, state.log_tau500
+                ).clamp_min(tiny)
+                predicted_pressure_derivative_log_tau = (
+                    -pressure_gradient * state.metric_m_per_log_tau
                 )
-                gravity_force = (
-                    N_PER_M3_TO_DYN_PER_CM3
-                    * state.mass_density
+                required_pressure_derivative_log_tau = (
+                    state.mass_density
                     * self.gravity_m_per_s2
-                    / force_unit
+                    * state.metric_m_per_log_tau
                 )
-                residual = pressure_force + gravity_force
+                # Work in the retained tau coordinate while differentiating P
+                # itself. The only normalization is the detached mean pressure
+                # on each shared optical-depth surface.
+                residual = (
+                    predicted_pressure_derivative_log_tau
+                    - required_pressure_derivative_log_tau
+                ) / surface_pressure.detach()
             losses["hse"] = residual.square().mean()
             residual_norms["hse"] = residual.abs()
 
@@ -609,7 +615,7 @@ class LTEPhysicsModule(nn.Module):
             rho = state.mass_density
             grad_p = (
                 N_PER_M3_TO_DYN_PER_CM3
-                * (state.gas_pressure[:, None] * state.derivative("log_pressure")[:, 0])
+                * state.derivative("pressure")[:, 0]
                 / self.normalization.force_density_dyn_per_cm3
             )
             gravity = torch.zeros_like(grad_p)
@@ -657,7 +663,7 @@ class LTEPhysicsModule(nn.Module):
             rho = state.mass_density
             grad_p = (
                 N_PER_M3_TO_DYN_PER_CM3
-                * (state.gas_pressure[:, None] * state.derivative("log_pressure")[:, 0])
+                * state.derivative("pressure")[:, 0]
                 / self.normalization.force_density_dyn_per_cm3
             )
             inertial = (

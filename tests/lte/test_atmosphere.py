@@ -81,12 +81,12 @@ def test_direct_log_tau_model_is_continuous_and_has_no_height_mapping():
     )
 
 
-def test_direct_geometric_height_mapping_has_exact_gauge_metric_and_gradients():
+def test_geometric_height_mapping_starts_from_linear_base_and_learns_perturbation():
     depth_grid = torch.linspace(-5.0, 1.0, 11)
     coords = torch.tensor(((0.0, -0.3, 0.2), (0.0, 0.4, -0.1)))
     mapping = GeometricHeightModel(
         depth_grid,
-        height_scale_m=8.0e5,
+        base_scale_m_per_log_tau=1.5e5,
         gauge_reference_coords=coords,
         model_config={
             "dim": 10,
@@ -98,9 +98,10 @@ def test_direct_geometric_height_mapping_has_exact_gauge_metric_and_gradients():
 
     assert common_height.shape == (2, 11)
     assert torch.isfinite(common_height).all()
+    expected_height = -1.5e5 * depth_grid
+    torch.testing.assert_close(common_height, expected_height.expand_as(common_height))
     gauge_height = mapping(coords, torch.tensor([0.0]))[:, 0]
-    assert gauge_height.mean().abs() < 1.0e-5 * gauge_height.abs().max().clamp_min(1.0)
-    assert gauge_height.std() > 0
+    torch.testing.assert_close(gauge_height, torch.zeros_like(gauge_height))
     paired_depth = torch.tensor(
         ((-5.0, -3.7, -1.2, 1.0), (-5.0, -4.1, -0.4, 1.0)),
         requires_grad=True,
@@ -112,6 +113,10 @@ def test_direct_geometric_height_mapping_has_exact_gauge_metric_and_gradients():
     torch.testing.assert_close(differentiated_height, paired_height)
     torch.testing.assert_close(
         mapping.metric_m_per_log_tau(coords, paired_depth), differentiated_metric
+    )
+    torch.testing.assert_close(
+        differentiated_metric,
+        differentiated_metric.new_full(differentiated_metric.shape, 1.5e5),
     )
     dz_dq = torch.autograd.grad(
         paired_height,
@@ -138,7 +143,6 @@ def test_height_mapping_is_one_mlp_with_normalized_xyz_inputs():
     grid = torch.linspace(-5.0, 1.0, 17)
     mapping = GeometricHeightModel(
         grid,
-        height_scale_m=7.5e5,
         model_config={
             "dim": 8,
             "n_layers": 2,
@@ -155,8 +159,10 @@ def test_height_mapping_is_one_mlp_with_normalized_xyz_inputs():
     torch.testing.assert_close(inputs[..., 2].amin(), inputs.new_tensor(-1.0))
     torch.testing.assert_close(inputs[..., 2].amax(), inputs.new_tensor(1.0))
     metadata = mapping.metadata()
-    assert metadata["height_scale_m"] == 7.5e5
-    assert metadata["type"].startswith("direct coordinate MLP")
+    assert metadata["base_scale_m_per_log_tau"] == 1.5e5
+    assert metadata["perturbation_scale_m"] == 1.5e4
+    assert metadata["perturbation_scale_fraction_of_base"] == 0.1
+    assert metadata["type"].startswith("linear base mapping")
 
 
 def test_atmosphere_is_composed_as_xy_to_height_to_physical_fields():

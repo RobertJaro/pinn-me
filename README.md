@@ -247,17 +247,22 @@ python -m pme.inversion_lte --config config/hinode/lte_small_patch.yaml
 ```
 
 The same commands are installed as `pinn-me-lte` and `pinn-me-lte-export` by
-the packaged project. The operational inversion uses one continuous neural
-field:
+the packaged project. The operational inversion composes a tau-to-height field
+with one continuous physical atmosphere:
 
 ```text
-(Solar-X, Solar-Y, log10(tau500)) -> F -> T, Pgas, v, B, xi
-atmosphere sampled in tau         -> LTE polarized radiative transfer
+(Solar-X, Solar-Y, log10(tau500)) -> Z -> geometric height z
+(Solar-X, Solar-Y, z)             -> F -> T, Pgas, v, B, xi
+atmosphere sampled in tau         -> geometric-height LTE polarized transfer
 ```
 
-`F` uses normalized Solar-X/Y and normalized `log10(tau500)` directly. It uses
-variance-preserving random initialization; no fixed atmospheric nodes,
-reference atmosphere, magnetic seed, or geometric-height mapping is optimized.
+`Z` uses a linear 150 km/dex base scale and an MLP that outputs an unconstrained
+dimensionless height perturbation scaled by 10% of that base scale (15 km); the
+perturbation readout starts at zero. `F`
+uses normalized coordinates and variance-preserving random initialization.
+There are no fixed atmospheric nodes, reference atmosphere, or magnetic seed.
+`Z` is optimized jointly and has one gauge condition,
+`mean_FOV[z(log_tau500=0)]=0`, which removes only the global height translation.
 
 The configured `log_tau500` array defines the domain and a deterministic
 evaluation grid, not trainable nodes. For every training batch, the transfer
@@ -265,40 +270,43 @@ sampler first constructs equally spaced centers from the minimum to maximum
 `log_tau500`. The endpoints remain fixed; every interior point is independently
 drawn from a uniform stratum bounded exactly by the midpoints to its two
 adjacent centers. This produces an ordered nonuniform grid with no secondary
-jitter control. The formal solution converts the realized coordinates
-to `tau500` and uses the actual distance between every successive pair as its
-line element. Refining from 25 to 51 samples changes quadrature accuracy without
-changing the number of neural parameters.
+jitter control. The mapping evaluates a physical height at every realized tau
+sample. The formal solution multiplies its normalized propagation matrix by
+`alpha500` and uses the actual geometric distance between successive mapped
+heights as its line element. Refining the sample count changes quadrature
+accuracy without changing the number of neural parameters.
 
 Physics collocation is independent of that transfer grid. A volume dataset
 draws independent uniform physical `(Solar-X, Solar-Y, log_tau500)` samples
 over the complete configured axis-aligned bounds. Each sample passes through
-`F` directly. A separate top-face dataset supplies the gas-pressure boundary.
+`Z` and then `F`. A separate top-face dataset keeps the gas-pressure boundary at
+the configured top optical depth.
 Physics validation uses one deterministic linear optical-depth grid.
 
 There is no explicit smoothness, derivative, node, or sparsity regularizer.
 Smoothness comes from the finite-bandwidth Fourier-feature MLPs and smooth
 decoders, evaluated at continuously changing coordinates. Public spatial
 coordinates are helioprojective Solar-X/Solar-Y in Mm. The entry point stores
-one raster-derived affine inside `F`; the
+one raster-derived affine inside both coordinate networks; the
 isotropic scale is 512 native pixels, mapping the configured full raster to
 approximately `x=[-1,1]` and `y=[-0.5,0.5]`; `log_tau500=[-5,1]` maps to
-`[-1,1]`. These ranges keep direct inputs order-unity while the full-resolution
+`[-1,1]` inside `Z`, and `F` receives `z/height_input_scale_m`. These ranges keep inputs order-unity while the full-resolution
 configuration limits the shortest representable spatial period to approximately
 eight native pixels.
 
 Although the loader retains every scan-column timestamp, the default single-
 raster atmosphere is explicitly static and ignores the time coordinate. In a
 slit scan, time and scan position are nearly perfectly correlated, so a joint
-`F(t,x,y,log_tau500)` model would be non-identifiable away
+`F(t,x,y,z)` model would be non-identifiable away
 from the observed scan trajectory. The implemented atmosphere is therefore
-strictly `F(x,y,log_tau500)`; scan time remains data
+strictly `Z(x,y,log_tau500)` followed by `F(x,y,z)`; scan time remains data
 provenance rather than a network input.
 
-No geometric height or Wilson depression is inferred. Consequently the present
-model does not apply `div B`, magnetohydrostatic balance, continuity, induction,
-or momentum losses; those require a geometric volume and a verified vector-frame
-transformation first.
+Geometric height and corrugated optical-depth surfaces are inferred. This makes
+geometric `div B`, magnetohydrostatic balance, continuity, induction, and
+momentum residuals available, although the vector equations remain disabled in
+the Hinode example until the transverse Stokes basis has been independently
+calibrated to the Solar-X/Y basis.
 
 The validation metrics evaluate a deterministic stride-selected subset of the
 same inversion pixels without shuffling and on the deterministic depth grid.
@@ -361,10 +369,12 @@ The optimizer uses a configurable set of named objectives. Every enabled loss
 and its current weight are logged at each training step:
 
 - `train.stokes_loss` is the only observation objective.
-- `train.hse` minimizes the dimensionless direct-optical-depth equation
-  `dln(Pgas)/dlog10(tau500) = ln(10)*tau500*rho*g/(alpha500*Pgas)` at random
-  volume points. `rho(T,Pgas)` and `alpha500(T,Pgas)` are taken from the pinned
-  STiC/Wittmann table.
+- `train.tau_mapping` enforces
+  `alpha500*(-dz/dlog10(tau500)) = ln(10)*tau500` at random volume points.
+- `train.hse` differentiates `Pgas` itself and minimizes
+  `[dP/dlog10(tau500) - rho*g*(-dz/dlog10(tau500))] / mean_xy(Pgas)` on each
+  randomly sampled tau surface. `rho(T,Pgas)` and `alpha500(T,Pgas)` are taken
+  from the pinned STiC/Wittmann table.
 - `train.pressure_boundary` fixes the pressure integration constant on the
   independent top-face dataset. Its target is not an arbitrary tuning value:
   the resource bundle derives `Pgas=0.0903679136 Pa` at
@@ -373,18 +383,19 @@ and its current weight are logged at each training step:
   `g=275.4228703 m s^-2`; startup rejects a conflicting override of either
   quantity.
 
-`training.physics_config.equations` additionally exposes stationary
-`divergence_b`, magnetohydrostatic `mhs`, `continuity`, ideal `induction`, and
+`training.physics_config.equations` enables geometric `divergence_b` in the
+Hinode configuration and additionally exposes stationary magnetohydrostatic
+`mhs`, `continuity`, ideal `induction`, and
 ideal-MHD `momentum` residuals. The MHS residual is the normalized vector force
 balance `grad(P) - rho*g - (curl(B) x B)/(4*pi)` in Gaussian cgs units: the
 network field stays in gauss, magnetic derivatives are converted from G/m to
 G/cm, and all mechanical force densities are converted to dyn/cm^3. It shares
-one pressure/magnetic Jacobian with `divergence_b`. They are disabled in the
-Hinode example because
-the transverse
-Stokes basis has not been independently calibrated to the Solar-X/Y coordinate
-basis; startup refuses to enable them unless that physical basis contract is
-declared. An energy equation is intentionally absent because the LTE spectra do
+one pressure/magnetic Jacobian with `divergence_b`. The configuration declares
+that the magnetic basis matches the Solar-X/Y/z coordinate basis; this assertion
+must be backed by an independently calibrated Hinode transverse Stokes-reference
+rotation before the result is interpreted physically. Startup refuses geometric
+vector equations unless that basis contract is declared. The force and dynamical
+equations remain disabled. An energy equation is intentionally absent because the LTE spectra do
 not provide a closed heating, conduction, and radiative-cooling model.
 The HSE, MHS, and full momentum residuals are mutually exclusive force-balance
 models. Applying more than one would silently introduce additional zero-force
@@ -404,16 +415,9 @@ the current schedule weights.
 units are `v0=L0/t0`, `P0=B0^2/(4*pi)`, `rho0=P0/v0^2`,
 `g0=L0/t0^2`, and force-density `f0=P0/L0`. MHS, momentum,
 continuity, induction, and `divergence_b` are divided by their corresponding
-derived unit. Direct-tau HSE compares the separately `asinh`-scaled predicted
-and required dimensionless log-pressure derivatives; the pressure boundary is
-a dimensionless log10 ratio. Scaling the two sides separately retains a useful
-gradient for an initially flat pressure profile even where the required deep
-derivative is large. There is no batch-dependent residual rescaling, so the
-configured physics weights retain a stable meaning across batches and runs.
-
-Direct-tau HSE shares one atmosphere evaluation and differentiates only
-`log(Pgas)` with respect to `log_tau500`. No spatial Jacobian is constructed in
-the operational configuration. `valid.pressure_increasing_fraction` reports
+derived unit. Geometric HSE is normalized only by the detached mean gas
+pressure on each sampled optical-depth surface; the pressure boundary is a
+dimensionless log10 ratio. `valid.pressure_increasing_fraction` reports
 the fraction of adjacent validation-depth intervals whose pressure increases
 inward; it should approach one as HSE is satisfied. HSE constrains pressure,
 not monotonic temperature, velocity, or magnetic field profiles.
@@ -439,11 +443,12 @@ therefore have identical samples and orientation. Local figures are
 saved at the configured DPI and WandB uploads that exact PNG instead of
 rerasterizing the live Matplotlib figure at a lower default resolution.
 An optional `visualization.yz_slice` selects an exact detector `scan_index` and
-adds three optical-depth cross sections per visualization epoch: parameters,
-the complete magnetic vector and derived angles, and the complete velocity
-vector. These use every slit position at that scan index and the full configured
-`log_tau500` grid; the vertical coordinate is `log10(tau500)`. No tau-mapping
-dashboard is generated because geometric height is not part of this model.
+adds both optical-depth and geometric-height cross sections per visualization
+epoch for the parameters, complete magnetic vector and derived angles, and
+complete velocity vector. The geometric panels use the learned curvilinear
+height mesh and overlay the selected `log_tau500` surfaces as dashed contours.
+A separate tau-mapping dashboard shows height and the signed
+`-dz/dlog10(tau500)` metric.
 Integrated maps and agreement scatter retain all validation samples; only the
 complete 4x112 spectra used for percentile curves are capped by
 `max_profile_samples`, keeping callback memory bounded on a full raster.
@@ -695,7 +700,8 @@ A physical Hinode azimuth export must still define and verify the detector +Q
 reference direction before Bx/By are interpreted as solar-image axes.
 
 The production graph uses one thermodynamic source. The generated STiC/Wittmann
-table supplies total continuum extinction and mass density for direct-tau HSE,
+table supplies total continuum extinction for the tau-height metric and
+geometric transfer, mass density for HSE,
 electron and neutral-H perturber densities for damping, and `n(Fe I)/U(Fe I)`
 for both Fe I lower-level populations. Its FALC conversion supplies the
 matching upper pressure boundary and gravity. The Barklem/Saha table remains a

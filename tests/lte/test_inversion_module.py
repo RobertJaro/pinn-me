@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from types import SimpleNamespace
 
+import pme.train.lte_physics as physics_source
 from pme.inversion_lte import (
     _inject_height_gauge_quadrature,
     _inject_spatial_coordinate_affine,
@@ -302,14 +303,15 @@ def test_lte_module_forward_objectives_and_checkpoint(monkeypatch):
     checkpoint = {}
     module.on_save_checkpoint(checkpoint)
     metadata = checkpoint["lte_metadata"]
-    assert metadata["schema_version"] == 27
+    assert metadata["schema_version"] == 28
     assert "velocity_field" in metadata["units"]
     assert metadata["physics"]["iterative_forward_solve"] is False
     assert metadata["units"]["geometric_height"].startswith("m, increasing upward")
     assert metadata["atmosphere_parameterization"]["network_inputs"] == ["x", "y", "z"]
     height_mapping = metadata["atmosphere_parameterization"]["height_mapping"]
     assert height_mapping["monotonicity"] == (
-        "constrained by the configured tau-mapping physics loss"
+        "positive linear base metric plus perturbation constrained by the "
+        "configured tau-mapping physics loss"
     )
     assert height_mapping["gauge"] == "mean_FOV[z(log_tau500=0.0)] = 0"
     assert height_mapping["runtime_iterations"] == 0
@@ -318,7 +320,7 @@ def test_lte_module_forward_objectives_and_checkpoint(monkeypatch):
         "alpha500*dz/dlog10(tau500) + ln(10)*tau500 = 0"
     )
     assert metadata["physics"]["equation_definitions"]["hse"] == (
-        "P*dln(P)/dz + rho*g = 0"
+        "[dP/dlog10(tau500) - rho*g*(-dz/dlog10(tau500))] / mean_xy(P) = 0"
     )
     assert metadata["units"]["wavelength"] == (
         "standard-air angstrom at data/instrument boundary"
@@ -329,8 +331,9 @@ def test_lte_module_forward_objectives_and_checkpoint(monkeypatch):
     assert metadata["data"] == {"fixture": "generated"}
     assert metadata["depth_sampling"]["sample_count"] == 9
     assert metadata["depth_sampling"]["integration"] == (
-        "actual line elements from successive realized nonuniform "
-        "delta(tau_500) intervals"
+        "actual geometric-height line elements from the learned "
+        "Z(x,y,log_tau500) mapping at every realized nonuniform "
+        "optical-depth sample"
     )
     assert metadata["stokes_objective"] == {
         "loss": {"type": "mse"},
@@ -741,15 +744,22 @@ def test_random_tau_mapping_and_geometric_hse_match_governing_equations(monkeypa
     actual_hse = result.losses["hse"]
     actual_mapping = result.losses["tau_mapping"]
     state = result.state
-    force_unit = module.physics.normalization.force_density_dyn_per_cm3
-    pressure_force = (
-        0.1
-        * state.gas_pressure
-        * state.derivative("log_pressure")[:, 0, 2]
-        / force_unit
+    surface_pressure = physics_source._tau_surface_mean(
+        state.gas_pressure, flat_q
     )
-    gravity_force = 0.1 * state.mass_density * module.gravity_m_per_s2 / force_unit
-    expected_hse = (pressure_force + gravity_force).square().mean()
+    pressure_derivative_q = (
+        -state.derivative("pressure")[:, 0, 2]
+        * state.metric_m_per_log_tau
+    )
+    required_derivative_q = (
+        state.mass_density
+        * module.gravity_m_per_s2
+        * state.metric_m_per_log_tau
+    )
+    expected_hse = (
+        (pressure_derivative_q - required_derivative_q)
+        / surface_pressure.detach()
+    ).square().mean()
     target = math.log(10.0) * torch.pow(flat_q.new_tensor(10.0), flat_q)
     signed_ratio = state.alpha500 * state.metric_m_per_log_tau / target
     expected_mapping = (

@@ -518,7 +518,8 @@ def test_atomic_quantities_close_in_model_units(atomic):
     assert units["integrated_line_extinction"] == "m^-1 Hz"
     assert units["frequency_profile"] == "Hz^-1"
     assert units["propagation_matrix"] == (
-        "dimensionless per unit vertical tau500"
+        "constructed dimensionless per unit vertical tau500; multiplied by "
+        "alpha500 to m^-1 when geometric heights are present"
     )
 
 

@@ -153,7 +153,7 @@ def test_direct_log_tau_callback_omits_mapping_and_plots_y_depth(
     assert len(paths) == 6
     assert not any("tau_mapping" in path.name for path in paths)
     assert [call["key"] for call in logger.calls[-3:]] == [
-        "Parameters Y-depth", "Magnetic field Y-depth", "Velocity Y-depth"
+        "Parameters Y-tau", "Magnetic field Y-tau", "Velocity Y-tau"
     ]
     evaluated = callback._evaluate_yz_slice(module, raster)
     figure = callback._yz_field_panel_figure(
@@ -161,6 +161,7 @@ def test_direct_log_tau_callback_omits_mapping_and_plots_y_depth(
         "test",
         field_names=("temperature", "pressure"),
         title="Parameters",
+        vertical_coordinate="log_tau500",
     )
     panel_axes = figure.axes[:2]
     assert all(axis.get_ylim()[0] > axis.get_ylim()[1] for axis in panel_axes)
@@ -200,7 +201,12 @@ def test_atmosphere_callback_writes_parameter_b_and_v_yz_slices(
 
     paths = callback.render(trainer, module, raster, label="epoch_0001")
 
-    assert len(paths) == 7
+    assert len(paths) == 10
+    assert [path.name for path in paths[4:7]] == [
+        "epoch_0001_y_tau_parameters.png",
+        "epoch_0001_y_tau_magnetic_field.png",
+        "epoch_0001_y_tau_velocity.png",
+    ]
     assert [path.name for path in paths[-3:]] == [
         "epoch_0001_yz_parameters.png",
         "epoch_0001_yz_magnetic_field.png",

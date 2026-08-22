@@ -224,6 +224,10 @@ class LTESynthesizer(nn.Module):
             self._source_vector(source_function),
             grid,
             mu=ray_mu,
+            geometric_height_m=atmosphere.geometric_height_m,
+            alpha500=(
+                alpha500 if atmosphere.geometric_height_m is not None else None
+            ),
         )
 
         stokes = emergent.movedim(-1, -2)
@@ -285,9 +289,15 @@ class LTESynthesizer(nn.Module):
                 "doppler_width": "Hz",
                 "damping_rate": "s^-1",
                 "zeeman_splitting": "Hz from B in gauss",
-                "propagation_matrix": "dimensionless per unit vertical tau500",
+                "propagation_matrix": (
+                    "constructed dimensionless per unit vertical tau500; "
+                    "multiplied by alpha500 to m^-1 when geometric heights are present"
+                ),
             },
             "formal_solver": type(self.formal_solver).__name__,
+            "formal_solution_coordinates": (
+                "geometric height when supplied by the atmosphere; otherwise tau500"
+            ),
             "ray_geometry": {
                 "mu": "cosine of the ray to the local vertical; 0 < mu <= 1",
                 "transfer_equation": "mu*dI/dtau500 = K_lambda*(I-S)",

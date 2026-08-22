@@ -117,8 +117,6 @@ class LTEModule(LightningModule):
             "atlas_continuum_radiance_w_m3_sr",
             wavelength_angstrom.new_tensor(atlas_continuum_radiance_w_m3_sr),
         )
-        self._predicted_ic_print_count = 0
-
         normalization_config = deepcopy(normalization_config or {})
         stokes_loss_config = deepcopy(stokes_loss_config or {})
         self.normalization = NormalizationModule(**normalization_config)
@@ -457,14 +455,6 @@ class LTEModule(LightningModule):
                 "The batch-mean synthesized Stokes-I continuum must be finite "
                 "and positive."
             )
-        if self._predicted_ic_print_count < 5:
-            value = predicted_continuum.detach().cpu().item()
-            print(
-                "[LTE_IC_PREDICTION] "
-                f"batch_mean_Ic_over_atlas={value:.9e}",
-                flush=True,
-            )
-            self._predicted_ic_print_count += 1
         return {
             "atmosphere": atmosphere,
             "stokes": sampled_stokes,
@@ -790,7 +780,7 @@ class LTEModule(LightningModule):
             production_continuum_metadata.pop("hminus_diagnostic_provenance", None)
         physics_sampling = deepcopy(self.checkpoint_metadata.get("physics_sampling"))
         checkpoint["lte_metadata"] = {
-            "schema_version": 27,
+            "schema_version": 28,
             "compute_dtype": str(next(self.parameters()).dtype).removeprefix("torch."),
             "units": {
                 "wavelength": "standard-air angstrom at data/instrument boundary",
@@ -917,7 +907,11 @@ class LTEModule(LightningModule):
                     "midpoint bounds; independent uniform interior draws and fixed endpoints"
                 ),
                 "integration": (
-                    "actual line elements from successive realized nonuniform "
+                    "actual geometric-height line elements from the learned "
+                    "Z(x,y,log_tau500) mapping at every realized nonuniform "
+                    "optical-depth sample"
+                    if self.atmosphere_model.coordinate_mode == "geometric_height"
+                    else "actual line elements from successive realized nonuniform "
                     "delta(tau_500) intervals"
                 ),
             },
@@ -927,7 +921,7 @@ class LTEModule(LightningModule):
                     "hse": (
                         "[dP/dlog10(tau500) - ln(10)*tau500*rho*g/alpha500] / mean_xy(P at fixed tau500) = 0"
                         if self.atmosphere_model.coordinate_mode == "log_tau"
-                        else "P*dln(P)/dz + rho*g = 0"
+                        else "[dP/dlog10(tau500) - rho*g*(-dz/dlog10(tau500))] / mean_xy(P) = 0"
                     ),
                     "tau_mapping": ("alpha500*(-dz/dlog10(tau500)) = ln(10)*tau500"),
                     "pressure_boundary": "log10(Pgas/Ptop) = 0 at q_top",
@@ -949,17 +943,20 @@ class LTEModule(LightningModule):
                     "direct-tau HSE compares separately asinh-scaled dimensionless "
                     "log-pressure derivatives assembled from SI P, rho, g, and alpha500"
                     if self.atmosphere_model.coordinate_mode == "log_tau"
-                    else "atmosphere uses SI except B in gauss; differential physics "
-                    "is nondimensionalized from configured L0, t0, and B0 using "
-                    "Gaussian-cgs derived units"
+                    else "geometric HSE differentiates P directly, transforms it "
+                    "with the learned tau-height metric, and normalizes only by "
+                    "sampled tau-surface mean pressure; other "
+                    "differential physics uses SI except B in gauss and is "
+                    "nondimensionalized from configured L0, t0, and B0"
                 ),
                 "density_source": "pinned STiC/Wittmann differentiable lookup",
                 "iterative_forward_solve": False,
                 "derivative_strategy": (
                     "one log-pressure/log-tau derivative for direct-tau HSE"
                     if self.atmosphere_model.coordinate_mode == "log_tau"
-                    else "one selectively populated primitive Jacobian shared by "
-                    "all active equations; algebraic product rules reuse it"
+                    else "one selectively populated primitive Jacobian, including "
+                    "direct pressure rather than log-pressure derivatives, shared "
+                    "by all active equations; algebraic product rules reuse it"
                 ),
                 "volume_sampling": (
                     "independent uniform Solar-X, Solar-Y, and log_tau500 samples "

@@ -90,6 +90,60 @@ def test_scalar_and_diagonal_polarized_solutions_agree():
     torch.testing.assert_close(actual[..., 1:], torch.zeros_like(actual[..., 1:]))
 
 
+def test_geometric_and_optical_depth_solutions_are_equivalent_for_constant_alpha500():
+    dtype = torch.float64
+    log_tau500 = torch.tensor([-2.0, -1.0, 0.0], dtype=dtype)
+    tau500 = torch.pow(torch.tensor(10.0, dtype=dtype), log_tau500)
+    alpha500 = torch.full((2, 3), 2.5, dtype=dtype)
+    # z increases upward and q increases inward. This mapping exactly satisfies
+    # d tau500 = -alpha500 dz for the constant reference extinction.
+    geometric_height_m = -(tau500 - tau500[0]) / alpha500[:, :1]
+    matrix = torch.eye(4, dtype=dtype).expand(2, 3, 2, 4, 4).clone()
+    matrix = matrix * torch.tensor(1.4, dtype=dtype)
+    source = torch.zeros(2, 3, 2, 4, dtype=dtype)
+    source[..., 0] = torch.tensor((0.6, 0.8, 1.0), dtype=dtype)[None, :, None]
+    bottom = torch.zeros(2, 2, 4, dtype=dtype)
+    bottom[..., 0] = 1.2
+    solver = PolarizedFormalSolver()
+
+    optical = solver(
+        matrix, source, log_tau500, mu=0.71, bottom_boundary=bottom
+    )
+    geometric = solver(
+        matrix,
+        source,
+        log_tau500,
+        mu=0.71,
+        bottom_boundary=bottom,
+        geometric_height_m=geometric_height_m,
+        alpha500=alpha500,
+    )
+
+    torch.testing.assert_close(geometric, optical, rtol=2e-12, atol=2e-12)
+
+
+def test_geometric_solution_propagates_height_and_extinction_gradients():
+    dtype = torch.float64
+    q = torch.tensor([-2.0, -1.0, 0.0], dtype=dtype)
+    height = torch.tensor([[0.0, -0.2, -0.7]], dtype=dtype, requires_grad=True)
+    alpha500 = torch.full((1, 3), 1.3, dtype=dtype, requires_grad=True)
+    matrix = torch.eye(4, dtype=dtype).expand(1, 3, 1, 4, 4).clone()
+    source = torch.zeros(1, 3, 1, 4, dtype=dtype)
+    source[..., 0] = 0.8
+
+    emergent = PolarizedFormalSolver()(
+        matrix,
+        source,
+        q,
+        geometric_height_m=height,
+        alpha500=alpha500,
+    )
+    emergent.square().sum().backward()
+
+    assert height.grad is not None and torch.isfinite(height.grad).all()
+    assert alpha500.grad is not None and torch.isfinite(alpha500.grad).all()
+
+
 def test_formal_solution_propagates_finite_gradients():
     dtype = torch.float64
     log_tau500 = torch.linspace(-3.0, 0.5, 9, dtype=dtype)

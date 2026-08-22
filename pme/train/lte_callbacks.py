@@ -506,6 +506,7 @@ class LTEAtmosphereVisualizationCallback(Callback):
                     levels=contour_levels,
                     colors="white",
                     linewidths=0.55,
+                    linestyles="--",
                     alpha=0.7,
                 )
                 axis.set_title(title, fontsize=9)
@@ -764,8 +765,9 @@ class LTEAtmosphereVisualizationCallback(Callback):
         *,
         field_names: tuple[str, ...],
         title: str,
+        vertical_coordinate: str = "geometric_height",
     ) -> Figure:
-        """Plot fields on a Y-depth section."""
+        """Plot fields on a Y-depth section in tau or geometric height."""
 
         figure = Figure(
             figsize=(max(4.2 * len(field_names), 7.0), 5.5),
@@ -778,12 +780,16 @@ class LTEAtmosphereVisualizationCallback(Callback):
             )
         )[0]
         y_mm = evaluated["map_y_mm"][:, 0]
-        if "geometric_height" in evaluated["map_fields"]:
+        if vertical_coordinate == "geometric_height":
+            if "geometric_height" not in evaluated["map_fields"]:
+                raise ValueError(
+                    "A geometric-height YZ panel requires a learned height mapping."
+                )
             vertical = evaluated["map_fields"]["geometric_height"][:, 0, :]
             vertical_label = r"geometric height $z$ [Mm]"
             depth_plane = "Y-Z"
             invert_vertical_axis = False
-        else:
+        elif vertical_coordinate == "log_tau500":
             vertical = np.broadcast_to(
                 evaluated["log_tau500"][None, :],
                 (y_mm.shape[0], evaluated["log_tau500"].size),
@@ -791,12 +797,26 @@ class LTEAtmosphereVisualizationCallback(Callback):
             vertical_label = r"$\log_{10}\tau_{500}$ [dimensionless]"
             depth_plane = r"Y-$\log\tau_{500}$"
             invert_vertical_axis = True
+        else:
+            raise ValueError(
+                "vertical_coordinate must be 'geometric_height' or 'log_tau500'."
+            )
         y_grid_mm = np.broadcast_to(y_mm[:, None], vertical.shape)
         y_corners_mm = self._curvilinear_cell_corners(y_grid_mm)
         vertical_corners = self._curvilinear_cell_corners(vertical)
         solar_x_mm = evaluated["map_x_mm"][:, 0]
 
         images = []
+        contour_sets = []
+        log_tau_field = np.broadcast_to(
+            evaluated["log_tau500"][None, :], vertical.shape
+        )
+        contour_levels = sorted(
+            {
+                float(evaluated["log_tau500"][index])
+                for index in self._depth_indices(evaluated["log_tau500"])
+            }
+        )
         for axis, name in zip(axes, field_names, strict=True):
             style = _FIELD_STYLES[name]
             values = evaluated["map_fields"][name][:, 0, :]
@@ -810,6 +830,19 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 rasterized=True,
             )
             images.append(image)
+            if vertical_coordinate == "geometric_height":
+                invalid = ~np.isfinite(vertical) | ~np.isfinite(values)
+                contours = axis.contour(
+                    y_grid_mm,
+                    vertical,
+                    np.ma.masked_where(invalid, log_tau_field),
+                    levels=contour_levels,
+                    colors="white",
+                    linewidths=0.65,
+                    linestyles="--",
+                    alpha=0.85,
+                )
+                contour_sets.append(contours)
             axis.set_aspect("auto")
             axis.label_outer()
         if invert_vertical_axis:
@@ -826,6 +859,13 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 axis,
                 _FIELD_STYLES[name]["label"],
                 shared_by="column",
+            )
+        if contour_sets:
+            axes[0].clabel(
+                contour_sets[0],
+                fmt=lambda value: rf"$\log\tau={value:g}$",
+                inline=True,
+                fontsize=7,
             )
 
         scan_index = int(evaluated["slice_scan_index"])
@@ -1186,29 +1226,24 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 )
             )
         if self.yz_slice_enabled:
-            depth_label = (
-                "YZ"
-                if "geometric_height" in yz_evaluated["map_fields"]
-                else "Y-depth"
-            )
             yz_panels = (
                 (
                     _YZ_THERMODYNAMIC_FIELDS,
                     "LTE thermodynamic parameters",
                     "yz_parameters",
-                    f"Parameters {depth_label}",
+                    "Parameters",
                 ),
                 (
                     _MAGNETIC_FIELDS,
                     "Magnetic field",
                     "yz_magnetic_field",
-                    f"Magnetic field {depth_label}",
+                    "Magnetic field",
                 ),
                 (
                     _VELOCITY_FIELDS,
                     "Velocity field",
                     "yz_velocity",
-                    f"Velocity {depth_label}",
+                    "Velocity",
                 ),
             )
             for field_names, title, filename_suffix, log_key in yz_panels:
@@ -1220,9 +1255,27 @@ class LTEAtmosphereVisualizationCallback(Callback):
                             label,
                             field_names=field_names,
                             title=title,
+                            vertical_coordinate="log_tau500",
+                        ),
+                        f"{label}_y_tau_{filename_suffix.removeprefix('yz_')}.png",
+                        f"{log_key} Y-tau",
+                    )
+                )
+            if "geometric_height" not in yz_evaluated["map_fields"]:
+                return paths
+            for field_names, title, filename_suffix, log_key in yz_panels:
+                paths.append(
+                    self._save_figure(
+                        trainer,
+                        self._yz_field_panel_figure(
+                            yz_evaluated,
+                            label,
+                            field_names=field_names,
+                            title=title,
+                            vertical_coordinate="geometric_height",
                         ),
                         f"{label}_{filename_suffix}.png",
-                        log_key,
+                        f"{log_key} YZ",
                     )
                 )
         return paths
