@@ -2,10 +2,8 @@
 # CPU-sized diagnostic for early LTE intensity convergence. This deliberately
 # uses a quiet-Sun patch so the atlas calibration is identifiable inside the
 # selected crop; it is not a replacement for the full-resolution run.
-base_path: "/Users/rjarolim/PycharmProjects/pinn-lte/runs/hinode_lte_atlas_diagnostic"
-work_directory: "/Users/rjarolim/PycharmProjects/pinn-lte/runs/hinode_lte_atlas_diagnostic"
-seed: 17
-
+base_path: "/Users/rjarolim/PycharmProjects/pinn-lte/runs/hinode_lte_spherical_falc_diagnostic"
+work_directory: "/Users/rjarolim/PycharmProjects/pinn-lte/runs/hinode_lte_spherical_falc_diagnostic"
 resources:
   directory: "/Users/rjarolim/PycharmProjects/pinn-lte/pme/lte/data"
   instrument: "Hinode/SOT-SP"
@@ -23,32 +21,27 @@ data:
   quiet_sun_max_fractional_polarization: 1.0e-2
   quiet_sun_continuum_trim_quantiles: [0.05, 0.95]
   minimum_quiet_sun_pixels: 128
+  # sp_prep Level-1 already rotates Q/U with CROTA2 into the solar frame;
+  # +Q is along solar east-west (HPC +X), so no second rotation is applied.
+  stokes_reference_angle_deg: 0.0
 
 atmosphere:
-  coordinate_mode: geometric_height
+  # Physical spherical atmosphere with exact observer-ray path integration.
   log_tau500: {min: -5.0, max: 1.0, count: 51}
   height_input_scale_m: 1000000.0
-  height_mapping_config:
-    base_scale_m_per_log_tau: 150000.0
-    gauge_log_tau500: 0.0
-    gauge_quadrature_points: 128
-    model_config:
-      type: mlp
-      dim: 32
-      n_layers: 3
-      activation: swish
-      encoding_config:
-        type: fourier
-        num_frequencies: [8, 8, 12]
-        max_frequencies: [4, 4, 4]
-        include_input: true
+  # Radial offsets from R_sun in megametres.
+  shell_height_bounds_Mm: [1.5, -0.1]
+  tangent_margin_m: 1000.0
+  reference_atmosphere_config: falc_82
   temperature_log10_bounds: [3.4, 4.0]
-  temperature_log_scale: 0.2
+  temperature_log_scale: 0.1
   velocity_scale_m_per_s: 1000.0
+  velocity_max_m_per_s: 100000.0
   magnetic_scale_gauss: 100.0
   microturbulence_log10_bounds: [1.0, 4.0]
+  microturbulence_log_scale: 0.2
   gas_pressure_log10_bounds: [-1.5, 6.0]
-  gas_pressure_log_scale: 1.0
+  gas_pressure_log_scale: 0.5
   model_config:
     type: mlp
     dim: 64
@@ -70,20 +63,37 @@ instrument:
 
 training:
   depth_sampling_config:
-    sample_count: 12
+    sample_count: 51
+    coarse_to_fine:
+      enabled: true
+      fine_sample_count: 32
+      uniform_weight_floor: 0.05
   physics_config:
     volume_points_per_step: 128
-    points_per_tau: 16
-    boundary_points_per_step: 64
+    # Four height layers with 32 independently sampled observed-domain
+    # positions per layer.
+    height_layers_per_step: 4
+    optical_depth_anchor_points_per_step: 64
+    optical_depth_anchor_depth_points: 65
     validation_depth_points: 33
     vector_basis_matches_spatial_coordinates: true
     equations:
-      tau_mapping: {enabled: true, weight: 1.0}
-      hse: {enabled: true, weight: 1.0}
-      divergence_b: {enabled: true, weight: 1.0}
-      pressure_boundary: {enabled: true, weight: 1.0e-2}
+      # Use fixed weights so changes in the fit can be attributed to the model
+      # and equations rather than to a changing objective.
+      magnetohydrostatic_equilibrium:
+        enabled: true
+        weight: 1.0e-3
+      magnetic_divergence:
+        enabled: true
+        weight: 1.0e-3
+      mean_radial_optical_depth_anchor:
+        enabled: true
+        weight: 1.0e-3
+      upper_boundary_gas_pressure_prior:
+        enabled: true
+        weight: 1.0e-4
   wavelength_exclude_windows_angstrom: [[6302.04, 6302.14]]
-  lr_params: {start: 1.0e-3, end: 3.0e-4, iterations: auto}
+  learning_rate: 1.0e-5
 
 normalization:
   asinh_alphas: {Q: 1.0e-2, U: 1.0e-2, V: 1.0e-2}
@@ -95,13 +105,16 @@ check_val_every_n_epoch: 1
 visualization:
   enabled: true
   every_n_epochs: 1
-  depth_layer_count: 4
-  evaluation_batch_size: 256
-  max_map_pixels: 256
-  max_profile_samples: 256
+  ray_sampling: {batch_size: 256, max_pixels: 256, max_profile_samples: 256}
+  slice_sampling:
+    batch_size: 256
+    layer_count: 4
+    longitude_points: 32
+    latitude_points: 32
+    radial_points: 48
   dpi: 120
   include_initial: true
-  yz_slice: {enabled: false}
+  meridional_slice: {enabled: false}
 
 trainer:
   max_epochs: 8
@@ -111,4 +124,4 @@ trainer:
 
 logging:
   type: csv
-  name: diagnostic
+  name: spherical_falc

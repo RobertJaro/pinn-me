@@ -10,7 +10,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from pme.coordinates import (
+    cartesian_to_spherical,
+    project_cartesian_to_spherical,
+    project_spherical_to_observer,
+)
 from pme.lte.hinode import HinodeRaster, load_hinode_raster
+from pme.solar_velocity import (
+    CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
+    CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS,
+    carrington_rotation_velocity_cartesian,
+)
 from pme.lte.resources import validate_resource_bundle
 from pme.train.lte_module import LTEModule
 from pme.train.util import load_yaml_config
@@ -187,14 +197,16 @@ def evaluate_atmosphere_model(
     if flat_indices.numel() == 0:
         raise ValueError("The raster contains no valid pixels to evaluate.")
     coords = raster.coords.reshape(-1, 3)[flat_indices]
+    ray_origin_m = raster.ray_origin_m.reshape(-1, 3)[flat_indices]
+    ray_direction = raster.ray_direction.reshape(-1, 3)[flat_indices]
+    stokes_basis_valid = raster.stokes_basis.reshape(-1, 3, 3)[flat_indices]
     spatial_shape = raster.spatial_shape
     depth = int(depth_grid.numel())
     flat_size = int(valid_flat.numel())
     scalar_names = [
-        "temperature", "microturbulence", "gas_pressure", "mass_density"
+        "temperature", "microturbulence", "gas_pressure", "mass_density",
+        "geometric_height", "alpha500", "tau500_radial",
     ]
-    if getattr(model, "height_mapping", None) is not None:
-        scalar_names.append("geometric_height")
     scalar_fields = {
         name: np.full((flat_size, depth), np.nan, dtype=numpy_storage_dtype)
         for name in scalar_names
@@ -205,17 +217,29 @@ def evaluate_atmosphere_model(
     velocity_field = np.full(
         (flat_size, depth, 3), np.nan, dtype=numpy_storage_dtype
     )
+    spherical_position = np.full(
+        (flat_size, depth, 3), np.nan, dtype=numpy_storage_dtype
+    )
+    magnetic_spherical = np.full_like(magnetic_field, np.nan)
+    velocity_spherical = np.full_like(velocity_field, np.nan)
+    rotation_velocity = np.full_like(velocity_field, np.nan)
+    velocity_inertial = np.full_like(velocity_field, np.nan)
+    velocity_inertial_spherical = np.full_like(velocity_field, np.nan)
+    magnetic_observer = np.full_like(magnetic_field, np.nan)
+    velocity_observer = np.full_like(velocity_field, np.nan)
     was_training = model.training
     model.eval()
     try:
         for start in range(0, coords.shape[0], batch_size):
             stop = min(start + batch_size, coords.shape[0])
-            atmosphere = model(
+            atmosphere, trace = model.trace_rays(
                 coords[start:stop].to(
                     device=parameter.device,
                     dtype=parameter.dtype,
                 ),
-                log_tau500=depth_grid,
+                ray_origin_m[start:stop].to(device=parameter.device),
+                ray_direction[start:stop].to(device=parameter.device),
+                depth_grid,
             )
             selected = flat_indices[start:stop].cpu().numpy()
 
@@ -227,8 +251,26 @@ def evaluate_atmosphere_model(
             store("temperature", atmosphere.temperature)
             store("microturbulence", atmosphere.microturbulence)
             store("gas_pressure", atmosphere.gas_pressure)
-            if atmosphere.geometric_height_m is not None:
-                store("geometric_height", atmosphere.geometric_height_m)
+            store("geometric_height", atmosphere.geometric_height_m)
+            alpha500 = continuum_opacity.volume_extinction_at_5000(
+                atmosphere.temperature, atmosphere.gas_pressure
+            )
+            interval_m = (
+                atmosphere.geometric_height_m[..., :-1]
+                - atmosphere.geometric_height_m[..., 1:]
+            )
+            increments = 0.5 * (
+                alpha500[..., :-1] + alpha500[..., 1:]
+            ) * interval_m
+            tau500_radial = torch.cat(
+                (
+                    torch.zeros_like(alpha500[..., :1]),
+                    torch.cumsum(increments, dim=-1),
+                ),
+                dim=-1,
+            )
+            store("alpha500", alpha500)
+            store("tau500_radial", tau500_radial)
             store(
                 "mass_density",
                 continuum_opacity.reference_mass_density(
@@ -247,10 +289,51 @@ def evaluate_atmosphere_model(
                 .cpu()
                 .numpy()
             )
+            spherical = cartesian_to_spherical(trace.position_m, torch)
+            magnetic_local = project_cartesian_to_spherical(
+                atmosphere.magnetic_field, spherical, torch
+            )
+            velocity_local = project_cartesian_to_spherical(
+                atmosphere.velocity_field, spherical, torch
+            )
+            rotation = carrington_rotation_velocity_cartesian(
+                trace.position_m, torch
+            )
+            inertial_velocity = atmosphere.velocity_field + rotation
+            inertial_velocity_local = project_cartesian_to_spherical(
+                inertial_velocity, spherical, torch
+            )
+            observer_basis = stokes_basis_valid[start:stop].to(
+                device=parameter.device, dtype=parameter.dtype
+            )
+            magnetic_view = project_spherical_to_observer(
+                magnetic_local, spherical, observer_basis, torch
+            )
+            velocity_view = project_spherical_to_observer(
+                inertial_velocity_local, spherical, observer_basis, torch
+            )
+            for target, value in (
+                (spherical_position, spherical),
+                (magnetic_spherical, magnetic_local),
+                (velocity_spherical, velocity_local),
+                (rotation_velocity, rotation),
+                (velocity_inertial, inertial_velocity),
+                (velocity_inertial_spherical, inertial_velocity_local),
+                (magnetic_observer, magnetic_view),
+                (velocity_observer, velocity_view),
+            ):
+                target[selected] = (
+                    value.detach().to(dtype=torch_storage_dtype).cpu().numpy()
+                )
     finally:
         model.train(was_training)
 
     physical_coords = raster.coords.cpu().numpy()
+    scene_basis = np.asarray(
+        raster.metadata["ray_geometry"]["scene_basis_rows"], dtype=numpy_storage_dtype
+    )
+    velocity_scene = np.einsum("ij,ndj->ndi", scene_basis, velocity_field)
+    magnetic_scene = np.einsum("ij,ndj->ndi", scene_basis, magnetic_field)
     result = {
         "log_tau500": depth_grid.detach().to(
             dtype=torch_storage_dtype
@@ -259,22 +342,68 @@ def evaluate_atmosphere_model(
         "velocity_field_m_per_s": velocity_field.reshape(
             *spatial_shape, depth, 3
         ),
-        "v_los_m_per_s": (-velocity_field[..., 2]).reshape(*spatial_shape, depth),
+        "velocity_field_scene_m_per_s": velocity_scene.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "velocity_field_spherical_m_per_s": velocity_spherical.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "carrington_rotation_velocity_m_per_s": rotation_velocity.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "velocity_field_inertial_m_per_s": velocity_inertial.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "velocity_field_inertial_spherical_m_per_s": (
+            velocity_inertial_spherical.reshape(*spatial_shape, depth, 3)
+        ),
+        "velocity_field_observer_m_per_s": velocity_observer.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "v_los_m_per_s": (-velocity_observer[..., 2]).reshape(*spatial_shape, depth),
         "microturbulence_m_per_s": scalar_fields["microturbulence"].reshape(
             *spatial_shape, depth
         ),
         "gas_pressure_pa": scalar_fields["gas_pressure"].reshape(*spatial_shape, depth),
         "magnetic_field_gauss": magnetic_field.reshape(*spatial_shape, depth, 3),
+        "magnetic_field_scene_gauss": magnetic_scene.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "magnetic_field_spherical_gauss": magnetic_spherical.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "magnetic_field_observer_gauss": magnetic_observer.reshape(
+            *spatial_shape, depth, 3
+        ),
+        "radius_m": spherical_position[..., 0].reshape(*spatial_shape, depth),
+        "carrington_colatitude_rad": spherical_position[..., 1].reshape(
+            *spatial_shape, depth
+        ),
+        "carrington_longitude_rad": spherical_position[..., 2].reshape(
+            *spatial_shape, depth
+        ),
         "valid_mask": raster.valid_mask.cpu().numpy(),
         "time_hours": physical_coords[..., 0].astype(numpy_storage_dtype, copy=False),
-        "solar_x_mm": physical_coords[..., 1].astype(numpy_storage_dtype, copy=False),
-        "solar_y_mm": physical_coords[..., 2].astype(numpy_storage_dtype, copy=False),
+        "carrington_chart_x_mm": physical_coords[..., 1].astype(
+            numpy_storage_dtype, copy=False
+        ),
+        "carrington_chart_y_mm": physical_coords[..., 2].astype(
+            numpy_storage_dtype, copy=False
+        ),
     }
     result["mass_density_kg_m3"] = scalar_fields["mass_density"].reshape(
         *spatial_shape, depth
     )
     if "geometric_height" in scalar_fields:
         result["geometric_height_m"] = scalar_fields["geometric_height"].reshape(
+            *spatial_shape, depth
+        )
+    if "alpha500" in scalar_fields:
+        result["depth_coordinate"] = result["log_tau500"].copy()
+        result["alpha500_m_inv"] = scalar_fields["alpha500"].reshape(
+            *spatial_shape, depth
+        )
+        result["tau500_radial"] = scalar_fields["tau500_radial"].reshape(
             *spatial_shape, depth
         )
     return result
@@ -300,6 +429,9 @@ def evaluate_stokes_model(
         raise ValueError("The raster contains no valid pixels to synthesize.")
     coords = raster.coords.reshape(-1, 3)[flat_indices]
     mu = raster.mu.reshape(-1, 1)[flat_indices]
+    ray_origin_m = raster.ray_origin_m.reshape(-1, 3)[flat_indices]
+    ray_direction = raster.ray_direction.reshape(-1, 3)[flat_indices]
+    stokes_basis = raster.stokes_basis.reshape(-1, 3, 3)[flat_indices]
     wavelength_count = int(raster.wavelength_angstrom.numel())
     predicted_flat = np.full(
         (valid_flat.numel(), 4, wavelength_count),
@@ -316,6 +448,11 @@ def evaluate_stokes_model(
                     device=parameter.device, dtype=parameter.dtype
                 ),
                 mu[start:stop].to(
+                    device=parameter.device, dtype=parameter.dtype
+                ),
+                ray_origin_m=ray_origin_m[start:stop].to(device=parameter.device),
+                ray_direction=ray_direction[start:stop].to(device=parameter.device),
+                stokes_basis=stokes_basis[start:stop].to(
                     device=parameter.device, dtype=parameter.dtype
                 ),
             )["stokes"]
@@ -470,36 +607,82 @@ def export_lte_checkpoint(
     checkpoint_probe = {}
     module.on_save_checkpoint(checkpoint_probe)
     metadata = {
-        "schema_version": 3,
+        "schema_version": 6,
         "checkpoint": str(checkpoint),
         "representation": (
-            "continuous F(x,y,log_tau500) atmosphere evaluated directly on the "
-            "requested optical-depth grid"
-            if getattr(module.atmosphere_model, "height_mapping", None) is None
-            else "continuous Z(x,y,log_tau500) coordinate mapping followed by "
-            "F(x,y,z), evaluated on the requested optical-depth grid"
+            "continuous F(x,y,z) atmosphere evaluated on fixed spherical shell "
+            "radii; tau500 is derived by integrating absolute opacity"
         ),
         "vector_fields": {
             "magnetic_field_gauss": (
-                "[Bx, By, Bz] in the observer Stokes frame; +Bz toward observer"
+                "[B_Xc, B_Yc, B_Zc] in Heliographic Carrington Cartesian; "
+                "+Zc is solar north and Xc/Yc span the equatorial plane"
+            ),
+            "magnetic_field_spherical_gauss": (
+                "[B_r, B_theta, B_phi] in the local Carrington spherical basis"
+            ),
+            "magnetic_field_observer_gauss": (
+                "[B_Q, B_U, B_LOS] in each pixel's observer Stokes basis"
+            ),
+            "magnetic_field_scene_gauss": (
+                "[B_chart_x, B_chart_y, B_chart_normal] in the fixed "
+                "raster-centred scene basis; these axes match the saved "
+                "Carrington gnomonic chart at its tangent point"
             ),
             "velocity_field_m_per_s": (
-                "[vx, vy, vz] in the observer Stokes frame; +vz toward observer"
+                "learned co-rotating residual [v_Xc, v_Yc, v_Zc] in "
+                "Heliographic Carrington Cartesian"
             ),
-            "v_los_m_per_s": "derived as -vz; positive values are redshifts",
+            "carrington_rotation_velocity_m_per_s": (
+                "rigid sidereal Carrington velocity Omega cross r in Cartesian m/s"
+            ),
+            "velocity_field_inertial_m_per_s": (
+                "learned velocity plus rigid Carrington rotation in Cartesian m/s"
+            ),
+            "velocity_field_scene_m_per_s": (
+                "[v_chart_x, v_chart_y, v_chart_normal] in the fixed "
+                "raster-centred scene basis"
+            ),
+            "velocity_field_spherical_m_per_s": (
+                "learned co-rotating [v_r, v_theta, v_phi] in the local "
+                "Carrington spherical basis"
+            ),
+            "velocity_field_inertial_spherical_m_per_s": (
+                "learned velocity plus rigid rotation in local spherical components"
+            ),
+            "velocity_field_observer_m_per_s": (
+                "[v_Q, v_U, v_toward] in each pixel's observer Stokes basis"
+            ),
+            "v_los_m_per_s": (
+                "negative projection onto the per-pixel toward-observer axis; "
+                "positive values are redshifts"
+            ),
             "velocity_observability": (
-                "vx and vy are not constrained by single-view LTE Stokes synthesis "
-                "without additional dynamical physics"
+                "the two observer-transverse velocity combinations are not "
+                "constrained by single-view LTE Stokes synthesis without "
+                "additional dynamical physics"
             ),
         },
         "coordinate_arrays": {
             "time_hours": "hours since source_raster.coordinates.time_origin",
-            "solar_x_mm": "helioprojective geocentric image-plane Solar-X in Mm",
-            "solar_y_mm": "helioprojective geocentric image-plane Solar-Y in Mm",
+            "carrington_chart_x_mm": "observer-independent gnomonic chart X in Mm",
+            "carrington_chart_y_mm": "observer-independent gnomonic chart Y in Mm",
+            "radius_m": "heliocentric radius at each traced shell point",
+            "carrington_colatitude_rad": (
+                "Carrington colatitude at each traced shell point"
+            ),
+            "carrington_longitude_rad": (
+                "Carrington longitude at each traced shell point"
+            ),
             "mass_density_kg_m3": (
                 "pinned STiC/Wittmann lookup evaluated at inferred T and Pgas; "
-                "this is the density used by the configured HSE residual"
+                "this is the density used by the configured MHS residual"
             ),
+        },
+        "carrington_rotation": {
+            "sidereal_period_days": CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS,
+            "angular_velocity_rad_per_s": CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
+            "axis": "+Zc",
         },
         "source_raster": raster.metadata,
         "checkpoint_data": module.checkpoint_metadata,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 import math
 from datetime import datetime
 import glob
@@ -15,13 +14,15 @@ import numpy as np
 import torch
 from astropy import units as u
 from astropy.constants import R_sun
-from astropy.coordinates import get_sun
+from astropy.coordinates import SkyCoord, get_sun
 from astropy.io import fits
 from astropy.time import Time
 from dateutil.parser import parse as parse_datetime
 from pytorch_lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, Subset, default_collate
+from torch.utils.data import DataLoader, Dataset, Subset
 
+from pme.coordinates import cartesian_to_spherical
+from pme.lte.geometry import chart_to_direction, direction_to_chart_mm
 from pme.lte.radiometry import (
     disk_center_continuum_radiance,
     load_solar_reference,
@@ -32,6 +33,9 @@ from pme.lte.radiometry import (
 
 SP_PREP_SOURCE_URL = (
     "https://sohoftp.nascom.nasa.gov/solarsoft/hinode/sot/idl/sp/util/sp_prep.pro"
+)
+CALIB_SBSP_SOURCE_URL = (
+    "https://sohoftp.nascom.nasa.gov/solarsoft/hinode/sot/idl/sp/util/calib_sbsp.pro"
 )
 SP_PREP_SOURCE_SHA256 = "63bd10f742fae21cb32f62fb11abb29f00c82c2445eb8fabd65976f7d22f60a9"
 THERMD_SBSP_SOURCE_URL = (
@@ -47,6 +51,140 @@ HINODE_KEYWORD_REFERENCE_URL = (
     "https://hinode.nao.ac.jp/uploads/2016/04/22/SB_MW_Key13.pdf"
 )
 SOLAR_WCS_REFERENCE_URL = "https://fits.gsfc.nasa.gov/wcs/coordinates.pdf"
+
+
+def _coordinate_xyz_m(coordinate) -> np.ndarray:
+    return np.moveaxis(coordinate.cartesian.xyz.to_value(u.m), 0, -1)
+
+
+def _hinode_carrington_rays(
+    solar_x_arcsec: np.ndarray,
+    solar_y_arcsec: np.ndarray,
+    times: Sequence[datetime],
+    *,
+    stokes_reference_angle_deg: float,
+    valid_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Build exact Earth-proxy rays in a fixed Carrington Cartesian frame."""
+
+    # Keep SunPy lazy so importing the side-effect-free FITS loader does not
+    # require creating a user configuration directory.
+    from sunpy.coordinates import frames
+
+    tx = np.asarray(solar_x_arcsec, dtype=np.float64)
+    ty = np.asarray(solar_y_arcsec, dtype=np.float64)
+    if tx.shape != ty.shape or tx.ndim != 2 or tx.shape[1] != len(times):
+        raise ValueError("Hinode pointing arrays must be [slit, scan].")
+    angle = float(stokes_reference_angle_deg)
+    if not np.isfinite(angle):
+        raise ValueError("stokes_reference_angle_deg must be finite.")
+    angle_rad = np.deg2rad(angle)
+    origins = np.empty((*tx.shape, 3), dtype=np.float64)
+    directions = np.empty_like(origins)
+    surface_positions = np.empty_like(origins)
+    stokes_bases = np.empty((*tx.shape, 3, 3), dtype=np.float64)
+
+    for column, obstime in enumerate(times):
+        target_frame = frames.HeliographicCarrington(
+            observer="earth", obstime=obstime
+        )
+        centre_hpc = SkyCoord(
+            Tx=0.0 * u.arcsec,
+            Ty=0.0 * u.arcsec,
+            frame=frames.Helioprojective,
+            observer="earth",
+            obstime=obstime,
+        )
+        observer = centre_hpc.observer.transform_to(target_frame)
+        observer_xyz = np.asarray(_coordinate_xyz_m(observer), dtype=np.float64)
+
+        # Establish the detector image-plane axes in the same global frame.
+        # Projecting this common camera axis onto each ray's transverse plane
+        # gives a smooth per-pixel Stokes basis across the raster.
+        probes = SkyCoord(
+            Tx=np.asarray((0.0, 1.0, 0.0)) * u.arcsec,
+            Ty=np.asarray((0.0, 0.0, 1.0)) * u.arcsec,
+            frame=frames.Helioprojective,
+            observer="earth",
+            obstime=obstime,
+        ).make_3d().transform_to(target_frame)
+        probe_ray = _coordinate_xyz_m(probes) - observer_xyz
+        probe_ray /= np.linalg.norm(probe_ray, axis=-1, keepdims=True)
+        camera_z = probe_ray[0]
+        camera_x = probe_ray[1] - np.dot(probe_ray[1], probe_ray[0]) * probe_ray[0]
+        camera_x /= np.linalg.norm(camera_x)
+        camera_y = probe_ray[2] - np.dot(probe_ray[2], camera_z) * camera_z
+        camera_y -= np.dot(camera_y, camera_x) * camera_x
+        camera_y /= np.linalg.norm(camera_y)
+
+        tx_rad = tx[:, column] * u.arcsec.to(u.rad)
+        ty_rad = ty[:, column] * u.arcsec.to(u.rad)
+        ray = (
+            (np.cos(ty_rad) * np.sin(tx_rad))[:, None] * camera_x
+            + np.sin(ty_rad)[:, None] * camera_y
+            + (np.cos(ty_rad) * np.cos(tx_rad))[:, None] * camera_z
+        )
+        ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
+        projection = ray @ observer_xyz
+        discriminant = projection**2 - (
+            np.dot(observer_xyz, observer_xyz) - R_sun.to_value(u.m) ** 2
+        )
+        distance = -projection - np.sqrt(np.clip(discriminant, 0.0, None))
+        surface_xyz = observer_xyz + distance[:, None] * ray
+
+        los = -ray
+        image_x = camera_x[None, :] - np.sum(
+            camera_x[None, :] * los, axis=-1, keepdims=True
+        ) * los
+        image_x /= np.linalg.norm(image_x, axis=-1, keepdims=True)
+        image_y = np.cross(los, image_x)
+        image_y /= np.linalg.norm(image_y, axis=-1, keepdims=True)
+        q_axis = np.cos(angle_rad) * image_x + np.sin(angle_rad) * image_y
+        u_axis = -np.sin(angle_rad) * image_x + np.cos(angle_rad) * image_y
+
+        origins[:, column] = observer_xyz
+        directions[:, column] = ray
+        surface_positions[:, column] = surface_xyz
+        stokes_bases[:, column] = np.stack((q_axis, u_axis, los), axis=-2)
+
+    surface_unit = surface_positions / np.linalg.norm(
+        surface_positions, axis=-1, keepdims=True
+    )
+    valid = np.asarray(valid_mask, dtype=bool)
+    if valid.shape != tx.shape or not np.any(valid):
+        raise ValueError("Carrington scene geometry requires valid on-disk pixels.")
+    centre = np.mean(surface_unit[valid], axis=0)
+    centre /= np.linalg.norm(centre)
+    solar_north = np.asarray((0.0, 0.0, 1.0))
+    chart_x = np.cross(solar_north, centre)
+    if np.linalg.norm(chart_x) < 1.0e-8:
+        chart_x = np.asarray((1.0, 0.0, 0.0))
+    chart_x /= np.linalg.norm(chart_x)
+    chart_y = np.cross(centre, chart_x)
+    chart_y /= np.linalg.norm(chart_y)
+    scene_basis = np.stack((chart_x, chart_y, centre), axis=0)
+    metadata = {
+        "frame": "HeliographicCarrington Cartesian",
+        "observer": "SunPy Earth observer proxy at each DATE_OBS",
+        "solar_radius_m": float(R_sun.to_value(u.m)),
+        "scene_basis_rows": scene_basis.tolist(),
+        "scene_basis_order": ["chart_x", "chart_y", "chart_normal"],
+        "stokes_basis_order": ["+Q", "+U", "toward_observer"],
+        "stokes_reference_angle_deg_from_hpc_x_toward_hpc_y": angle,
+        "stokes_reference_status": (
+            "sp_prep Level-1 has already rotated Q/U with CROTA2 into the solar "
+            "reference frame with +Q along solar east-west (HPC +X); zero degrees "
+            "therefore applies no second CROTA2 rotation"
+        ),
+        "stokes_reference_provenance": {
+            "processing_stage": "SolarSoft calib_sbsp operation 9 called by sp_prep",
+            "input_frame": "FPP polarization reference frame",
+            "stored_level1_frame": "solar reference frame; +Q along solar east-west",
+            "crota2_application": "already applied to Level-1 Q/U; spatial pointing only here",
+            "source_url": CALIB_SBSP_SOURCE_URL,
+        },
+    }
+    return origins, directions, surface_positions, stokes_bases, metadata
 def _observer_los_velocity_metadata(headers: Sequence[fits.Header]) -> dict:
     """Describe the spacecraft-Sun Doppler correction already in Level 1.
 
@@ -589,6 +727,10 @@ class HinodeRaster:
     wavelength_angstrom: torch.Tensor
     coords: torch.Tensor
     mu: torch.Tensor
+    ray_origin_m: torch.Tensor
+    ray_direction: torch.Tensor
+    surface_position_m: torch.Tensor
+    stokes_basis: torch.Tensor
     valid_mask: torch.Tensor
     metadata: dict
 
@@ -604,6 +746,41 @@ class HinodeRaster:
             raise ValueError("coords must contain finite physical coordinates.")
         if self.mu.shape != (*spatial_shape, 1):
             raise ValueError("mu must have shape [slit, scan, 1].")
+        if self.ray_origin_m.shape != (*spatial_shape, 3):
+            raise ValueError("ray_origin_m must have shape [slit, scan, 3].")
+        if self.ray_direction.shape != (*spatial_shape, 3):
+            raise ValueError("ray_direction must have shape [slit, scan, 3].")
+        if self.surface_position_m.shape != (*spatial_shape, 3):
+            raise ValueError("surface_position_m must have shape [slit, scan, 3].")
+        if self.stokes_basis.shape != (*spatial_shape, 3, 3):
+            raise ValueError("stokes_basis must have shape [slit, scan, 3, 3].")
+        if not all(
+            torch.isfinite(value).all()
+            for value in (
+                self.ray_origin_m,
+                self.ray_direction,
+                self.surface_position_m,
+                self.stokes_basis,
+            )
+        ):
+            raise ValueError("Ray geometry must contain only finite values.")
+        identity = torch.eye(3, dtype=self.stokes_basis.dtype).expand(
+            *spatial_shape, 3, 3
+        )
+        if not torch.allclose(
+            self.stokes_basis @ self.stokes_basis.transpose(-1, -2),
+            identity,
+            rtol=0.0,
+            atol=2.0e-5,
+        ) or torch.any(torch.linalg.det(self.stokes_basis) <= 0):
+            raise ValueError("stokes_basis must be right-handed and orthonormal.")
+        if not torch.allclose(
+            torch.linalg.vector_norm(self.ray_direction, dim=-1),
+            torch.ones(spatial_shape, dtype=self.ray_direction.dtype),
+            rtol=0.0,
+            atol=2.0e-5,
+        ):
+            raise ValueError("ray_direction must contain unit vectors.")
         if self.valid_mask.shape != spatial_shape or self.valid_mask.dtype != torch.bool:
             raise ValueError("valid_mask must be a boolean [slit, scan] tensor.")
         if not torch.all(self.wavelength_angstrom[1:] > self.wavelength_angstrom[:-1]):
@@ -628,6 +805,7 @@ def load_hinode_raster(
     quiet_sun_max_fractional_polarization: float = 0.01,
     quiet_sun_continuum_trim_quantiles=(0.05, 0.95),
     minimum_quiet_sun_pixels: int = 1,
+    stokes_reference_angle_deg: float = 0.0,
 ) -> HinodeRaster:
     """Load a Hinode Level-1 scan without plotting, logging, or global state.
 
@@ -639,10 +817,13 @@ def load_hinode_raster(
     order. ``DOP_RCV`` supplies the spacecraft-Sun LOS velocity, positive for
     redshift, but ``sp_prep`` has already removed that shift from Level 1.
     ``SPWLSHFT``/``SPWLSFT0`` likewise record corrections already performed by
-    ``sp_prep`` and are never applied a second time. Inversion coordinates are
-    ``[hours since the first scan, helioprojective Solar-X Mm, Solar-Y Mm]``;
-    the spatial conversion uses the same explicit geocentric ephemeris proxy
-    documented for the ray geometry.
+    ``sp_prep`` and are never applied a second time. ``sp_prep`` has also used
+    ``CROTA2`` to rotate Level-1 Q/U into the solar frame with +Q along HPC +X;
+    the default zero-degree Stokes angle therefore avoids a second rotation.
+    Inversion coordinates are
+    ``[hours since the first scan, Carrington-chart X Mm, chart Y Mm]``. Each
+    chart coordinate comes from the exact near-side ray/sphere intersection;
+    observer origins, directions, and Stokes bases are retained explicitly.
     """
 
     paths = _resolve_files(files, scan_slice=scan_slice)
@@ -762,9 +943,28 @@ def load_hinode_raster(
     )
     stokes[~valid] = np.nan
 
-    x_mm, y_mm = _tangent_plane_mm(
-        x_arcsec, y_arcsec, observer_distance_m
+    (
+        ray_origin_m,
+        ray_direction,
+        surface_position_m,
+        stokes_basis,
+        spherical_geometry,
+    ) = _hinode_carrington_rays(
+        x_arcsec,
+        y_arcsec,
+        times,
+        stokes_reference_angle_deg=stokes_reference_angle_deg,
+        valid_mask=valid,
     )
+    surface_direction = surface_position_m / np.linalg.norm(
+        surface_position_m, axis=-1, keepdims=True
+    )
+    chart_xy_mm = direction_to_chart_mm(
+        torch.from_numpy(surface_direction),
+        torch.tensor(spherical_geometry["scene_basis_rows"]),
+        spherical_geometry["solar_radius_m"],
+    ).numpy()
+    x_mm, y_mm = chart_xy_mm[..., 0], chart_xy_mm[..., 1]
     time_grid = np.broadcast_to(time_hours[None, :], x_mm.shape)
     coords = np.stack((time_grid, x_mm, y_mm), axis=-1).astype(np.float32)
     coordinate_affine = _coordinate_affine_metadata(
@@ -819,24 +1019,23 @@ def load_hinode_raster(
         "times": [time.isoformat() for time in times],
         "ref_time": ref_time.isoformat(),
         "coordinates": {
-            "order": ["time_hours", "solar_x_mm", "solar_y_mm"],
+            "order": ["time_hours", "carrington_chart_x_mm", "carrington_chart_y_mm"],
             "units": ["hour", "Mm", "Mm"],
             "time_origin": ref_time.isoformat(),
             "time_formula": "time_hours=(DATE_OBS-time_origin)/3600 s",
-            "spatial_frame": "helioprojective Solar-X/Solar-Y image plane",
-            "spatial_projection": "geocentric tangent plane through the Sun centre",
+            "spatial_frame": "observer-independent Carrington gnomonic scene chart",
+            "spatial_projection": "gnomonic chart tangent to the raster-centre solar direction",
             "spatial_formula": (
-                "X_mm=D*tan(Tx)/1e6; "
-                "Y_mm=D*tan(Ty)/(cos(Tx)*1e6)"
+                "xy_mm=R_sun*(u dot chart_xy)/(u dot chart_normal)/1e6"
             ),
             "observer": (
                 "Astropy geocentric solar ephemeris proxy; Level-1 headers do not "
                 "provide the Hinode spacecraft distance"
             ),
             "observer_distance_m": observer_distance_m.tolist(),
-            "solar_x_range_mm": [float(x_mm[valid].min()), float(x_mm[valid].max())],
-            "solar_y_range_mm": [float(y_mm[valid].min()), float(y_mm[valid].max())],
-            "surface_deprojection_applied": False,
+            "chart_x_range_mm": [float(x_mm[valid].min()), float(x_mm[valid].max())],
+            "chart_y_range_mm": [float(y_mm[valid].min()), float(y_mm[valid].max())],
+            "surface_deprojection_applied": True,
             "network_affine": coordinate_affine,
             "source_keywords": [
                 "DATE_OBS",
@@ -860,6 +1059,7 @@ def load_hinode_raster(
         },
         "ray_geometry": {
             **pointing_metadata,
+            **spherical_geometry,
             "mu_definition": (
                 "sqrt(max(0, 1 - (D/R_sun)^2*"
                 "(1 - (cos(Tx)*cos(Ty))^2)))"
@@ -875,8 +1075,8 @@ def load_hinode_raster(
                 "provide a spacecraft observer distance"
             ),
             "transfer_model": (
-                "1.5D plane-parallel: mu lengthens each vertical optical-depth "
-                "interval by 1/mu without horizontal ray transport"
+                "differentiable 3-D ray intersections with learned corrugated "
+                "tau500 surfaces; formal transfer uses exact delta-s"
             ),
         },
         "data_fingerprints": {
@@ -885,14 +1085,22 @@ def load_hinode_raster(
             "wavelength_angstrom": _array_sha256(wavelength),
             "coords": _array_sha256(coords),
             "mu": _array_sha256(mu),
+            "ray_origin_m": _array_sha256(ray_origin_m),
+            "ray_direction": _array_sha256(ray_direction),
+            "surface_position_m": _array_sha256(surface_position_m),
+            "stokes_basis": _array_sha256(stokes_basis),
             "valid_mask": _array_sha256(valid),
         },
     }
     return HinodeRaster(
         stokes=torch.from_numpy(np.asarray(stokes, dtype=np.float32)),
-        wavelength_angstrom=torch.from_numpy(np.asarray(wavelength, dtype=np.float64)),
+        wavelength_angstrom=torch.from_numpy(np.asarray(wavelength, dtype=np.float32)),
         coords=torch.from_numpy(coords),
         mu=torch.from_numpy(mu[..., None]),
+        ray_origin_m=torch.from_numpy(ray_origin_m.astype(np.float32)),
+        ray_direction=torch.from_numpy(ray_direction.astype(np.float32)),
+        surface_position_m=torch.from_numpy(surface_position_m.astype(np.float32)),
+        stokes_basis=torch.from_numpy(stokes_basis.astype(np.float32)),
         valid_mask=torch.from_numpy(valid),
         metadata=metadata,
     )
@@ -917,122 +1125,115 @@ class HinodePixelDataset(Dataset):
         return {
             "coords": self.raster.coords[slit, scan],
             "mu": self.raster.mu[slit, scan],
+            "ray_origin_m": self.raster.ray_origin_m[slit, scan],
+            "ray_direction": self.raster.ray_direction[slit, scan],
+            "stokes_basis": self.raster.stokes_basis[slit, scan],
             "stokes": self.raster.stokes[slit, scan],
             "pixel_index": pixel,
         }
 
 
-class _UniformSpatialSampler:
-    """Draw independent uniform Solar-X/Solar-Y samples over the FOV bounds."""
-
-    def __init__(self, raster: HinodeRaster):
-        valid = raster.valid_mask.detach()
-        if not torch.any(valid):
-            raise ValueError("Coordinate sampling requires at least one valid pixel.")
-        coordinates = raster.coords.detach()[valid]
-        self.time_hours = coordinates[:, 0].mean()
-        self.xy_min = coordinates[:, 1:].amin(dim=0)
-        self.xy_max = coordinates[:, 1:].amax(dim=0)
-
-    @property
-    def metadata(self) -> dict:
-        return {
-            "type": "independent_uniform_xy_bounds",
-            "coordinate_order": ["time_hours", "solar_x_mm", "solar_y_mm"],
-            "time_sampling": "fixed valid-pixel mean; static atmosphere ignores time",
-            "solar_x_bounds_mm": [self.xy_min[0].item(), self.xy_max[0].item()],
-            "solar_y_bounds_mm": [self.xy_min[1].item(), self.xy_max[1].item()],
-            "axis_aligned_bounding_box_used": True,
-        }
-
-    def sample(self) -> torch.Tensor:
-        fraction = torch.rand(2, dtype=self.xy_min.dtype, device=self.xy_min.device)
-        xy = self.xy_min + fraction * (self.xy_max - self.xy_min)
-        return torch.cat((self.time_hours.reshape(1), xy))
-
-
-class RandomAtmosphereVolumeDataset(Dataset):
-    """Independent spatial samples grouped onto random tau surfaces at collation.
-
-    The dataset samples only coordinates. The physics collate function assigns
-    consecutive groups of coordinates one shared random ``log_tau500`` value.
-    """
+class RandomRayShellDataset(Dataset):
+    """Sample the physical volume swept out by the observed ray bundle."""
 
     def __init__(
         self,
         raster: HinodeRaster,
-        log_tau_bounds,
+        height_bounds_Mm,
         length: int,
+        *,
+        tangent_margin_m: float = 0.0,
+        top_only=False,
+        samples_per_layer: int = 1,
     ):
-        self.coordinate_sampler = _UniformSpatialSampler(raster)
-        self.log_tau_min, self.log_tau_max = map(float, log_tau_bounds)
+        valid = raster.valid_mask.detach()
+        self.coords = raster.coords.detach()[valid]
+        self.ray_origin_m = raster.ray_origin_m.detach()[valid]
+        self.ray_direction = raster.ray_direction.detach()[valid]
+        self.outer_height_Mm, self.inner_height_Mm = map(float, height_bounds_Mm)
+        self.tangent_margin_m = float(tangent_margin_m)
         self.length = int(length)
+        self.top_only = bool(top_only)
+        self.samples_per_layer = int(samples_per_layer)
         if (
             self.length < 1
-            or not self.log_tau_max > self.log_tau_min
+            or self.samples_per_layer < 1
+            or not self.outer_height_Mm > self.inner_height_Mm
+            or self.tangent_margin_m < 0
         ):
-            raise ValueError("Invalid physics-volume sampler configuration.")
-
-    def __len__(self) -> int:
-        return self.length
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        del index
-        return {"coords": self.coordinate_sampler.sample()}
-
-
-def _grouped_tau_collate(
-    batch,
-    *,
-    log_tau_bounds,
-    points_per_tau: int,
-):
-    """Assign each spatial group one freshly sampled optical-depth value."""
-
-    collated = default_collate(batch)
-    sample_count = collated["coords"].shape[0]
-    if sample_count % points_per_tau:
-        raise ValueError(
-            "A grouped tau batch must be divisible by points_per_tau; got "
-            f"{sample_count} samples and {points_per_tau} points per tau."
+            raise ValueError("Invalid physical-shell sampler configuration.")
+        geometry = raster.metadata["ray_geometry"]
+        solar_radius_value_m = float(geometry["solar_radius_m"])
+        self.solar_radius_m = self.coords.new_tensor(solar_radius_value_m)
+        basis = torch.tensor(
+            geometry["scene_basis_rows"],
+            dtype=self.coords.dtype,
+            device=self.coords.device,
         )
-    minimum, maximum = map(float, log_tau_bounds)
-    group_count = sample_count // points_per_tau
-    group_tau = minimum + torch.rand(group_count) * (maximum - minimum)
-    collated["log_tau500"] = group_tau.repeat_interleave(points_per_tau)
-    return collated
-
-
-class RandomTopBoundaryDataset(Dataset):
-    """Independent pressure-boundary samples on the upper optical-depth face."""
-
-    def __init__(
-        self,
-        raster: HinodeRaster,
-        top_log_tau: float,
-        gas_pressure_pa: float,
-        length: int,
-    ):
-        self.coordinate_sampler = _UniformSpatialSampler(raster)
-        self.top_log_tau = float(top_log_tau)
-        self.gas_pressure_pa = float(gas_pressure_pa)
-        self.length = int(length)
-        if self.length < 1 or self.gas_pressure_pa <= 0:
-            raise ValueError(
-                "Top-boundary sampler length and gas pressure must be positive."
-            )
+        reference_rsun = chart_to_direction(
+            self.coords[:, 1:], basis, self.solar_radius_m
+        )
+        ray = self.ray_direction.to(self.coords)
+        ray = ray / torch.linalg.vector_norm(
+            ray, dim=-1, keepdim=True
+        )
+        impact_rsun = torch.linalg.vector_norm(
+            torch.linalg.cross(reference_rsun, ray, dim=-1), dim=-1
+        )
+        tangent_height_Mm = (
+            (impact_rsun - 1.0) * self.solar_radius_m + self.tangent_margin_m
+        ) / 1.0e6
+        self.reachable_inner_height_Mm = torch.maximum(
+            self.coords.new_full((self.coords.shape[0],), self.inner_height_Mm),
+            tangent_height_Mm,
+        )
+        if torch.any(self.reachable_inner_height_Mm >= self.outer_height_Mm):
+            raise ValueError("At least one valid observed ray does not enter the shell.")
+        self.observed_inner_height_Mm = float(self.reachable_inner_height_Mm.min())
 
     def __len__(self) -> int:
         return self.length
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         del index
-        coordinate = self.coordinate_sampler.sample()
+        if self.top_only:
+            pixel = int(torch.randint(self.coords.shape[0], ()).item())
+            return {
+                "coords": self.coords[pixel],
+                "ray_origin_m": self.ray_origin_m[pixel],
+                "ray_direction": self.ray_direction[pixel],
+                "geometric_height_m": self.coords.new_tensor(self.outer_height_Mm * 1.0e6),
+            }
+        fraction = torch.rand((), dtype=self.coords.dtype)
+        height_Mm = self.outer_height_Mm + fraction * (
+            self.observed_inner_height_Mm - self.outer_height_Mm
+        )
+        eligible = torch.nonzero(
+            self.reachable_inner_height_Mm <= height_Mm,
+            as_tuple=False,
+        ).squeeze(-1)
+        if eligible.numel() == 0:
+            raise RuntimeError("No observed ray reaches the sampled physics height layer.")
+        selected = eligible[
+            torch.randint(eligible.numel(), (self.samples_per_layer,))
+        ]
+        height = height_Mm.expand(self.samples_per_layer) * 1.0e6
         return {
-            "coords": coordinate,
-            "log_tau500": coordinate.new_tensor(self.top_log_tau),
-            "gas_pressure_pa": coordinate.new_tensor(self.gas_pressure_pa),
+            "coords": self.coords[selected],
+            "ray_origin_m": self.ray_origin_m[selected],
+            "ray_direction": self.ray_direction[selected],
+            "geometric_height_m": height,
         }
+
+
+def _flatten_height_layers(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack sampled layers and flatten only their layer/point dimensions."""
+
+    flattened = {}
+    for name in batch[0]:
+        values = torch.stack([item[name] for item in batch], dim=0)
+        flattened[name] = values.reshape(-1, *values.shape[2:])
+    return flattened
 
 
 class HinodeLTEDataModule(LightningDataModule):
@@ -1101,45 +1302,87 @@ class HinodeLTEDataModule(LightningDataModule):
         log_tau500,
         *,
         volume_points_per_step: int,
-        points_per_tau: int,
-        boundary_points_per_step: int,
-        top_pressure_pa: float | None,
+        height_layers_per_step: int,
+        optical_depth_anchor_points_per_step: int,
+        shell_height_bounds_Mm,
+        tangent_margin_m: float = 0.0,
     ) -> None:
-        """Attach interior physics samples and an optional pressure boundary stream."""
+        """Attach interior physics samples and an optional optical-depth anchor stream."""
 
         grid = torch.as_tensor(log_tau500)
         if grid.ndim != 1 or grid.numel() < 2 or not torch.all(grid[1:] > grid[:-1]):
             raise ValueError("Physics sampling requires an increasing log_tau500 grid.")
-        if volume_points_per_step < 1 or points_per_tau < 1 or boundary_points_per_step < 0:
+        if volume_points_per_step < 1 or optical_depth_anchor_points_per_step < 0:
             raise ValueError(
-                "Physics volume samples and points_per_tau must be positive; "
-                "boundary samples cannot be negative."
+                "Physics volume samples must be positive and optical-depth anchor "
+                "samples cannot be negative."
             )
-        if volume_points_per_step % points_per_tau:
-            raise ValueError(
-                "volume_points_per_step must be divisible by points_per_tau."
-            )
-        if boundary_points_per_step > 0 and (
-            top_pressure_pa is None or top_pressure_pa <= 0
+        if (
+            height_layers_per_step < 1
+            or height_layers_per_step > volume_points_per_step
+            or volume_points_per_step % height_layers_per_step != 0
         ):
             raise ValueError(
-                "A positive top pressure is required when the pressure boundary stream "
-                "is enabled."
+                "Physics volume_points_per_step must be exactly divisible by a positive "
+                "height_layers_per_step."
             )
+        outer, inner = map(float, shell_height_bounds_Mm)
+        if not outer > inner:
+            raise ValueError("Physical shell outer height must exceed inner height.")
+        shell_bounds = (outer, inner)
+        if not math.isfinite(tangent_margin_m) or tangent_margin_m < 0:
+            raise ValueError("Physical-shell tangent margin must be nonnegative.")
+        if self.raster is None:
+            raise RuntimeError("Call setup() before configuring physics sampling.")
+
+        valid_surface = self.raster.surface_position_m[self.raster.valid_mask]
+        spherical_surface = cartesian_to_spherical(valid_surface, torch)
+        longitude = spherical_surface[:, 2]
+        longitude_center = torch.atan2(
+            torch.sin(longitude).mean(), torch.cos(longitude).mean()
+        )
+        longitude_offset = torch.atan2(
+            torch.sin(longitude - longitude_center),
+            torch.cos(longitude - longitude_center),
+        )
+        latitude = 0.5 * math.pi - spherical_surface[:, 1]
+        angle_scale = 180.0 / math.pi
+        solar_radius_m = float(self.raster.metadata["ray_geometry"]["solar_radius_m"])
         self.physics_sampling_config = {
-            "log_tau_bounds": (float(grid[0]), float(grid[-1])),
             "volume_points_per_step": int(volume_points_per_step),
-            "points_per_tau": int(points_per_tau),
-            "tau_surfaces_per_step": int(volume_points_per_step // points_per_tau),
-            "boundary_points_per_step": int(boundary_points_per_step),
-            "top_boundary_stream_enabled": bool(boundary_points_per_step > 0),
-            "top_pressure_pa": (
-                None if boundary_points_per_step == 0 else float(top_pressure_pa)
+            "height_layers_per_step": int(height_layers_per_step),
+            "optical_depth_anchor_points_per_step": int(
+                optical_depth_anchor_points_per_step
             ),
+            "optical_depth_anchor_stream_enabled": bool(
+                optical_depth_anchor_points_per_step > 0
+            ),
+            "shell_height_bounds_Mm": shell_bounds,
+            "tangent_margin_m": float(tangent_margin_m),
             "collocation_distribution": (
-                "independent uniform Solar-X/Y samples grouped onto shared, uniformly "
-                "sampled log_tau500 surfaces"
+                "uniform random geometric-height layers; random observed rays that "
+                "reach each shared layer"
             ),
+            "observed_domain_bounds": {
+                "surface_longitude_center_deg": float(longitude_center * angle_scale),
+                "surface_longitude_offset_deg": [
+                    float(longitude_offset.min() * angle_scale),
+                    float(longitude_offset.max() * angle_scale),
+                ],
+                "surface_latitude_deg": [
+                    float(latitude.min() * angle_scale),
+                    float(latitude.max() * angle_scale),
+                ],
+                "height_Mm": [inner, outer],
+                "radius_Rsun": [
+                    (solar_radius_m + inner * 1.0e6) / solar_radius_m,
+                    (solar_radius_m + outer * 1.0e6) / solar_radius_m,
+                ],
+                "support": (
+                    "exact radius-dependent observed-ray bundle; angular surface "
+                    "bounds are descriptive and are not sampled as a rectangular box"
+                ),
+            },
         }
 
     @property
@@ -1176,9 +1419,19 @@ class HinodeLTEDataModule(LightningDataModule):
             else dict(self.physics_sampling_config)
         )
         if metadata["physics_sampling"] is not None:
-            metadata["physics_sampling"]["spatial_sampling"] = (
-                _UniformSpatialSampler(self.raster).metadata
-            )
+            metadata["physics_sampling"]["spatial_sampling"] = {
+                "type": "observed_ray_bundle",
+                "support": (
+                    "valid observation rays and radial offsets inside "
+                    "shell_height_bounds_Mm"
+                ),
+                "position_formula": "x=o+s*d with exact spherical intersection",
+                "coordinate_frame": "heliocentric Carrington Cartesian",
+                "selection_rule": (
+                    "at every sampled radius, draw only rays that intersect that "
+                    "radius; no rectangular longitude-latitude approximation"
+                ),
+            }
         return metadata
 
     def _data_loader(
@@ -1216,34 +1469,37 @@ class HinodeLTEDataModule(LightningDataModule):
             return stokes_loader
         steps = len(stokes_loader)
         volume_batch = self.physics_sampling_config["volume_points_per_step"]
-        boundary_batch = self.physics_sampling_config["boundary_points_per_step"]
-        volume = RandomAtmosphereVolumeDataset(
+        height_layers = self.physics_sampling_config["height_layers_per_step"]
+        points_per_layer = volume_batch // height_layers
+        anchor_batch = self.physics_sampling_config[
+            "optical_depth_anchor_points_per_step"
+        ]
+        volume = RandomRayShellDataset(
             self.raster,
-            self.physics_sampling_config["log_tau_bounds"],
-            steps * volume_batch,
+            self.physics_sampling_config["shell_height_bounds_Mm"],
+            steps * height_layers,
+            tangent_margin_m=self.physics_sampling_config["tangent_margin_m"],
+            samples_per_layer=points_per_layer,
         )
         loaders = {
             "stokes": stokes_loader,
             "physics_volume": self._data_loader(
                 dataset=volume,
                 shuffle=False,
-                batch_size=volume_batch,
-                collate_fn=partial(
-                    _grouped_tau_collate,
-                    log_tau_bounds=self.physics_sampling_config["log_tau_bounds"],
-                    points_per_tau=self.physics_sampling_config["points_per_tau"],
-                ),
+                batch_size=height_layers,
+                collate_fn=_flatten_height_layers,
             ),
         }
-        if boundary_batch > 0:
-            boundary = RandomTopBoundaryDataset(
+        if anchor_batch > 0:
+            anchor = RandomRayShellDataset(
                 self.raster,
-                self.physics_sampling_config["log_tau_bounds"][0],
-                self.physics_sampling_config["top_pressure_pa"],
-                steps * boundary_batch,
+                self.physics_sampling_config["shell_height_bounds_Mm"],
+                steps * anchor_batch,
+                tangent_margin_m=self.physics_sampling_config["tangent_margin_m"],
+                top_only=True,
             )
-            loaders["pressure_boundary"] = self._data_loader(
-                dataset=boundary, shuffle=False, batch_size=boundary_batch
+            loaders["optical_depth_anchor"] = self._data_loader(
+                dataset=anchor, shuffle=False, batch_size=anchor_batch
             )
         return loaders
 

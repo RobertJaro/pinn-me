@@ -499,7 +499,7 @@ class LTEEOS(nn.Module):
 
         # Treat all metals as one tensor dimension. The previous scalar loop
         # launched one softmax and several pointwise kernels per element for
-        # every Newton iteration, which dominated EOS/HSE runtime on both CPU
+        # every Newton iteration, which dominated EOS/MHS runtime on both CPU
         # and accelerators. This is algebraically the same three-stage Saha
         # sum, with element as the penultimate axis.
         metals = tuple(symbol for symbol in element_symbols if symbol != "H")

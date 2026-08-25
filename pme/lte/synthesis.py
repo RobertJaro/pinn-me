@@ -30,6 +30,7 @@ class SynthesisDiagnostics:
     alpha500: torch.Tensor
     continuum_extinction: torch.Tensor
     propagation: PropagationDiagnostics
+    cumulative_tau500_along_path: torch.Tensor | None = None
 
 
 class LTESynthesizer(nn.Module):
@@ -119,7 +120,7 @@ class LTESynthesizer(nn.Module):
         if atmosphere.gas_pressure is None:
             raise ValueError(
                 "LTE synthesis requires gas_pressure. In inversion it is a smooth "
-                "coordinate-network output constrained by the HSE residual; the "
+                "coordinate-network output constrained by the MHS residual; the "
                 "forward solver deliberately performs no iterative pressure solve."
             )
         return atmosphere.gas_pressure
@@ -137,6 +138,7 @@ class LTESynthesizer(nn.Module):
         *,
         return_diagnostics: bool = False,
         radiance_scale: torch.Tensor | float | None = None,
+        ray_distance_m: torch.Tensor | None = None,
     ):
         """Synthesize emergent Stokes profiles with shape ``[..., 4, wavelength]``.
 
@@ -159,7 +161,9 @@ class LTESynthesizer(nn.Module):
         if not torch.isfinite(wavelength).all() or torch.any(wavelength <= 0):
             raise ValueError("wavelength_angstrom must be finite and positive")
         ray_mu = torch.as_tensor(mu, dtype=temperature.dtype, device=temperature.device)
-        if not torch.isfinite(ray_mu).all() or torch.any((ray_mu <= 0) | (ray_mu > 1)):
+        if ray_distance_m is None and (
+            not torch.isfinite(ray_mu).all() or torch.any((ray_mu <= 0) | (ray_mu > 1))
+        ):
             raise ValueError("mu must be finite and satisfy 0 < mu <= 1")
 
         gas_pressure = self._gas_pressure(atmosphere, grid)
@@ -228,6 +232,7 @@ class LTESynthesizer(nn.Module):
             alpha500=(
                 alpha500 if atmosphere.geometric_height_m is not None else None
             ),
+            ray_distance_m=ray_distance_m,
         )
 
         stokes = emergent.movedim(-1, -2)
@@ -249,8 +254,47 @@ class LTESynthesizer(nn.Module):
             alpha500=alpha500,
             continuum_extinction=continuum_extinction,
             propagation=propagation_diagnostics,
+            cumulative_tau500_along_path=self._cumulative_tau500(
+                alpha500,
+                ray_distance_m=ray_distance_m,
+                geometric_height_m=atmosphere.geometric_height_m,
+                mu=ray_mu,
+            ),
         )
         return stokes, diagnostics
+
+    @staticmethod
+    def _cumulative_tau500(
+        alpha500: torch.Tensor,
+        *,
+        ray_distance_m: torch.Tensor | None,
+        geometric_height_m: torch.Tensor | None,
+        mu: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Integrate absolute 500-nm opacity along the realized path."""
+
+        if ray_distance_m is not None:
+            # These are solar-local offsets from the outer shell, not absolute
+            # spacecraft distances. Difference before matching opacity dtype.
+            distance = torch.as_tensor(ray_distance_m, device=alpha500.device)
+            interval_m = (
+                distance[..., 1:] - distance[..., :-1]
+            ).abs().to(alpha500)
+        elif geometric_height_m is not None:
+            height = geometric_height_m.to(alpha500)
+            ray_mu = mu
+            while ray_mu.ndim < height.ndim:
+                ray_mu = ray_mu.unsqueeze(-1)
+            interval_m = (height[..., :-1] - height[..., 1:]).abs() / ray_mu
+        else:
+            return None
+        if torch.any(interval_m <= 0):
+            raise ValueError("The opacity-integration path must have nonzero layer lengths.")
+        increments = 0.5 * (alpha500[..., :-1] + alpha500[..., 1:]) * interval_m
+        return torch.cat(
+            (torch.zeros_like(alpha500[..., :1]), torch.cumsum(increments, dim=-1)),
+            dim=-1,
+        )
 
     def metadata(self) -> dict:
         return {
@@ -300,17 +344,20 @@ class LTESynthesizer(nn.Module):
             ),
             "ray_geometry": {
                 "mu": "cosine of the ray to the local vertical; 0 < mu <= 1",
-                "transfer_equation": "mu*dI/dtau500 = K_lambda*(I-S)",
-                "application": (
-                    "applied exactly once as delta_tau500/mu in the polarized "
-                    "formal solution"
+                "transfer_equation": (
+                    "exact-ray mode: dI/ds=-K_length(I-S); legacy mode: "
+                    "mu*dI/dtau500=K_tau(I-S)"
                 ),
-                "approximation": (
-                    "1.5D plane-parallel columns; no horizontal displacement "
-                    "along an inclined ray"
+                "application": (
+                    "not used by transfer when exact ray distances are supplied; "
+                    "otherwise applied once as delta_tau500/mu"
+                ),
+                "exact_ray_sampling": (
+                    "ordered full-3D points along each observed ray; continuum "
+                    "tau500 is the cumulative trapezoidal integral of alpha500 ds"
                 ),
             },
-            "pressure_source": "supplied atmosphere (no iterative HSE solve)",
+            "pressure_source": "supplied atmosphere (no iterative MHS solve)",
             "runtime_atomic_eos": (
                 "none; production thermodynamics and line populations use the "
                 "pinned offline-generated STiC lookup"
@@ -318,15 +365,15 @@ class LTESynthesizer(nn.Module):
             "continuum_lookup": self.continuum_opacity.metadata(),
             "thermodynamic_roles": {
                 "stic_wittmann": (
-                    "total continuum extinction, mass density for the configured HSE, "
+                    "total continuum extinction, mass density for the configured MHS, "
                     "electron density for Stark broadening, physical neutral atomic-H "
                     "density for ABO broadening, n(Fe I)/U(Fe I) for LTE lower-level "
-                    "populations, and the FALC-consistent upper pressure boundary"
+                    "populations, and the FALC reference stratification and gravity"
                 ),
                 "barklem_saha": (
                     "reference-only atomic state and the inspectable H-minus-only "
                     "continuum decomposition; it is not used for production continuum, "
-                    "Fe-I line populations, damping perturbers, or production HSE"
+                    "Fe-I line populations, damping perturbers, or production MHS"
                 ),
             },
         }

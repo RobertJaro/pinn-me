@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+from datetime import datetime
 from pathlib import Path
 from astropy import units as u
 from astropy.constants import R_sun
@@ -10,11 +11,11 @@ from astropy.time import Time
 
 from pme.lte.atmosphere import StratifiedAtmosphere
 from pme.lte.examples import synthetic_temperature_profile
+from pme.lte.geometry import chart_to_direction, direction_to_chart_mm
 from pme.lte.hinode import (
     HinodeLTEDataModule,
     HinodePixelDataset,
-    RandomAtmosphereVolumeDataset,
-    RandomTopBoundaryDataset,
+    _hinode_carrington_rays,
     _atlas_calibrate_stokes,
     load_hinode_raster,
 )
@@ -25,6 +26,59 @@ from pme.lte.radiometry import (
     neckel_continuum_limb_darkening,
 )
 from pme.train.lte_module import LTEModule
+
+
+def test_hinode_stokes_basis_tracks_positive_hpc_axes_and_rotation():
+    """Guard the physical signs, not just orthogonality, of the Stokes basis."""
+
+    obstime = datetime.fromisoformat("2007-01-06T00:47:20.497")
+    tx = np.asarray([[70.0]])
+    ty = np.asarray([[-26.0]])
+
+    def geometry(x, y, angle=0.0):
+        return _hinode_carrington_rays(
+            np.asarray([[x]]),
+            np.asarray([[y]]),
+            [obstime],
+            stokes_reference_angle_deg=angle,
+            valid_mask=np.ones((1, 1), dtype=bool),
+        )
+
+    _, direction, _, basis, _ = geometry(tx.item(), ty.item())
+    epsilon_arcsec = 0.01
+    direction_x_minus = geometry(tx.item() - epsilon_arcsec, ty.item())[1][0, 0]
+    direction_x_plus = geometry(tx.item() + epsilon_arcsec, ty.item())[1][0, 0]
+    direction_y_minus = geometry(tx.item(), ty.item() - epsilon_arcsec)[1][0, 0]
+    direction_y_plus = geometry(tx.item(), ty.item() + epsilon_arcsec)[1][0, 0]
+
+    def transverse_tangent(delta):
+        ray = direction[0, 0]
+        delta = delta - np.dot(delta, ray) * ray
+        return delta / np.linalg.norm(delta)
+
+    hpc_x = transverse_tangent(direction_x_plus - direction_x_minus)
+    hpc_y = transverse_tangent(direction_y_plus - direction_y_minus)
+    np.testing.assert_allclose(np.dot(basis[0, 0, 0], hpc_x), 1.0, atol=1.0e-12)
+    np.testing.assert_allclose(np.dot(basis[0, 0, 1], hpc_y), 1.0, atol=1.0e-12)
+    np.testing.assert_allclose(basis[0, 0, 2], -direction[0, 0], atol=1.0e-15)
+    np.testing.assert_allclose(
+        np.cross(basis[0, 0, 0], basis[0, 0, 1]),
+        basis[0, 0, 2],
+        atol=1.0e-15,
+    )
+
+    rotated = geometry(tx.item(), ty.item(), angle=30.0)[3][0, 0]
+    angle = np.deg2rad(30.0)
+    np.testing.assert_allclose(
+        rotated[0],
+        np.cos(angle) * basis[0, 0, 0] + np.sin(angle) * basis[0, 0, 1],
+        atol=1.0e-15,
+    )
+    np.testing.assert_allclose(
+        rotated[1],
+        -np.sin(angle) * basis[0, 0, 0] + np.cos(angle) * basis[0, 0, 1],
+        atol=1.0e-15,
+    )
 
 
 def test_prepared_fts_reference_has_absolute_continuum_and_neckel_clv():
@@ -88,6 +142,16 @@ def test_hinode_loader_uses_one_based_wcs_and_preserves_detector_order(
     synthetic_hinode_files, expected_hinode_wavelength
 ):
     raster = load_hinode_raster(synthetic_hinode_files)
+    for value in (
+        raster.stokes,
+        raster.wavelength_angstrom,
+        raster.coords,
+        raster.mu,
+        raster.ray_origin_m,
+        raster.ray_direction,
+        raster.stokes_basis,
+    ):
+        assert value.dtype == torch.float32
 
     assert raster.stokes.shape == (3, 2, 4, 112)
     assert raster.wavelength_angstrom.shape == (112,)
@@ -177,7 +241,10 @@ def test_hinode_wavelength_wcs_converts_angstrom_equivalent_units(
 
     raster = load_hinode_raster(synthetic_hinode_files)
     np.testing.assert_allclose(
-        raster.wavelength_angstrom.numpy(), expected_hinode_wavelength, rtol=0.0, atol=1e-9
+        raster.wavelength_angstrom.numpy(),
+        expected_hinode_wavelength,
+        rtol=0.0,
+        atol=3e-4,
     )
     wavelength = raster.metadata["wavelength"]
     assert wavelength["source_cunit1"] == "nm"
@@ -240,31 +307,46 @@ def test_hinode_mu_uses_degree_slit_rotation_and_exact_ray_impact(
         np.testing.assert_allclose(
             raster.mu[:, scan, 0].numpy(), expected, rtol=0.0, atol=5e-8
         )
-        np.testing.assert_allclose(
-            raster.coords[:, scan, 1].numpy(),
-            distance * np.tan(tx) / 1.0e6,
-            rtol=0.0,
-            atol=5e-5,
-        )
-        exact_y_mm = distance * np.tan(ty) / np.cos(tx) / 1.0e6
-        np.testing.assert_allclose(
-            raster.coords[:, scan, 2].numpy(),
-            exact_y_mm,
-            rtol=0.0,
-            atol=5e-5,
-        )
-        small_angle_y_mm = distance * np.tan(ty) / 1.0e6
-        assert np.max(np.abs(exact_y_mm - small_angle_y_mm)) > 1.0e-3
+
+    surface = chart_to_direction(
+        raster.coords[..., 1:],
+        torch.tensor(raster.metadata["ray_geometry"]["scene_basis_rows"]),
+        R_sun.to_value(u.m),
+    ) * R_sun.to_value(u.m)
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(surface, dim=-1),
+        torch.full(raster.spatial_shape, R_sun.to_value(u.m), dtype=surface.dtype),
+        rtol=0.0,
+        atol=128.0,
+    )
+    derived_mu = (
+        surface / torch.linalg.vector_norm(surface, dim=-1, keepdim=True)
+        * (-raster.ray_direction)
+    ).sum(dim=-1)
+    torch.testing.assert_close(derived_mu.float(), raster.mu[..., 0], rtol=0, atol=1e-6)
+    expected_chart = direction_to_chart_mm(
+        surface,
+        torch.tensor(raster.metadata["ray_geometry"]["scene_basis_rows"]),
+        R_sun.to_value(u.m),
+    )
+    torch.testing.assert_close(raster.coords[..., 1:], expected_chart.float(), atol=1e-4, rtol=0)
 
     geometry = raster.metadata["ray_geometry"]
     assert geometry["rotation_unit"] == "degree"
     assert geometry["crota2_deg"] == [30.0, 30.0]
+    assert geometry["stokes_reference_angle_deg_from_hpc_x_toward_hpc_y"] == 0.0
+    reference = geometry["stokes_reference_provenance"]
+    assert reference["stored_level1_frame"].endswith(
+        "+Q along solar east-west"
+    )
+    assert reference["crota2_application"].startswith("already applied")
+    assert "no second CROTA2 rotation" in geometry["stokes_reference_status"]
     assert geometry["slit_scale_arcsec_per_pixel"] == [0.1585, 0.1585]
     assert geometry["apparent_solar_radius_formula"].startswith("asin")
     assert geometry["impact_parameter_formula"] == (
         "b=D*sqrt(1-(cos(Tx)*cos(Ty))^2)"
     )
-    assert geometry["transfer_model"].startswith("1.5D")
+    assert geometry["transfer_model"].startswith("differentiable 3-D")
 
 
 def test_hinode_coords_are_physical_solar_xy_mm_with_saved_affine(
@@ -272,45 +354,24 @@ def test_hinode_coords_are_physical_solar_xy_mm_with_saved_affine(
 ):
     raster = load_hinode_raster(synthetic_hinode_files)
 
-    dates = (
-        "2007-01-05T23:59:07.816",
-        "2007-01-05T23:59:08.816",
-    )
-    expected_x = np.empty((3, 2), dtype=np.float64)
-    expected_y = np.empty_like(expected_x)
-    row_offset_arcsec = (np.arange(3) + 1.0 - 1.5) * 0.1585
-    for scan, date_obs in enumerate(dates):
-        distance = get_sun(Time(date_obs)).distance.to_value(u.m)
-        tx = (-22.0 + scan * 0.14857) * u.arcsec.to(u.rad)
-        expected_x[:, scan] = (
-            distance
-            * np.tan(tx)
-            / 1.0e6
-        )
-        expected_y[:, scan] = (
-            distance
-            * np.tan((-4.0 + row_offset_arcsec) * u.arcsec.to(u.rad))
-            / np.cos(tx)
-            / 1.0e6
-        )
-
     np.testing.assert_allclose(
         raster.coords[..., 0].numpy(),
         np.broadcast_to(np.asarray((0.0, 1.0 / 3600.0)), (3, 2)),
         rtol=0.0,
         atol=1.0e-10,
     )
-    np.testing.assert_allclose(
-        raster.coords[..., 1].numpy(), expected_x, rtol=0.0, atol=1.0e-6
-    )
-    np.testing.assert_allclose(
-        raster.coords[..., 2].numpy(), expected_y, rtol=0.0, atol=1.0e-6
-    )
+    assert torch.isfinite(raster.coords[..., 1:]).all()
+    assert torch.linalg.vector_norm(
+        raster.coords[..., 1:].reshape(-1, 2).mean(dim=0)
+    ) < 1.0e-3
+    assert torch.all(torch.linalg.vector_norm(raster.stokes_basis, dim=-1) > 0.99999)
 
     coordinates = raster.metadata["coordinates"]
-    assert coordinates["order"] == ["time_hours", "solar_x_mm", "solar_y_mm"]
+    assert coordinates["order"] == [
+        "time_hours", "carrington_chart_x_mm", "carrington_chart_y_mm"
+    ]
     assert coordinates["units"] == ["hour", "Mm", "Mm"]
-    assert not coordinates["surface_deprojection_applied"]
+    assert coordinates["surface_deprojection_applied"]
     affine = coordinates["network_affine"]
     assert affine["formula"] == "normalized_xy=(solar_xy_mm-center_mm)/scale_mm"
     assert affine["scale_mm"][0] == affine["scale_mm"][1]
@@ -393,147 +454,52 @@ def test_pixel_dataset_and_data_module_keep_existing_stokes_format(synthetic_hin
         "held_out": False,
     }
 
-def test_physics_volume_and_pressure_boundary_use_independent_random_datasets(
-    synthetic_hinode_files,
-):
-    module = HinodeLTEDataModule(
-        synthetic_hinode_files,
-        batch_size=2,
-        num_workers=0,
-    )
+def test_physics_sampling_uses_only_observed_rays_inside_the_shell(synthetic_hinode_files):
+    module = HinodeLTEDataModule(synthetic_hinode_files, batch_size=2, num_workers=0)
     module.setup()
+    bounds = (1.5, -0.1)
     module.configure_physics_sampling(
         torch.linspace(-5.0, 1.0, 11),
-        volume_points_per_step=7,
-        points_per_tau=7,
-        boundary_points_per_step=3,
-        top_pressure_pa=0.3,
+        volume_points_per_step=8,
+        height_layers_per_step=2,
+        optical_depth_anchor_points_per_step=3,
+        shell_height_bounds_Mm=bounds,
+        tangent_margin_m=1000.0,
     )
     loaders = module.train_dataloader()
-    assert set(loaders) == {"stokes", "physics_volume", "pressure_boundary"}
-    assert all(not loader.pin_memory for loader in loaders.values())
+    assert set(loaders) == {"stokes", "physics_volume", "optical_depth_anchor"}
     volume = next(iter(loaders["physics_volume"]))
-    boundary = next(iter(loaders["pressure_boundary"]))
-    assert volume["coords"].shape == (7, 3)
-    assert boundary["coords"].shape == (3, 3)
-    assert torch.all((volume["log_tau500"] >= -5.0) & (volume["log_tau500"] <= 1.0))
+    anchor = next(iter(loaders["optical_depth_anchor"]))
+    assert set(volume) == {"coords", "ray_origin_m", "ray_direction", "geometric_height_m"}
+    assert volume["coords"].shape == (8, 3)
+    heights, counts = torch.unique(volume["geometric_height_m"], return_counts=True)
+    assert heights.numel() == 2
+    torch.testing.assert_close(counts, torch.full((2,), 4, dtype=counts.dtype))
+    assert torch.all(volume["geometric_height_m"] <= bounds[0] * 1.0e6)
     torch.testing.assert_close(
-        volume["log_tau500"], volume["log_tau500"][:1].expand(7)
+        anchor["geometric_height_m"], torch.full((3,), bounds[0] * 1.0e6)
     )
-    torch.testing.assert_close(boundary["log_tau500"], torch.full((3,), -5.0))
-    torch.testing.assert_close(boundary["gas_pressure_pa"], torch.full((3,), 0.3))
-    assert not torch.equal(volume["coords"][:3], boundary["coords"])
     sampling = module.checkpoint_metadata()["physics_sampling"]
-    assert sampling["top_boundary_stream_enabled"]
-    assert sampling["points_per_tau"] == 7
-    assert sampling["tau_surfaces_per_step"] == 1
-    assert "grouped onto shared" in sampling["collocation_distribution"]
-    spatial = sampling["spatial_sampling"]
-    assert spatial["type"] == "independent_uniform_xy_bounds"
-    assert spatial["coordinate_order"] == [
-        "time_hours", "solar_x_mm", "solar_y_mm"
-    ]
-    assert spatial["axis_aligned_bounding_box_used"]
+    assert sampling["height_layers_per_step"] == 2
+    assert sampling["optical_depth_anchor_stream_enabled"]
+    assert sampling["spatial_sampling"]["type"] == "observed_ray_bundle"
+    assert sampling["spatial_sampling"]["coordinate_frame"] == (
+        "heliocentric Carrington Cartesian"
+    )
+    domain = sampling["observed_domain_bounds"]
+    assert domain["height_Mm"] == [bounds[1], bounds[0]]
+    assert domain["radius_Rsun"][1] > domain["radius_Rsun"][0]
+    assert domain["surface_latitude_deg"][1] > domain["surface_latitude_deg"][0]
+    assert domain["surface_longitude_offset_deg"][1] > (
+        domain["surface_longitude_offset_deg"][0]
+    )
+    assert "not sampled as a rectangular box" in domain["support"]
+    assert "coordinate_mode" not in sampling
 
 
 def test_hinode_lte_rejects_pinned_host_memory(synthetic_hinode_files):
     with pytest.raises(ValueError, match="pin_memory=false"):
         HinodeLTEDataModule(synthetic_hinode_files, pin_memory=True)
-
-
-def test_tau_mapping_only_sampling_omits_pressure_boundary_stream(
-    synthetic_hinode_files,
-):
-    module = HinodeLTEDataModule(
-        synthetic_hinode_files,
-        batch_size=2,
-        num_workers=0,
-    )
-    module.setup()
-    module.configure_physics_sampling(
-        torch.linspace(-5.0, 1.0, 11),
-        volume_points_per_step=7,
-        points_per_tau=1,
-        boundary_points_per_step=0,
-        top_pressure_pa=None,
-    )
-
-    loaders = module.train_dataloader()
-    assert set(loaders) == {"stokes", "physics_volume"}
-    sampling = module.checkpoint_metadata()["physics_sampling"]
-    assert sampling["boundary_points_per_step"] == 0
-    assert not sampling["top_boundary_stream_enabled"]
-    assert sampling["top_pressure_pa"] is None
-
-
-def test_physics_samplers_are_uniform_over_physical_xy_bounds(
-    synthetic_hinode_files,
-):
-    for path in synthetic_hinode_files:
-        fits.setval(path, "CROTA2", value=37.0)
-    raster = load_hinode_raster(synthetic_hinode_files)
-    volume = RandomAtmosphereVolumeDataset(
-        raster,
-        (-5.0, 1.0),
-        256,
-    )
-    boundary = RandomTopBoundaryDataset(raster, -5.0, 0.3, 256)
-
-    valid_xy = raster.coords[..., 1:][raster.valid_mask]
-    xy_min = valid_xy.amin(dim=0).numpy()
-    xy_max = valid_xy.amax(dim=0).numpy()
-    for dataset in (volume, boundary):
-        samples = np.stack([dataset[index]["coords"][1:].numpy() for index in range(256)])
-        assert np.all(samples >= xy_min)
-        assert np.all(samples <= xy_max)
-        assert np.all(np.ptp(samples, axis=0) > 0.75 * (xy_max - xy_min))
-
-
-@pytest.mark.parametrize(
-    ("scan_slice", "slit_slice"),
-    (
-        (slice(0, 1), slice(None)),
-        (slice(None), slice(0, 1)),
-        (slice(0, 1), slice(0, 1)),
-    ),
-)
-def test_uniform_physics_sampler_handles_degenerate_xy_bounds(
-    synthetic_hinode_files, scan_slice, slit_slice
-):
-    module = HinodeLTEDataModule(
-        synthetic_hinode_files,
-        scan_slice=scan_slice,
-        slit_slice=slit_slice,
-        batch_size=2,
-    )
-    module.setup()
-    module.configure_physics_sampling(
-        torch.linspace(-5.0, 1.0, 5),
-        volume_points_per_step=8,
-        points_per_tau=4,
-        boundary_points_per_step=4,
-        top_pressure_pa=0.3,
-    )
-    metadata = module.checkpoint_metadata()["physics_sampling"]["spatial_sampling"]
-    assert metadata["type"] == "independent_uniform_xy_bounds"
-    samples = next(iter(module.train_dataloader()["physics_volume"]))["coords"]
-    valid_xy = module.raster.coords[..., 1:][module.raster.valid_mask]
-    xy_span = valid_xy.amax(dim=0) - valid_xy.amin(dim=0)
-    for axis in range(2):
-        if xy_span[axis] == 0:
-            torch.testing.assert_close(
-                samples[:, axis + 1],
-                samples[:1, axis + 1].expand_as(samples[:, axis + 1]),
-                rtol=0,
-                atol=0,
-            )
-    if scan_slice == slice(0, 1) and slit_slice == slice(0, 1):
-        torch.testing.assert_close(
-            samples,
-            module.raster.coords[0, 0].expand_as(samples),
-            rtol=0,
-            atol=0,
-        )
 
 
 def test_integer_detector_saturation_is_excluded_from_training(

@@ -122,6 +122,74 @@ def test_geometric_and_optical_depth_solutions_are_equivalent_for_constant_alpha
     torch.testing.assert_close(geometric, optical, rtol=2e-12, atol=2e-12)
 
 
+def test_exact_ray_distances_replace_mu_path_scaling():
+    dtype = torch.float64
+    q = torch.tensor([-2.0, -1.0, 0.0], dtype=dtype)
+    height = torch.tensor([[4.0, 1.0, -5.0]], dtype=dtype)
+    alpha500 = torch.full((1, 3), 0.2, dtype=dtype)
+    matrix = 1.3 * torch.eye(4, dtype=dtype).expand(1, 3, 2, 4, 4).clone()
+    source = torch.zeros(1, 3, 2, 4, dtype=dtype)
+    source[..., 0] = torch.tensor((0.5, 0.7, 0.9), dtype=dtype)[None, :, None]
+    mu = 0.6
+    ray_distance = 100.0 - height / mu
+    solver = PolarizedFormalSolver()
+
+    plane_parallel = solver(
+        matrix,
+        source,
+        q,
+        mu=mu,
+        geometric_height_m=height,
+        alpha500=alpha500,
+    )
+    ray_traced = solver(
+        matrix,
+        source,
+        q,
+        mu=torch.tensor(float("nan")),
+        geometric_height_m=height,
+        alpha500=alpha500,
+        ray_distance_m=ray_distance,
+    )
+    torch.testing.assert_close(ray_traced, plane_parallel, rtol=2e-12, atol=2e-12)
+
+
+def test_formal_solver_allows_temporary_negative_ray_layer_distance():
+    dtype = torch.float64
+    q = torch.tensor([-2.0, -1.0, 0.0], dtype=dtype)
+    height = torch.tensor([[4.0, 1.0, -5.0]], dtype=dtype)
+    alpha500 = torch.full((1, 3), 0.2, dtype=dtype)
+    matrix = 1.3 * torch.eye(4, dtype=dtype).expand(1, 3, 1, 4, 4).clone()
+    source = torch.zeros(1, 3, 1, 4, dtype=dtype)
+    source[..., 0] = torch.tensor((0.5, 0.7, 0.9), dtype=dtype)[None, :, None]
+    ray_distance = torch.tensor(
+        [[100.0, 99.0, 102.0]], dtype=dtype, requires_grad=True
+    )
+
+    emergent = PolarizedFormalSolver()(
+        matrix,
+        source,
+        q,
+        geometric_height_m=height,
+        alpha500=alpha500,
+        ray_distance_m=ray_distance,
+    )
+    ordered_equivalent = PolarizedFormalSolver()(
+        matrix,
+        source,
+        q,
+        geometric_height_m=height,
+        alpha500=alpha500,
+        ray_distance_m=torch.tensor([[100.0, 101.0, 104.0]], dtype=dtype),
+    )
+    emergent.square().sum().backward()
+
+    assert torch.isfinite(emergent).all()
+    torch.testing.assert_close(emergent, ordered_equivalent)
+    assert ray_distance.grad is not None
+    assert torch.isfinite(ray_distance.grad).all()
+
+
 def test_geometric_solution_propagates_height_and_extinction_gradients():
     dtype = torch.float64
     q = torch.tensor([-2.0, -1.0, 0.0], dtype=dtype)

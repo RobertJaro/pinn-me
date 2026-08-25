@@ -3,19 +3,40 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import math
+from numbers import Real
+from typing import Mapping
 
 import torch
 from pytorch_lightning import LightningModule
-from torch.optim.lr_scheduler import ExponentialLR
 
 from pme.lte.atmosphere import StratifiedAtmosphereModel
+from pme.lte.geometry import (
+    RayTraceResult,
+    chart_to_direction,
+    direction_to_chart_mm,
+    intersect_sphere_near_side_from_local_point,
+)
 from pme.lte.instrument import HinodeSpectralPSF
+from pme.coordinates import (
+    cartesian_to_spherical,
+    project_cartesian_to_spherical,
+    project_spherical_to_observer,
+)
 from pme.lte.synthesis import LTESynthesizer
 from pme.model import NormalizationModule
-from pme.train.lte_physics import LTEPhysicsModule, LTEPhysicsResult, VOLUME_EQUATIONS
-from pme.train.physics import PhysicsWeightSchedule
+from pme.solar_velocity import (
+    CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
+    CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS,
+    carrington_rotation_velocity_cartesian,
+)
+from pme.train.lte_physics import (
+    BOUNDARY_EQUATIONS,
+    LTEPhysicsModule,
+    LTEPhysicsResult,
+    VOLUME_EQUATIONS,
+)
 from pme.train.stokes_loss import StokesLossModule
 
 
@@ -40,16 +61,14 @@ class LTEModule(LightningModule):
         atlas_continuum_radiance_w_m3_sr: float = 3.06e13,
         depth_sampling_config=None,
         physics_config=None,
-        lr_params=None,
+        learning_rate: float | Mapping = 1.0e-5,
         checkpoint_metadata=None,
     ):
         super().__init__()
-        log_tau500 = torch.as_tensor(log_tau500)
-        if not log_tau500.is_floating_point():
-            log_tau500 = log_tau500.to(dtype=torch.float32)
-        wavelength_angstrom = torch.as_tensor(wavelength_angstrom)
-        if not wavelength_angstrom.is_floating_point():
-            wavelength_angstrom = wavelength_angstrom.to(dtype=torch.float32)
+        log_tau500 = torch.as_tensor(log_tau500, dtype=torch.float32)
+        wavelength_angstrom = torch.as_tensor(
+            wavelength_angstrom, dtype=torch.float32
+        )
         if log_tau500.ndim != 1 or log_tau500.numel() < 2:
             raise ValueError(
                 "log_tau500 must be one-dimensional with at least two points."
@@ -73,8 +92,24 @@ class LTEModule(LightningModule):
         self.training_depth_sample_count = int(
             depth_sampling.pop("sample_count", log_tau500.numel())
         )
+        refinement = dict(depth_sampling.pop("coarse_to_fine", {}))
+        self.coarse_to_fine_enabled = bool(refinement.pop("enabled", False))
+        self.coarse_to_fine_sample_count = int(
+            refinement.pop("fine_sample_count", 32)
+        )
+        self.coarse_to_fine_uniform_weight_floor = float(
+            refinement.pop("uniform_weight_floor", 0.05)
+        )
+        if refinement:
+            raise TypeError(
+                f"Unknown coarse-to-fine sampling options: {sorted(refinement)}"
+            )
         if self.training_depth_sample_count < 2:
             raise ValueError("Depth sample_count must be at least two.")
+        if self.coarse_to_fine_sample_count < 1:
+            raise ValueError("fine_sample_count must be positive.")
+        if not 0.0 <= self.coarse_to_fine_uniform_weight_floor <= 1.0:
+            raise ValueError("uniform_weight_floor must lie between zero and one.")
         if depth_sampling:
             raise TypeError(f"Unknown depth-sampling options: {sorted(depth_sampling)}")
         self.synthesizer = LTESynthesizer(
@@ -87,6 +122,10 @@ class LTEModule(LightningModule):
         continuum = getattr(self.synthesizer, "continuum_opacity", None)
         self.instrument = HinodeSpectralPSF(**instrument_config)
         self.register_buffer("wavelength_angstrom", wavelength_angstrom)
+        self.register_buffer(
+            "carrington_angular_velocity_rad_per_s",
+            wavelength_angstrom.new_tensor(CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S),
+        )
         continuum_index_tensor = (
             torch.arange(wavelength_angstrom.numel(), dtype=torch.long)
             if continuum_indices is None
@@ -128,20 +167,15 @@ class LTEModule(LightningModule):
             raise KeyError(
                 f"Unknown Stokes weight components: {sorted(unknown_weights)}"
             )
-        self.stokes_weight_schedules = {
-            component: PhysicsWeightSchedule.from_config(
-                weight_config.get(component, 1.0)
-            )
-            for component in components
-        }
-        self.stokes_weight_config = {
-            component: schedule.configuration()
-            for component, schedule in self.stokes_weight_schedules.items()
-        }
-        resolved_weights = {
-            component: schedule.value_at(0)
-            for component, schedule in self.stokes_weight_schedules.items()
-        }
+        resolved_weights = {}
+        for component in components:
+            value = weight_config.get(component, 1.0)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise TypeError(
+                    f"Stokes weight {component} must be a fixed number; schedules are unsupported."
+                )
+            resolved_weights[component] = float(value)
+        self.stokes_weight_config = dict(resolved_weights)
         weights = torch.tensor(
             [resolved_weights[component] for component in components],
             dtype=torch.float32,
@@ -152,11 +186,8 @@ class LTEModule(LightningModule):
             or torch.any(weights < 0)
         ):
             raise ValueError("Stokes weights must be finite and non-negative.")
-        if not any(
-            schedule.start > 0 or schedule.end > 0
-            for schedule in self.stokes_weight_schedules.values()
-        ):
-            raise ValueError("At least one Stokes weight schedule must be nonzero.")
+        if not torch.any(weights > 0):
+            raise ValueError("At least one Stokes weight must be nonzero.")
         self.register_buffer("stokes_weights", weights)
 
         if wavelength_weights is None:
@@ -202,53 +233,74 @@ class LTEModule(LightningModule):
         self.register_buffer("wavelength_weights", spectral_weights)
         self.wavelength_exclude_windows_angstrom = exclusion_windows
 
-        lr_params = deepcopy(
-            lr_params
-            or {
-                "start": 3e-4,
-                "end": 3e-5,
-                "iterations": 10_000,
+        if isinstance(learning_rate, Mapping):
+            learning_rate_config = dict(learning_rate)
+            unknown = set(learning_rate_config) - {"start", "end", "iterations"}
+            if unknown:
+                raise TypeError(f"Unknown learning-rate options: {sorted(unknown)}")
+            try:
+                start = float(learning_rate_config["start"])
+                end = float(learning_rate_config["end"])
+                iterations = learning_rate_config["iterations"]
+            except KeyError as error:
+                raise KeyError(
+                    "Scheduled learning_rate requires start, end, and iterations."
+                ) from error
+            if isinstance(iterations, str):
+                if iterations.lower() != "auto":
+                    raise ValueError("learning_rate.iterations must be positive or 'auto'.")
+                iterations = "auto"
+            elif (
+                not isinstance(iterations, Real)
+                or isinstance(iterations, bool)
+                or int(iterations) != iterations
+                or iterations <= 0
+            ):
+                raise ValueError("learning_rate.iterations must be positive or 'auto'.")
+            else:
+                iterations = int(iterations)
+            self.learning_rate_schedule = {
+                "start": start,
+                "end": end,
+                "iterations": iterations,
             }
+            self.learning_rate_configuration = deepcopy(self.learning_rate_schedule)
+            self.learning_rate = start
+        elif isinstance(learning_rate, Real) and not isinstance(learning_rate, bool):
+            self.learning_rate = float(learning_rate)
+            self.learning_rate_schedule = None
+            self.learning_rate_configuration = self.learning_rate
+        else:
+            raise TypeError("learning_rate must be a positive number or schedule mapping.")
+        rate_values = (
+            (self.learning_rate,)
+            if self.learning_rate_schedule is None
+            else (self.learning_rate_schedule["start"], self.learning_rate_schedule["end"])
         )
-        self.lr_start = float(lr_params["start"])
-        self.lr_end = float(lr_params.get("end", self.lr_start))
-        raw_lr_iterations = lr_params.get("iterations", 1)
-        self.lr_iterations = (
-            None
-            if raw_lr_iterations is None or str(raw_lr_iterations).lower() == "auto"
-            else int(raw_lr_iterations)
-        )
-        if (
-            self.lr_start <= 0
-            or self.lr_end <= 0
-            or (self.lr_iterations is not None and self.lr_iterations < 1)
-        ):
-            raise ValueError(
-                "Learning-rate start/end must be positive and iterations must be "
-                "positive or 'auto'."
-            )
-        self.resolved_lr_iterations: int | None = None
+        if any(not math.isfinite(value) or value <= 0 for value in rate_values):
+            raise ValueError("Learning rates must be finite and positive.")
+        self.resolved_learning_rate_iterations: int | None = None
 
         self.checkpoint_metadata = deepcopy(checkpoint_metadata or {})
 
         physics = deepcopy(physics_config or {})
-        reference_top_pressure = getattr(continuum, "reference_top_pressure_pa", None)
         reference_gravity = getattr(continuum, "reference_gravity_m_per_s2", None)
         equations = deepcopy(physics.pop("equations", {}))
-        configured_top_pressure = physics.pop("top_pressure_pa", reference_top_pressure)
         configured_gravity = physics.pop("gravity_m_per_s2", reference_gravity)
-        self.top_pressure_pa = (
-            None if configured_top_pressure is None else float(configured_top_pressure)
-        )
         self.gravity_m_per_s2 = (
             None if configured_gravity is None else float(configured_gravity)
         )
         self.physics_volume_points_per_step = int(
             physics.pop("volume_points_per_step", 256)
         )
-        self.physics_points_per_tau = int(physics.pop("points_per_tau", 16))
-        self.pressure_boundary_points_per_step = int(
-            physics.pop("boundary_points_per_step", 64)
+        self.physics_height_layers_per_step = int(
+            physics.pop("height_layers_per_step", 8)
+        )
+        self.optical_depth_anchor_points_per_step = int(
+            physics.pop("optical_depth_anchor_points_per_step", 64)
+        )
+        self.optical_depth_anchor_depth_points = int(
+            physics.pop("optical_depth_anchor_depth_points", 65)
         )
         self.physics_validation_depth_points = int(
             physics.pop("validation_depth_points", 65)
@@ -262,45 +314,45 @@ class LTEModule(LightningModule):
         self.physics = LTEPhysicsModule(
             equations,
             gravity_m_per_s2=self.gravity_m_per_s2,
-            top_pressure_pa=self.top_pressure_pa,
             vector_basis_matches_spatial_coordinates=vector_basis_matches,
             normalization=physics_normalization,
         )
-        self.pressure_boundary_enabled = self.physics.enabled["pressure_boundary"]
-        if self.top_pressure_pa is not None and self.top_pressure_pa <= 0:
-            raise ValueError("HSE top pressure must be positive.")
+        self.optical_depth_anchor_enabled = self.physics.enabled[
+            "mean_radial_optical_depth_anchor"
+        ]
+        self.upper_boundary_pressure_prior_enabled = self.physics.enabled[
+            "upper_boundary_gas_pressure_prior"
+        ]
+        self.upper_boundary_sampling_enabled = any(
+            self.physics.enabled[name] for name in BOUNDARY_EQUATIONS
+        )
         if self.gravity_m_per_s2 is not None and self.gravity_m_per_s2 <= 0:
-            raise ValueError("HSE gravity must be positive.")
+            raise ValueError("Magnetohydrostatic-equilibrium gravity must be positive.")
         if self.physics_volume_points_per_step < 1:
             raise ValueError("Physics volume sample count must be positive.")
-        if self.physics_points_per_tau < 1:
-            raise ValueError("Physics points_per_tau must be positive.")
-        if self.physics_volume_points_per_step % self.physics_points_per_tau:
-            raise ValueError(
-                "Physics volume_points_per_step must be divisible by points_per_tau."
-            )
-        if self.pressure_boundary_points_per_step < 0 or (
-            self.pressure_boundary_enabled
-            and self.pressure_boundary_points_per_step < 1
+        if (
+            self.physics_height_layers_per_step < 1
+            or self.physics_height_layers_per_step > self.physics_volume_points_per_step
+            or self.physics_volume_points_per_step % self.physics_height_layers_per_step != 0
         ):
             raise ValueError(
-                "Boundary sample count must be non-negative and positive when the "
-                "pressure-boundary equation is enabled."
+                "Physics volume sample count must be exactly divisible by the positive "
+                "height layer count."
             )
+        if self.optical_depth_anchor_points_per_step < 0 or (
+            self.upper_boundary_sampling_enabled
+            and self.optical_depth_anchor_points_per_step < 1
+        ):
+            raise ValueError(
+                "Optical-depth anchor sample count must be non-negative and positive "
+                "when the anchor is enabled."
+            )
+        if self.optical_depth_anchor_depth_points < 2:
+            raise ValueError("The optical-depth anchor requires at least two radial points.")
         if self.physics_validation_depth_points < 2:
             raise ValueError(
                 "Physics validation requires at least two points per component."
             )
-        physical_height_validator = getattr(
-            continuum, "validate_physical_height_contract", None
-        )
-        if self.pressure_boundary_enabled and callable(physical_height_validator):
-            physical_height_validator(
-                float(self.atmosphere_model.log_tau500[0]),
-                self.top_pressure_pa,
-            )
-
-
         # Make Lightning checkpoints reconstructible without relying on a
         # separately copied YAML file.  Module state still contains the exact
         # tensors and is authoritative.
@@ -324,34 +376,39 @@ class LTEModule(LightningModule):
                 ),
                 "depth_sampling_config": {
                     "sample_count": self.training_depth_sample_count,
+                    "coarse_to_fine": {
+                        "enabled": self.coarse_to_fine_enabled,
+                        "fine_sample_count": self.coarse_to_fine_sample_count,
+                        "uniform_weight_floor": self.coarse_to_fine_uniform_weight_floor,
+                    },
                 },
                 "physics_config": {
                     **self.physics.configuration(),
-                    "top_pressure_pa": self.top_pressure_pa,
                     "gravity_m_per_s2": self.gravity_m_per_s2,
                     "volume_points_per_step": self.physics_volume_points_per_step,
-                    "points_per_tau": self.physics_points_per_tau,
-                    "boundary_points_per_step": self.pressure_boundary_points_per_step,
+                    "height_layers_per_step": self.physics_height_layers_per_step,
+                    "optical_depth_anchor_points_per_step": (
+                        self.optical_depth_anchor_points_per_step
+                    ),
+                    "optical_depth_anchor_depth_points": (
+                        self.optical_depth_anchor_depth_points
+                    ),
                     "validation_depth_points": self.physics_validation_depth_points,
                 },
-                "lr_params": {
-                    "start": self.lr_start,
-                    "end": self.lr_end,
-                    "iterations": "auto"
-                    if self.lr_iterations is None
-                    else self.lr_iterations,
-                },
+                "learning_rate": deepcopy(self.learning_rate_configuration),
                 "checkpoint_metadata": self.checkpoint_metadata,
             }
         )
+        # Lookup tables are generated and regression-tested at high precision,
+        # but the inversion graph has one explicit runtime dtype.
+        self.float()
 
     @property
     def synthesis_wavelength_base(self) -> torch.Tensor:
         """Uniform synthesis grid in the module's current dtype and device.
 
-        Regenerating this inexpensive grid avoids retaining float32 wavelength
-        quantization when Lightning converts the module to float64 for the LTE
-        hydrostatic-equilibrium calculation.
+        Regenerating this inexpensive grid keeps it aligned with the module's
+        active compute dtype and device.
         """
 
         return self.instrument.synthesis_grid(self.wavelength_angstrom)
@@ -401,11 +458,154 @@ class LTEModule(LightningModule):
             device=reference.device,
         )
 
+    @staticmethod
+    @torch.no_grad()
+    def _importance_refined_distances(
+        alpha500: torch.Tensor,
+        distance_m: torch.Tensor,
+        fine_sample_count: int,
+        uniform_weight_floor: float,
+    ) -> torch.Tensor:
+        """Insert deterministic per-ray samples using detached tau contribution weights."""
+
+        if alpha500.shape != distance_m.shape or alpha500.ndim < 2:
+            raise ValueError("alpha500 and distance_m must have matching [..., depth] shapes.")
+        if fine_sample_count < 1 or alpha500.shape[-1] < 2:
+            raise ValueError("Coarse-to-fine sampling requires positive samples and two coarse points.")
+        if torch.any(distance_m[..., 1:] <= distance_m[..., :-1]):
+            raise ValueError("Coarse ray distances must increase strictly.")
+        interval_m = distance_m[..., 1:] - distance_m[..., :-1]
+        delta_tau = 0.5 * (alpha500[..., 1:] + alpha500[..., :-1]) * interval_m
+        tau_edge = torch.cat(
+            (torch.zeros_like(delta_tau[..., :1]), torch.cumsum(delta_tau, dim=-1)),
+            dim=-1,
+        )
+        tau_mid = 0.5 * (tau_edge[..., 1:] + tau_edge[..., :-1])
+        contribution = delta_tau * torch.exp(-tau_mid.clamp_max(80.0))
+        contribution = contribution.detach()
+        interval_count = contribution.shape[-1]
+        total_contribution = contribution.sum(dim=-1, keepdim=True)
+        normalized = torch.where(
+            total_contribution > torch.finfo(contribution.dtype).tiny,
+            contribution / total_contribution.clamp_min(
+                torch.finfo(contribution.dtype).tiny
+            ),
+            torch.full_like(contribution, 1.0 / interval_count),
+        )
+        probability = (
+            (1.0 - uniform_weight_floor) * normalized
+            + uniform_weight_floor / interval_count
+        )
+        cdf = torch.cumsum(probability, dim=-1)
+        quantiles = (
+            torch.arange(
+                fine_sample_count, dtype=distance_m.dtype, device=distance_m.device
+            )
+            + 0.5
+        ) / fine_sample_count
+        quantiles = quantiles.expand(*distance_m.shape[:-1], fine_sample_count)
+        interval = torch.searchsorted(
+            cdf.contiguous(), quantiles.contiguous(), right=False
+        ).clamp_max(interval_count - 1)
+        cdf_before = torch.cat((torch.zeros_like(cdf[..., :1]), cdf[..., :-1]), dim=-1)
+        lower_cdf = torch.gather(cdf_before, -1, interval)
+        upper_cdf = torch.gather(cdf, -1, interval)
+        fraction = (quantiles - lower_cdf) / (upper_cdf - lower_cdf).clamp_min(
+            torch.finfo(distance_m.dtype).eps
+        )
+        lower_distance = torch.gather(distance_m[..., :-1], -1, interval)
+        upper_distance = torch.gather(distance_m[..., 1:], -1, interval)
+        fine_distance = lower_distance + fraction * (upper_distance - lower_distance)
+        return torch.sort(torch.cat((distance_m, fine_distance), dim=-1), dim=-1).values
+
+    def _refine_ray_sampling(
+        self,
+        coords: torch.Tensor,
+        ray_direction: torch.Tensor,
+        coarse_atmosphere,
+        coarse_trace: RayTraceResult,
+    ):
+        """Build and evaluate the final per-ray grid from a coarse continuum trace."""
+
+        with torch.no_grad():
+            alpha500 = self.synthesizer.continuum_opacity.volume_extinction_at_5000(
+                coarse_atmosphere.temperature, coarse_atmosphere.gas_pressure
+            )
+            distance_m = self._importance_refined_distances(
+                alpha500,
+                coarse_trace.distance_m,
+                self.coarse_to_fine_sample_count,
+                self.coarse_to_fine_uniform_weight_floor,
+            )
+            direction = ray_direction.to(distance_m)
+            direction = direction / torch.linalg.vector_norm(
+                direction, dim=-1, keepdim=True
+            )
+            geometry_basis = self.atmosphere_model.scene_basis.to(distance_m)
+            surface_reference_rsun = chart_to_direction(
+                coords.to(distance_m)[..., 1:],
+                geometry_basis,
+                self.atmosphere_model.solar_radius_m,
+            )
+            outer_radius = 1.0 + (
+                self.atmosphere_model.shell_height_bounds_Mm[0] * 1.0e6
+                / self.atmosphere_model.solar_radius_m
+            )
+            outer_offset = intersect_sphere_near_side_from_local_point(
+                surface_reference_rsun,
+                direction,
+                outer_radius.expand_as(distance_m[..., 0]),
+            )
+            outer_position_rsun = (
+                surface_reference_rsun + outer_offset[..., None] * direction
+            )
+            position_rsun = (
+                outer_position_rsun[..., None, :]
+                + (distance_m / self.atmosphere_model.solar_radius_m)[..., None]
+                * direction[..., None, :]
+            )
+            chart_xy_mm = direction_to_chart_mm(
+                position_rsun,
+                geometry_basis,
+                self.atmosphere_model.solar_radius_m,
+            )
+            geometric_height_m = (
+                torch.linalg.vector_norm(position_rsun, dim=-1) - 1.0
+            ) * self.atmosphere_model.solar_radius_m
+            position_m = position_rsun * self.atmosphere_model.solar_radius_m
+            depth_grid = torch.linspace(
+                coarse_atmosphere.log_tau500[0],
+                coarse_atmosphere.log_tau500[-1],
+                distance_m.shape[-1],
+                dtype=distance_m.dtype,
+                device=distance_m.device,
+            )
+        # This is the only network evaluation in the refinement pass that
+        # participates in autograd.
+        fields = self.atmosphere_model.evaluate_position_rsun(position_rsun)
+        refined_atmosphere = replace(
+            coarse_atmosphere,
+            log_tau500=depth_grid,
+            geometric_height_m=geometric_height_m,
+            **fields,
+        )
+        refined_trace = RayTraceResult(
+            position_m=position_m,
+            distance_m=distance_m,
+            chart_xy_mm=chart_xy_mm,
+            geometric_height_m=geometric_height_m,
+            maximum_surface_residual_m=coarse_trace.maximum_surface_residual_m,
+        )
+        return refined_atmosphere, refined_trace
+
     def synthesize(
         self,
         coords: torch.Tensor,
         mu: torch.Tensor,
         *,
+        ray_origin_m: torch.Tensor | None = None,
+        ray_direction: torch.Tensor | None = None,
+        stokes_basis: torch.Tensor | None = None,
         randomize_depth: bool = False,
         depth_grid: torch.Tensor | None = None,
         return_physics_diagnostics: bool = False,
@@ -424,15 +624,76 @@ class LTEModule(LightningModule):
                 or not torch.all(depth_grid[1:] > depth_grid[:-1])
             ):
                 raise ValueError("An explicit synthesis depth_grid must be ordered and one-dimensional.")
-        sampled_atmosphere = self.atmosphere_model(coords, log_tau500=depth_grid)
+        if any(value is None for value in (ray_origin_m, ray_direction, stokes_basis)):
+            raise ValueError(
+                "The spherical LTE pipeline requires ray_origin_m, ray_direction, "
+                "and stokes_basis for every synthesis."
+            )
+        if self.coarse_to_fine_enabled:
+            # The proposal pass selects coordinates only. Building an autograd
+            # graph here would retain a second atmosphere graph without adding
+            # a valid gradient through the discrete importance selection.
+            with torch.no_grad():
+                sampled_atmosphere, ray_trace = self.atmosphere_model.trace_rays(
+                    coords,
+                    ray_origin_m,
+                    ray_direction,
+                    depth_grid,
+                )
+            sampled_atmosphere, ray_trace = self._refine_ray_sampling(
+                coords,
+                ray_direction,
+                sampled_atmosphere,
+                ray_trace,
+            )
+        else:
+            sampled_atmosphere, ray_trace = self.atmosphere_model.trace_rays(
+                coords,
+                ray_origin_m,
+                ray_direction,
+                depth_grid,
+            )
+        spherical_coordinates = cartesian_to_spherical(ray_trace.position_m, torch)
+        magnetic_field_spherical = project_cartesian_to_spherical(
+            sampled_atmosphere.magnetic_field, spherical_coordinates, torch
+        )
+        velocity_field_spherical = project_cartesian_to_spherical(
+            sampled_atmosphere.velocity_field, spherical_coordinates, torch
+        )
+        rotation_velocity_cartesian = carrington_rotation_velocity_cartesian(
+            ray_trace.position_m,
+            torch,
+            self.carrington_angular_velocity_rad_per_s,
+        )
+        velocity_field_inertial_cartesian = (
+            sampled_atmosphere.velocity_field + rotation_velocity_cartesian
+        )
+        velocity_field_inertial_spherical = project_cartesian_to_spherical(
+            velocity_field_inertial_cartesian, spherical_coordinates, torch
+        )
+        magnetic_field_observer = project_spherical_to_observer(
+            magnetic_field_spherical, spherical_coordinates, stokes_basis, torch
+        )
+        velocity_field_observer = project_spherical_to_observer(
+            velocity_field_inertial_spherical,
+            spherical_coordinates,
+            stokes_basis,
+            torch,
+        )
+        synthesis_atmosphere = replace(
+            sampled_atmosphere,
+            velocity_field=velocity_field_observer,
+            magnetic_field=magnetic_field_observer,
+        )
         synthesis_wavelength = self.synthesis_wavelength_base
         synthesis_kwargs = {}
         if return_physics_diagnostics:
             synthesis_kwargs["return_diagnostics"] = True
+        synthesis_kwargs["ray_distance_m"] = ray_trace.distance_m
         synthesis_result = self.synthesizer(
-            sampled_atmosphere,
+            synthesis_atmosphere,
             synthesis_wavelength,
-            mu,
+            1.0,
             radiance_scale=self.atlas_continuum_radiance_w_m3_sr,
             **synthesis_kwargs,
         )
@@ -460,10 +721,24 @@ class LTEModule(LightningModule):
             "stokes": sampled_stokes,
             "predicted_continuum": predicted_continuum,
             "physics_diagnostics": physics_diagnostics,
+            "ray_trace": ray_trace,
+            "spherical_coordinates": spherical_coordinates,
+            "magnetic_field_spherical": magnetic_field_spherical,
+            "velocity_field_spherical": velocity_field_spherical,
+            "rotation_velocity_cartesian": rotation_velocity_cartesian,
+            "velocity_field_inertial_cartesian": velocity_field_inertial_cartesian,
+            "velocity_field_inertial_spherical": velocity_field_inertial_spherical,
+            "magnetic_field_observer": magnetic_field_observer,
+            "velocity_field_observer": velocity_field_observer,
         }
 
-    def forward(self, coords: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-        return self.synthesize(coords, mu)["stokes"]
+    def forward(
+        self,
+        coords: torch.Tensor,
+        mu: torch.Tensor,
+        **ray_geometry,
+    ) -> torch.Tensor:
+        return self.synthesize(coords, mu, **ray_geometry)["stokes"]
 
     def _stokes_objective(
         self,
@@ -514,24 +789,6 @@ class LTEModule(LightningModule):
         total = torch.dot(component_mse, weights)
         return component_mse, total
 
-    def _current_stokes_weights(self, *, final: bool) -> torch.Tensor:
-        step = int(getattr(self, "global_step", 0))
-        values = [
-            schedule.end if final else schedule.value_at(step)
-            for schedule in self.stokes_weight_schedules.values()
-        ]
-        return self.stokes_weights.new_tensor(values)
-
-    def _physics_grid_samples(
-        self, coords: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        q = self.physics_validation_grid().to(coords)
-        sample_count = coords.shape[0]
-        return (
-            coords[:, None, :].expand(sample_count, q.numel(), 3).reshape(-1, 3),
-            q[None, :].expand(sample_count, q.numel()).reshape(-1),
-        )
-
     def _shared_step(
         self,
         batch: dict[str, torch.Tensor],
@@ -541,44 +798,85 @@ class LTEModule(LightningModule):
         depth_grid: torch.Tensor | None = None,
         log_metrics: bool = True,
     ):
+        def assert_float32_tree(value, path="batch"):
+            if isinstance(value, torch.Tensor):
+                if value.is_floating_point() and value.dtype != torch.float32:
+                    raise TypeError(
+                        f"{path} must use float32 during LTE inversion; got {value.dtype}."
+                    )
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    assert_float32_tree(item, f"{path}.{key}")
+
+        assert_float32_tree(batch)
         physics_volume_batch = None
-        physics_boundary_batch = None
+        optical_depth_anchor_batch = None
         if stage == "train" and "physics_volume" in batch:
             physics_volume_batch = batch["physics_volume"]
-            physics_boundary_batch = batch.get("pressure_boundary")
+            optical_depth_anchor_batch = batch.get("optical_depth_anchor")
             batch = batch["stokes"]
         result = self.synthesize(
             batch["coords"],
             batch["mu"],
+            ray_origin_m=batch.get("ray_origin_m"),
+            ray_direction=batch.get("ray_direction"),
+            stokes_basis=batch.get("stokes_basis"),
             randomize_depth=stage == "train",
             depth_grid=depth_grid,
             return_physics_diagnostics=False,
         )
-        # Validation reports the objective at the current optimizer step, not
-        # a future end-of-schedule objective.
         final_weights = False
-        stokes_weights = self._current_stokes_weights(final=final_weights)
-        if stage == "train":
-            self.stokes_weights.copy_(stokes_weights)
+        stokes_weights = self.stokes_weights
         component_mse, stokes_loss = self._stokes_objective(
             result["stokes"], batch["stokes"], stokes_weights
         )
         step = int(getattr(self, "global_step", 0))
         if self.physics.volume_enabled:
             if physics_volume_batch is None:
-                physics_coords, physics_q = self._physics_grid_samples(batch["coords"])
+                sample_count = batch["coords"].shape[0]
+                height = self.atmosphere_model.depth_to_height(
+                    self.physics_validation_grid(), (sample_count,)
+                )
+                physics_height_m = height.reshape(-1)
+                expanded_coords = batch["coords"].unsqueeze(-2).expand(
+                    *height.shape, 3
+                )
+                physics_coords = expanded_coords.reshape(-1, 3)
+                expanded_origin = batch["ray_origin_m"].unsqueeze(-2).expand(
+                    *height.shape, 3
+                )
+                expanded_direction = batch["ray_direction"].unsqueeze(-2).expand_as(
+                    expanded_origin
+                )
+                physics_position_m = self.atmosphere_model.ray_shell_positions(
+                    expanded_origin,
+                    expanded_direction,
+                    height,
+                    expanded_coords,
+                ).reshape(-1, 3)
             else:
                 physics_coords = physics_volume_batch["coords"]
-                physics_q = physics_volume_batch["log_tau500"]
+                height = physics_volume_batch["geometric_height_m"].to(
+                    self.atmosphere_model.log_tau500
+                )
+                physics_height_m = height
+                physics_position_m = self.atmosphere_model.ray_shell_positions(
+                    physics_volume_batch["ray_origin_m"],
+                    physics_volume_batch["ray_direction"],
+                    height,
+                    physics_volume_batch["coords"],
+                )
             physics_result = self.physics.volume(
                 self.atmosphere_model,
                 self.synthesizer.continuum_opacity,
                 physics_coords,
-                physics_q,
+                physics_height_m,
                 global_step=step,
                 final_weights=final_weights,
                 create_graph=stage == "train",
                 return_state=False,
+                position_m=physics_position_m,
             )
         else:
             zero = stokes_loss.new_zeros(())
@@ -587,40 +885,49 @@ class LTEModule(LightningModule):
                 residual_norms={},
                 weights=self.physics.weights(step, final=final_weights),
             )
-        if self.pressure_boundary_enabled:
-            if stage == "train" and physics_boundary_batch is None:
+        if self.upper_boundary_sampling_enabled:
+            if stage == "train" and optical_depth_anchor_batch is None:
                 raise KeyError(
-                    "pressure_boundary training requires an independent "
-                    "'pressure_boundary' batch."
+                    "Upper-boundary physics requires an independent "
+                    "'optical_depth_anchor' batch."
                 )
-            boundary_result = self.physics.pressure_boundary(
+            upper_boundary_coords = (
+                optical_depth_anchor_batch["coords"]
+                if optical_depth_anchor_batch is not None
+                else batch["coords"]
+            )
+        else:
+            upper_boundary_coords = None
+        boundary_losses = {}
+        anchor_name = "mean_radial_optical_depth_anchor"
+        if self.optical_depth_anchor_enabled:
+            anchor_result = self.physics.mean_radial_optical_depth_anchor(
                 self.atmosphere_model,
-                (
-                    physics_boundary_batch["coords"]
-                    if physics_boundary_batch is not None
-                    else batch["coords"]
-                ),
-                (
-                    physics_boundary_batch["log_tau500"]
-                    if physics_boundary_batch is not None
-                    else self.atmosphere_model.log_tau500[0].expand(
-                        batch["coords"].shape[0]
-                    )
-                ),
-                (
-                    physics_boundary_batch.get("gas_pressure_pa")
-                    if physics_boundary_batch is not None
-                    else None
-                ),
+                self.synthesizer.continuum_opacity,
+                upper_boundary_coords,
+                global_step=step,
+                final_weights=final_weights,
+                depth_points=self.optical_depth_anchor_depth_points,
+            )
+            boundary_losses[anchor_name] = anchor_result.losses[anchor_name]
+        else:
+            boundary_losses[anchor_name] = stokes_loss.new_zeros(())
+        pressure_prior_name = "upper_boundary_gas_pressure_prior"
+        if self.upper_boundary_pressure_prior_enabled:
+            pressure_prior_result = self.physics.upper_boundary_gas_pressure_prior(
+                self.atmosphere_model,
+                upper_boundary_coords,
                 global_step=step,
                 final_weights=final_weights,
             )
-            boundary_loss = boundary_result.losses["pressure_boundary"]
+            boundary_losses[pressure_prior_name] = pressure_prior_result.losses[
+                pressure_prior_name
+            ]
         else:
-            boundary_loss = stokes_loss.new_zeros(())
+            boundary_losses[pressure_prior_name] = stokes_loss.new_zeros(())
         available_physics_losses = {
             **physics_result.losses,
-            "pressure_boundary": boundary_loss,
+            **boundary_losses,
         }
         physics_losses = {
             name: available_physics_losses[name]
@@ -728,18 +1035,23 @@ class LTEModule(LightningModule):
         return self._shared_step(batch, "valid", return_callback_payload=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr_start)
-        if self.lr_start == self.lr_end:
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        if self.learning_rate_schedule is None:
             return optimizer
-        if self.lr_iterations is None:
-            iterations = int(self.trainer.estimated_stepping_batches)
-        else:
-            iterations = self.lr_iterations
+        configured_iterations = self.learning_rate_schedule["iterations"]
+        iterations = (
+            int(self.trainer.estimated_stepping_batches)
+            if configured_iterations == "auto"
+            else int(configured_iterations)
+        )
         if iterations < 1:
-            raise RuntimeError("Trainer estimated no LTE optimizer steps.")
-        self.resolved_lr_iterations = iterations
-        gamma = (self.lr_end / self.lr_start) ** (1.0 / iterations)
-        scheduler = ExponentialLR(optimizer, gamma=gamma)
+            raise ValueError("Resolved learning-rate iterations must be positive.")
+        self.resolved_learning_rate_iterations = iterations
+        gamma = (
+            self.learning_rate_schedule["end"]
+            / self.learning_rate_schedule["start"]
+        ) ** (1.0 / iterations)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -780,12 +1092,15 @@ class LTEModule(LightningModule):
             production_continuum_metadata.pop("hminus_diagnostic_provenance", None)
         physics_sampling = deepcopy(self.checkpoint_metadata.get("physics_sampling"))
         checkpoint["lte_metadata"] = {
-            "schema_version": 28,
+            "schema_version": 32,
             "compute_dtype": str(next(self.parameters()).dtype).removeprefix("torch."),
             "units": {
                 "wavelength": "standard-air angstrom at data/instrument boundary",
                 "wavelength_internal": "vacuum angstrom for frequency, Planck, and opacity",
-                "log_tau500": "log10 of dimensionless vertical continuum optical depth at 5000 vacuum angstrom",
+                "log_tau500": (
+                    "derived log10 dimensionless continuum optical depth at 5000 "
+                    "vacuum angstrom; stored depth grid is only a shell quadrature label"
+                ),
                 "mu": "dimensionless ray cosine",
                 "stokes": (
                     "observations and synthesis are expressed in fixed disk-center "
@@ -794,22 +1109,37 @@ class LTEModule(LightningModule):
                 ),
                 "temperature": "K",
                 "velocity_field": (
-                    "m/s, observer Stokes frame [vx, vy, vz]; +vz points toward "
-                    "observer and radiative-transfer redshift velocity is -vz"
+                    "learned co-rotating residual in m/s expressed in the "
+                    "Heliographic Carrington Cartesian basis [Xc,Yc,Zc]; rigid "
+                    "Carrington rotation is excluded from this field"
                 ),
                 "magnetic_field": (
-                    "gauss, observer Stokes frame [Bx(+Q reference), "
-                    "By(increasing azimuth), B_los(positive toward observer)]"
+                    "gauss, Heliographic Carrington Cartesian [Xc,Yc,Zc], with +Zc "
+                    "toward solar north"
                 ),
+                "vector_projection": (
+                    "model Cartesian [Xc,Yc,Zc] -> local spherical "
+                    "[r,theta(colatitude),phi(longitude)]; rigid Carrington rotation "
+                    "Omega cross r is added to velocity before projection into the supplied per-ray "
+                    "observer basis [+Q,+U,toward_observer]; physics losses use "
+                    "the original Cartesian fields"
+                ),
+                "carrington_rotation": {
+                    "sidereal_period_days": CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS,
+                    "angular_velocity_rad_per_s": CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
+                    "axis": "+Zc",
+                    "formula": "v_rotation = Omega_Carrington cross r",
+                },
                 "microturbulence": "m/s",
                 "gas_pressure": "Pa",
-                "geometric_height": (
-                    "m, increasing upward; the fixed valid-FOV quadrature has "
-                    "mean z=0 at log_tau500=0 while individual columns remain corrugated"
+                "geometric_height": "m, radius minus R_sun in the fixed spherical shell",
+                "ray_geometry": (
+                    "heliocentric Carrington Cartesian in solar-radius units during "
+                    "intersection; exported positions and local path offsets are metres"
                 ),
                 "spatial_coordinates": (
-                    "[time_hours, helioprojective Solar-X Mm, helioprojective "
-                    "Solar-Y Mm]; the static model ignores time"
+                    "[time_hours, Carrington gnomonic chart-X Mm, chart-Y Mm]; "
+                    "the static model ignores time"
                 ),
                 "mass_density": "kg/m^3 from the pinned STiC/Wittmann lookup",
                 "number_density": "m^-3",
@@ -891,13 +1221,27 @@ class LTEModule(LightningModule):
             },
             "depth_sampling": {
                 "training_grid": (
-                    "linear log10(tau_500) strata with fixed endpoint and adjacent-"
-                    "midpoint bounds, independently uniform-sampled within each "
-                    "interior stratum, then evaluated by the continuous atmosphere"
+                    "reference-log-tau strata mapped through the pinned radial "
+                    "stratification; tau500 is derived from absolute opacity"
                 ),
-                "evaluation_grid": "configured deterministic reference grid",
+                "evaluation_grid": "configured deterministic outer-to-inner shell grid",
                 "sample_count": int(self.atmosphere_model.log_tau500.numel()),
                 "training_sample_count": self.training_depth_sample_count,
+                "coarse_to_fine": {
+                    "enabled": self.coarse_to_fine_enabled,
+                    "coarse_sample_count": self.training_depth_sample_count,
+                    "fine_sample_count": self.coarse_to_fine_sample_count,
+                    "final_sample_count": (
+                        self.training_depth_sample_count
+                        + self.coarse_to_fine_sample_count
+                        if self.coarse_to_fine_enabled
+                        else self.training_depth_sample_count
+                    ),
+                    "importance": "detached alpha500*exp(-tau500)*delta_s contribution",
+                    "selection": "deterministic per-ray probability quantiles",
+                    "uniform_weight_floor": self.coarse_to_fine_uniform_weight_floor,
+                    "coarse_points_retained": True,
+                },
                 "domain": self.atmosphere_model.log_tau500[[0, -1]]
                 .detach()
                 .cpu()
@@ -907,86 +1251,71 @@ class LTEModule(LightningModule):
                     "midpoint bounds; independent uniform interior draws and fixed endpoints"
                 ),
                 "integration": (
-                    "actual geometric-height line elements from the learned "
-                    "Z(x,y,log_tau500) mapping at every realized nonuniform "
-                    "optical-depth sample"
-                    if self.atmosphere_model.coordinate_mode == "geometric_height"
-                    else "actual line elements from successive realized nonuniform "
-                    "delta(tau_500) intervals"
+                    "exact observer-ray delta-s between ordered physical points; "
+                    "unreachable inner radii are compressed to a pre-tangent endpoint; "
+                    "optional detached per-ray importance refinement preserves gradients "
+                    "through the final atmosphere and formal-solver evaluations"
                 ),
             },
             "physics": {
                 **self.physics.configuration(),
                 "equation_definitions": {
-                    "hse": (
-                        "[dP/dlog10(tau500) - ln(10)*tau500*rho*g/alpha500] / mean_xy(P at fixed tau500) = 0"
-                        if self.atmosphere_model.coordinate_mode == "log_tau"
-                        else "[dP/dlog10(tau500) - rho*g*(-dz/dlog10(tau500))] / mean_xy(P) = 0"
+                    "magnetohydrostatic_equilibrium": (
+                        "[grad(P) + rho*g*radial_unit - (curl(B) cross B)/mu0] "
+                        "*L0/mean_same_height_layer(P + rho*g*L0 + |B|^2/mu0) = 0"
                     ),
-                    "tau_mapping": ("alpha500*(-dz/dlog10(tau500)) = ln(10)*tau500"),
-                    "pressure_boundary": "log10(Pgas/Ptop) = 0 at q_top",
-                    "divergence_b": "div(B) = 0",
-                    "mhs": ("grad(P) - rho*g - curl(B)xB/(4*pi) = 0 (Gaussian cgs)"),
-                    "continuity": "div(rho*v) = 0 (stationary)",
-                    "induction": "curl(v cross B) = 0 (stationary ideal MHD)",
-                    "momentum": (
-                        "rho*(v dot grad)v + grad(P) - rho*g - "
-                        "curl(B)xB/(4*pi) = 0 (stationary ideal MHD, Gaussian cgs)"
+                    "mean_radial_optical_depth_anchor": (
+                        "mean_observed_domain(log10(integral_from_shell_top_to_Rsun "
+                        "alpha500 dr)) = 0"
+                    ),
+                    "upper_boundary_gas_pressure_prior": (
+                        "log(P_gas/P_FALC) at the upper shell boundary = 0"
+                    ),
+                    "magnetic_divergence": (
+                        "div(B)*L0/mean_same_height_layer(|B|) = 0"
                     ),
                 },
-                "coordinate": (
-                    "[Solar-X Mm, Solar-Y Mm, log10(tau500)]"
-                    if self.atmosphere_model.coordinate_mode == "log_tau"
-                    else "geometric position [x_m,y_m,z_m]"
-                ),
+                "coordinate": "Carrington Cartesian position [x_m,y_m,z_m]",
                 "unit_contract": (
-                    "direct-tau HSE compares separately asinh-scaled dimensionless "
-                    "log-pressure derivatives assembled from SI P, rho, g, and alpha500"
-                    if self.atmosphere_model.coordinate_mode == "log_tau"
-                    else "geometric HSE differentiates P directly, transforms it "
-                    "with the learned tau-height metric, and normalizes only by "
-                    "sampled tau-surface mean pressure; other "
-                    "differential physics uses SI except B in gauss and is "
-                    "nondimensionalized from configured L0, t0, and B0"
+                    "Magnetohydrostatic equilibrium differentiates SI pressure and tesla magnetic field "
+                    "in Carrington Cartesian space; its force residual is normalized by the layer mean of "
+                    "P + rho*g*L0 + |B|^2/mu0. div(B) uses gauss and is normalized by "
+                    "the same sampled-height layer mean |B| with configured physical length L0; "
+                    "neither normalization uses an optical-depth coordinate"
                 ),
                 "density_source": "pinned STiC/Wittmann differentiable lookup",
                 "iterative_forward_solve": False,
                 "derivative_strategy": (
-                    "one log-pressure/log-tau derivative for direct-tau HSE"
-                    if self.atmosphere_model.coordinate_mode == "log_tau"
-                    else "one selectively populated primitive Jacobian, including "
-                    "direct pressure rather than log-pressure derivatives, shared "
-                    "by all active equations; algebraic product rules reuse it"
+                    "one selectively populated primitive Jacobian shared by magnetohydrostatic equilibrium and div(B)"
                 ),
                 "volume_sampling": (
-                    "independent uniform Solar-X, Solar-Y, and log_tau500 samples "
-                    "over the configured coordinate bounds"
+                    "uniform random geometric-height layers with Carrington-Cartesian "
+                    "points on observed rays that reach each layer"
                 ),
-                "boundary_sampling": (
-                    "independent valid-raster spatial samples on the top face"
-                    if self.pressure_boundary_enabled
+                "upper_boundary_sampling": (
+                    "independent valid observed-domain chart coordinates at the "
+                    "upper shell boundary; the optical-depth anchor additionally "
+                    "integrates radial columns to the exact solar radius"
+                    if self.upper_boundary_sampling_enabled
                     else "none"
                 ),
                 "sampling_contract": physics_sampling,
-                "top_pressure_pa": self.top_pressure_pa,
                 "gravity_m_per_s2": self.gravity_m_per_s2,
                 "volume_points_per_step": self.physics_volume_points_per_step,
-                "points_per_tau": self.physics_points_per_tau,
-                "tau_surfaces_per_step": (
-                    self.physics_volume_points_per_step // self.physics_points_per_tau
-                ),
-                "boundary_points_per_step": self.pressure_boundary_points_per_step,
+                "height_layers_per_step": self.physics_height_layers_per_step,
+                "optical_depth_anchor_points_per_step": self.optical_depth_anchor_points_per_step,
+                "optical_depth_anchor_depth_points": self.optical_depth_anchor_depth_points,
                 "validation_grid": "deterministic linear log_tau grid",
                 "validation_depth_points": self.physics_validation_depth_points,
                 "optical_depth_mapping": {
-                    "equation": "alpha500*dz/dlog10(tau500) + ln(10)*tau500 = 0",
-                    "training_residual": "squared log10 ratio at random collocation points",
-                    "validation_residual": "same pointwise differential equation",
-                    "height_model": (
-                        self.atmosphere_model.height_mapping.metadata()
-                        if self.atmosphere_model.height_mapping is not None
+                    "equation": "tau500(s)=integral_from_outer_boundary^s alpha500 ds",
+                    "training_residual": (
+                        "mean radial log10(tau500) at the solar radius"
+                        if self.optical_depth_anchor_enabled
                         else None
                     ),
+                    "validation_residual": "cumulative optical depth along each realized ray",
+                    "height_model": "fixed FALC radial shell labels plus learned atmospheric perturbations",
                 },
             },
             "wavelength_objective": {
@@ -997,19 +1326,19 @@ class LTEModule(LightningModule):
             },
             "optimization": {
                 "optimizer": "Adam",
-                "lr_start": self.lr_start,
-                "lr_end": self.lr_end,
-                "lr_iterations": (
-                    "auto" if self.lr_iterations is None else self.lr_iterations
+                "learning_rate": deepcopy(self.learning_rate_configuration),
+                "schedule": (
+                    None
+                    if self.learning_rate_schedule is None
+                    else "per-step exponential decay"
                 ),
+                "resolved_iterations": self.resolved_learning_rate_iterations,
             },
             "velocity_zero_point": (
                 "relative solar velocity in the fixed Hinode Level-1 gauge: "
                 "sp_prep removed DOP_RCV and registered the slit-averaged Fe I "
-                "6301.5 centre"
+                "6301.5 centre; rigid Carrington rotation is supplied explicitly "
+                "and is not absorbed by the learned velocity"
             ),
             "data": deepcopy(self.checkpoint_metadata),
         }
-        if self.atmosphere_model.coordinate_mode == "log_tau":
-            checkpoint["lte_metadata"]["units"].pop("geometric_height", None)
-            checkpoint["lte_metadata"]["physics"]["optical_depth_mapping"] = None

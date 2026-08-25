@@ -9,6 +9,47 @@ from pme.lte.synthesis import LTESynthesizer
 from pme.lte.wavelength import air_to_vacuum_angstrom
 
 
+def test_cumulative_tau500_uses_exact_realized_ray_distance():
+    alpha = torch.tensor([[1.0, 3.0, 5.0]])
+    distance = torch.tensor([[10.0, 12.0, 15.0]])
+    tau = LTESynthesizer._cumulative_tau500(
+        alpha,
+        ray_distance_m=distance,
+        geometric_height_m=None,
+        mu=torch.tensor(0.2),
+    )
+    torch.testing.assert_close(tau, torch.tensor([[0.0, 4.0, 16.0]]))
+
+
+def test_cumulative_tau500_subtracts_one_au_distances_before_float32_cast():
+    alpha = torch.ones((1, 3), dtype=torch.float32) * 2.0e-5
+    distance = torch.tensor(
+        [[1.49597870000e11, 1.49597870100e11, 1.49597870350e11]],
+        dtype=torch.float64,
+    )
+    tau = LTESynthesizer._cumulative_tau500(
+        alpha,
+        ray_distance_m=distance,
+        geometric_height_m=None,
+        mu=torch.tensor(1.0),
+    )
+    torch.testing.assert_close(
+        tau, torch.tensor([[0.0, 0.002, 0.007]], dtype=torch.float32)
+    )
+
+
+def test_cumulative_tau500_uses_positive_lengths_for_folded_surfaces():
+    alpha = torch.tensor([[1.0, 3.0, 5.0]])
+    distance = torch.tensor([[10.0, 8.0, 11.0]])
+    tau = LTESynthesizer._cumulative_tau500(
+        alpha,
+        ray_distance_m=distance,
+        geometric_height_m=None,
+        mu=torch.tensor(0.2),
+    )
+    torch.testing.assert_close(tau, torch.tensor([[0.0, 4.0, 16.0]]))
+
+
 def _atmosphere(
     *,
     depth=15,

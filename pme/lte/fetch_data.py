@@ -782,7 +782,7 @@ def _write_stic_continuum_table(
             "legacy_eos_scope": (
                 "The separately packaged Barklem/Saha EOS remains available for atomic "
                 "diagnostics and the inspectable H-minus-only continuum decomposition; "
-                "production continuum, configured HSE, damping perturbers, and Fe-I line "
+                "production continuum, configured MHS, damping perturbers, and Fe-I line "
                 "populations use this pinned STiC table."
             ),
         },

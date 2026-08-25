@@ -141,12 +141,15 @@ evaluating photon frequency, Planck radiance, continuum opacity, or Doppler
 width, those labels are converted to vacuum Angstrom with the differentiable
 VALD/Piskunov inverse of the Morton (2000) standard-air relation. The
 `tau500` reference opacity is evaluated at exactly 5000 vacuum Angstrom.
-The atmosphere always predicts Cartesian velocity and magnetic vectors. The
-velocity vector is `[v_x, v_y, v_z]` in the observer's Stokes frame with
-`+v_z` toward the observer, so the radiative-transfer LOS velocity is `-v_z`
-and remains positive for a redshift. Both vectors use direct, unbounded linear
-network readouts: the velocity scale is `1000 m/s` per raw unit and the
-magnetic scale is `100 G` per raw unit. Temperature and gas pressure use
+The atmosphere predicts a co-rotating velocity residual and magnetic vector in
+one fixed Heliographic-Carrington Cartesian scene frame. Immediately before
+synthesis, rigid Carrington rotation is added to the velocity and each
+instrument projects the resulting vectors into its per-pixel
+`[+Q, +U, toward-observer]` Stokes basis; the radiative-transfer LOS velocity
+is the negative toward-observer component and remains positive for a redshift.
+The magnetic vector uses a direct linear readout with a scale of `100 G` per
+raw unit. Velocity uses a smooth component-wise bound with a `1000 m/s` local
+scale and a configured `100 km/s` asymptote. Temperature and gas pressure use
 smooth natural-log readouts whose asymptotes are the verified STiC lookup
 bounds. A scaled `tanh` retains the configured local natural-log sensitivity
 without a hard clamp or an implicit `ln(10)` amplification. The deep
@@ -154,16 +157,15 @@ Fourier MLPs use activation-aware,
 variance-preserving random hidden weights, Xavier-random readout weights, and
 independently random biases. This prevents successive SiLU layers from
 suppressing coordinate-dependent Fourier variance into an apparently uniform
-DC field. No output channel or bias is zero-initialized; the explicit physical
-decoders set the initial magnitude. A single-view Stokes spectrum does not
-constrain `v_x` or `v_y` without additional dynamical physics. The magnetic vector is Cartesian in the
-observer's Stokes frame:
-`+Bx` defines zero magnetic azimuth (the Stokes `+Q` reference axis), `+By`
-defines increasing azimuth, and the positive LOS component is directed toward
-the observer. Stokes azimuth is pi-periodic; Q and U therefore rotate through
-twice the physical azimuth. The loader does not invent a detector-polarization
-rotation, so exported Bx/By must not be labeled solar west/north until that
-Hinode reference direction has been independently calibrated.
+DC field. The thermodynamic readout rows start at zero perturbation so the
+initial atmosphere is exactly radial FALC; vector readouts remain random. A
+single-view Stokes spectrum does not
+constrain the transverse velocity without additional dynamical physics.
+Stokes azimuth is pi-periodic; Q and U therefore rotate through twice the
+physical azimuth. SolarSoft `sp_prep` Level-1 processing already uses `CROTA2`
+to rotate Q/U from the FPP frame into the solar frame with +Q along solar
+east-west (HPC +X). The Hinode loader therefore uses a zero-degree reference
+angle and does not rotate the calibrated profiles a second time.
 
 For each Hinode pixel, the loader derives the ray cosine
 `mu = sqrt(1 - (Dsun*sin(rho)/Rsun)^2)` from the Level-1 `XCEN`, `YCEN`,
@@ -173,31 +175,31 @@ helioprojective convention, Tx is longitude, Ty is latitude, and
 `Dsun*sin(rho)`, rather than either `hypot(Tx,Ty)` or a ratio of angular
 small-angle approximations. The apparent solar semidiameter is
 `asin(Rsun/Dsun)` using Astropy's geocentric solar ephemeris; the Level-1 files
-do not carry an exact Hinode-spacecraft distance. The formal
-solver uses `mu` exactly once, as `delta_tau500/mu`, in polarized line
-and continuum transfer. The atlas calibration separately uses the same `mu`
+do not carry an exact Hinode-spacecraft distance. The operational inversion
+traces each observer ray through a spherical shell in the solar reference
+frame. Intersections are parameterized from the ray's photospheric Carrington
+point in solar-radius units, so float32 geometry never subtracts distances of
+order 1 AU. The formal solver integrates `alpha500*K` over realized path
+length; it does not apply a separate `1/mu` approximation. The atlas calibration
+separately uses the same `mu`
 with the Neckel continuum center-to-limb law: quiet-Sun intensity selection is
 performed after converting the observed continuum to a disk-center-equivalent
 level, and the single detector conversion is fitted against the expected local
 `I_c(mu)`. The calibrated profiles remain in the common disk-center atlas unit;
-they are not divided by `I_c(mu)`. The inferred magnetic and velocity vectors
-are already defined in the observer's Stokes frame, so applying an additional
-`mu` projection to their LOS components would be incorrect. HSE remains a vertical equation
-and therefore contains no `mu`. This is a 1.5-D plane-parallel treatment: an
-inclined ray samples a longer path through the same `(x,y)` column and does not
-move horizontally through neighbouring network columns. The Hinode entry point
+they are not divided by `I_c(mu)`. Magnetic and velocity vectors are projected
+geometrically into the observer frame, so applying a separate `mu` correction
+to their LOS components would be incorrect. MHS is evaluated in the solar frame and contains
+no `mu`. The Hinode entry point
 exposes no spatial-PSF configuration because a detector kernel would need the
 local two-dimensional scan/slit displacement basis in physical Mm coordinates.
 
-The same pointing solution is converted to physical image-plane coordinates as
-`x_mm=D*tan(Tx)` and `y_mm=D*tan(Ty)/cos(Tx)`, with angles in radians and the
-same geocentric distance proxy. These are coordinates on one tangent plane
-through Sun center for the HPC ray direction
-`(cos(Ty)sin(Tx), sin(Ty), cos(Ty)cos(Tx))`. The loader retains each scan-column
-time and stores coordinate formulas, ranges, source keywords,
-observer-distance values, and the exact network affine in raster/checkpoint
-metadata. These are projected helioprojective distances, not a solar-surface
-deprojection.
+The near-side surface intersections are transformed to Heliographic Carrington
+Cartesian coordinates. A raster-centred, observer-independent gnomonic chart
+conditions the two spatial network inputs without changing the physical scene.
+The loader retains each scan-column time, global ray origin and direction,
+per-pixel Stokes basis, scene-chart basis, coordinate formulas, and the exact
+network affine in raster/checkpoint metadata. A later HMI or second-observer
+adapter therefore only needs to provide rays and its calibrated Stokes basis.
 
 The anomalous-dispersion coordinate is red-positive,
 `(lambda-lambda_component)/delta_lambda_D` (implemented equivalently in
@@ -247,71 +249,84 @@ python -m pme.inversion_lte --config config/hinode/lte_small_patch.yaml
 ```
 
 The same commands are installed as `pinn-me-lte` and `pinn-me-lte-export` by
-the packaged project. The operational inversion composes a tau-to-height field
-with one continuous physical atmosphere:
+the packaged project. The Hinode configurations use a heliocentric Carrington
+Cartesian atmosphere and a fixed spherical radial domain:
 
 ```text
-(Solar-X, Solar-Y, log10(tau500)) -> Z -> geometric height z
-(Solar-X, Solar-Y, z)             -> F -> T, Pgas, v, B, xi
-atmosphere sampled in tau         -> geometric-height LTE polarized transfer
+HPC + observer WCS -> Carrington chart (x,y), ray, and Stokes basis
+ray + inner/outer radii -> solar-local Carrington points through the shell
+F(x,y,r-Rsun) -> log perturbations of radial FALC T, Pgas, xi; plus Cartesian v and B
+Cartesian vectors -> local Carrington (r, theta, phi) -> supplied observer basis
+alpha500(T,Pgas) integrated over ray distance -> tau500 and polarized transfer
 ```
 
-`Z` uses a linear 150 km/dex base scale and an MLP that outputs an unconstrained
-dimensionless height perturbation scaled by 10% of that base scale (15 km); the
-perturbation readout starts at zero. `F`
-uses normalized coordinates and variance-preserving random initialization.
-There are no fixed atmospheric nodes, reference atmosphere, or magnetic seed.
-`Z` is optimized jointly and has one gauge condition,
-`mean_FOV[z(log_tau500=0)]=0`, which removes only the global height translation.
+`F` uses normalized Carrington-chart `(x,y)` and radial-height coordinates with
+variance-preserving random initialization. Thermodynamic readouts are bounded
+natural-log perturbations around a pinned radial STiC FALC_82 stratification;
+there is no magnetic or velocity seed. The historically named `log_tau500`
+array is only an
+ordered, dimensionless quadrature parameter from the outer to inner radius; it
+does not define geometry or optical depth. Each ray is intersected with the
+configured shell from `z=-0.1 Mm` to `z=+1.5 Mm` relative to the solar radius,
+then the FALC-spaced quadrature points
+are placed between those endpoints. Rays that cannot reach the nominal inner
+radius stop just before their tangent point instead of aborting. The formal
+solver multiplies its normalized propagation
+matrix by `alpha500` and the exact distance between successive intersections.
+The diagnostic cumulative `tau500` is the trapezoidal integral of this absolute
+opacity along the realized path. No `mu` path-length correction is used for ray
+geometry.
 
-The configured `log_tau500` array defines the domain and a deterministic
-evaluation grid, not trainable nodes. For every training batch, the transfer
-sampler first constructs equally spaced centers from the minimum to maximum
-`log_tau500`. The endpoints remain fixed; every interior point is independently
-drawn from a uniform stratum bounded exactly by the midpoints to its two
-adjacent centers. This produces an ordered nonuniform grid with no secondary
-jitter control. The mapping evaluates a physical height at every realized tau
-sample. The formal solution multiplies its normalized propagation matrix by
-`alpha500` and uses the actual geometric distance between successive mapped
-heights as its line element. Refining the sample count changes quadrature
-accuracy without changing the number of neural parameters.
+Observer-ray synthesis optionally uses deterministic per-ray coarse-to-fine
+sampling. A wide coarse trace estimates interval contributions proportional to
+`alpha500*exp(-tau500)*delta_s`; detached probability quantiles then add the
+configured fine points. Every coarse point is retained, a uniform probability
+floor protects initially misplaced formation regions, and the final atmosphere
+and polarized transfer are reevaluated differentiably on the merged ordered
+grid. This is configured under `training.depth_sampling_config.coarse_to_fine`.
 
-Physics collocation is independent of that transfer grid. A volume dataset
-draws independent uniform physical `(Solar-X, Solar-Y, log_tau500)` samples
-over the complete configured axis-aligned bounds. Each sample passes through
-`Z` and then `F`. A separate top-face dataset keeps the gas-pressure boundary at
-the configured top optical depth.
-Physics validation uses one deterministic linear optical-depth grid.
+Physics collocation samples shared geometric-height layers in the same Carrington Cartesian
+shell, with independent observed rays selected on every layer. The eligible ray
+set is recomputed at each radius, so samples follow the actual observed ray
+bundle rather than a rectangular longitude-latitude box. MHS balances the full pressure gradient, radial gravity, and magnetic
+Lorentz force; `div B` differentiates Carrington magnetic components with
+respect to Carrington position. The mean radial `tau500=1` surface is anchored
+at the solar radius by integrating continuum opacity from the shell top. Tau
+along observer rays is computed independently for synthesis and diagnostics.
 
 There is no explicit smoothness, derivative, node, or sparsity regularizer.
 Smoothness comes from the finite-bandwidth Fourier-feature MLPs and smooth
 decoders, evaluated at continuously changing coordinates. Public spatial
-coordinates are helioprojective Solar-X/Solar-Y in Mm. The entry point stores
-one raster-derived affine inside both coordinate networks; the
+coordinates are an observer-independent Carrington gnomonic chart in Mm. The entry point stores
+one raster-derived affine inside the shared coordinate network; the
 isotropic scale is 512 native pixels, mapping the configured full raster to
-approximately `x=[-1,1]` and `y=[-0.5,0.5]`; `log_tau500=[-5,1]` maps to
-`[-1,1]` inside `Z`, and `F` receives `z/height_input_scale_m`. These ranges keep inputs order-unity while the full-resolution
+approximately `x=[-1,1]` and `y=[-0.5,0.5]`; radial height is scaled by `1 Mm`.
+These ranges keep inputs order-unity while the full-resolution
 configuration limits the shortest representable spatial period to approximately
-eight native pixels.
+64 native pixels.
 
 Although the loader retains every scan-column timestamp, the default single-
 raster atmosphere is explicitly static and ignores the time coordinate. In a
 slit scan, time and scan position are nearly perfectly correlated, so a joint
-`F(t,x,y,z)` model would be non-identifiable away
+`F(t,x,y,r)` model would be non-identifiable away
 from the observed scan trajectory. The implemented atmosphere is therefore
-strictly `Z(x,y,log_tau500)` followed by `F(x,y,z)`; scan time remains data
+strictly `F(x,y,r) -> atmosphere`; scan time remains data
 provenance rather than a network input.
 
-Geometric height and corrugated optical-depth surfaces are inferred. This makes
-geometric `div B`, magnetohydrostatic balance, continuity, induction, and
-momentum residuals available, although the vector equations remain disabled in
-the Hinode example until the transverse Stokes basis has been independently
-calibrated to the Solar-X/Y basis.
+The chosen frame is co-rotating rather than inertial because the inversion is a
+quasi-static snapshot. The learned velocity is a residual expressed in the
+co-rotating Carrington Cartesian basis. Polarized synthesis explicitly adds the
+rigid sidereal Carrington velocity `Omega_Carrington cross r` before projecting
+the total inertial velocity first into the local spherical basis and then into
+the supplied per-ray observer Stokes basis. Solar rotation therefore cannot be
+absorbed into the learned velocity field. Physics losses continue to use only
+the learned co-rotating residual. The transform is instrument-independent; an
+observation adapter provides the rays and its right-handed observer basis.
 
 The validation metrics evaluate a deterministic stride-selected subset of the
 same inversion pixels without shuffling and on the deterministic depth grid.
 `valid.stokes_loss` is the data-fit diagnostic; `valid.loss` additionally uses
-the current scheduled HSE and top-boundary weights.
+the configured fixed magnetohydrostatic-equilibrium, magnetic-divergence, and pressure-boundary weights.
 `data.validation_stride` and `validation_batch_size` bound this cost;
 `check_val_every_n_epoch` controls the actual Lightning validation cadence as
 well as checkpointing. It is a stable data-fit/checkpoint diagnostic, not a
@@ -341,10 +356,10 @@ no charge-neutrality, hydrostatic, Newton, bisection, or other iterative EOS
 solve. The separately packaged Barklem/Saha table is a reference and regression
 resource; it is not part of the production forward graph.
 
-The initial 25-point grid is a scalable training quadrature, not a claim of exact
-depth convergence. In the current physical-radiance convergence test against a
-101-point result, the 25-point Stokes-I RMS error is about `6e-3 Ic`, while 51
-points reduces it to about `1e-3 Ic`.
+The configured 25-point grid is a scalable training quadrature, not a claim of
+exact depth convergence. In the current physical-radiance convergence test
+against a 101-point result, this grid has a Stokes-I RMS error of about
+`6e-3 Ic`, while 51 points reduces it to about `1e-3 Ic`.
 These figures depend on the atmosphere and table revision, so a quantitative
 final inversion must repeat its last refinement on a 51-point-or-denser
 randomized grid and verify that the inferred profiles and Stokes residuals are
@@ -365,62 +380,37 @@ Validation plots use the exact optimization tensors without additional
 normalization. The atlas provenance, quiet-Sun selection definition, and fitted
 detector conversion are saved in the checkpoint.
 
-The optimizer uses a configurable set of named objectives. Every enabled loss
-and its current weight are logged at each training step:
+The optimizer uses fixed-weight named objectives. Every enabled loss is
+logged at each training step:
 
 - `train.stokes_loss` is the only observation objective.
-- `train.tau_mapping` enforces
-  `alpha500*(-dz/dlog10(tau500)) = ln(10)*tau500` at random volume points.
-- `train.hse` differentiates `Pgas` itself and minimizes
-  `[dP/dlog10(tau500) - rho*g*(-dz/dlog10(tau500))] / mean_xy(Pgas)` on each
-  randomly sampled tau surface. `rho(T,Pgas)` and `alpha500(T,Pgas)` are taken
-  from the pinned STiC/Wittmann table.
-- `train.pressure_boundary` fixes the pressure integration constant on the
-  independent top-face dataset. Its target is not an arbitrary tuning value:
-  the resource bundle derives `Pgas=0.0903679136 Pa` at
-  `log10(tau500)=-5` from the pinned FALC atmosphere with the same STiC
-  opacity convention. It also supplies the paired FALC gravity
-  `g=275.4228703 m s^-2`; startup rejects a conflicting override of either
-  quantity.
+- `train.magnetohydrostatic_equilibrium` enforces the full vector balance between pressure,
+  gravity, and the magnetic Lorentz force in Carrington Cartesian coordinates.
+- `train.magnetic_divergence` enforces `div(B)=0` in that same frame.
+- `train.mean_radial_optical_depth_anchor` constrains the observed-domain mean
+  radial `log10(tau500)` at the solar radius to zero without prescribing a
+  pressure at either shell boundary.
 
-`training.physics_config.equations` enables geometric `divergence_b` in the
-Hinode configuration and additionally exposes stationary magnetohydrostatic
-`mhs`, `continuity`, ideal `induction`, and
-ideal-MHD `momentum` residuals. The MHS residual is the normalized vector force
-balance `grad(P) - rho*g - (curl(B) x B)/(4*pi)` in Gaussian cgs units: the
-network field stays in gauss, magnetic derivatives are converted from G/m to
-G/cm, and all mechanical force densities are converted to dyn/cm^3. It shares
-one pressure/magnetic Jacobian with `divergence_b`. The configuration declares
-that the magnetic basis matches the Solar-X/Y/z coordinate basis; this assertion
-must be backed by an independently calibrated Hinode transverse Stokes-reference
-rotation before the result is interpreted physically. Startup refuses geometric
-vector equations unless that basis contract is declared. The force and dynamical
-equations remain disabled. An energy equation is intentionally absent because the LTE spectra do
-not provide a closed heating, conduction, and radiative-cooling model.
-The HSE, MHS, and full momentum residuals are mutually exclusive force-balance
-models. Applying more than one would silently introduce additional zero-force
-assumptions.
+The gravity comes from the pinned FALC/STiC resource bundle. The atmosphere predicts magnetic and
+velocity vectors in the fixed Carrington Cartesian basis, and only the
+radiative-transfer path projects them into each observer's Stokes basis.
+The LTE pipeline deliberately does not expose time-dependent momentum, induction,
+continuity, or learned tau-surface alternatives.
 
-Every Stokes and physics `weight` accepts a non-negative number or a schedule.
-Supported schedules are `fixed`, `linear`, `exponential`, `step`, and
-`smoothstep`; choosing `start < end` or `start > end` gives an ascending or
-descending schedule. A scheduled term with current weight zero is not evaluated.
-`train.loss` is the configured weighted sum; there are no profile-smoothness or
-generic parameter penalties. Training emits no `train.epoch_loss`. Validation
-logs the same enabled Stokes and physics components once per completed epoch at
-the current schedule weights.
+Stokes and physics weights must be non-negative scalar numbers. Loss schedules
+are unsupported. Adam accepts either a scalar `learning_rate` or a per-step
+exponential schedule with `start`, `end`, and positive `iterations`; `auto` uses
+the trainer's actual estimated optimizer-step count. `train.loss` is the fixed weighted sum;
+there are no profile-smoothness or generic parameter penalties.
 
-`training.physics_config.normalization` sets the three independent units
-`length_m`, `time_s`, and `magnetic_field_gauss`. The derived Gaussian-cgs
-units are `v0=L0/t0`, `P0=B0^2/(4*pi)`, `rho0=P0/v0^2`,
-`g0=L0/t0^2`, and force-density `f0=P0/L0`. MHS, momentum,
-continuity, induction, and `divergence_b` are divided by their corresponding
-derived unit. Geometric HSE is normalized only by the detached mean gas
-pressure on each sampled optical-depth surface; the pressure boundary is a
-dimensionless log10 ratio. `valid.pressure_increasing_fraction` reports
+`training.physics_config.normalization.length_m` sets the derivative length for
+`div(B)`. MHS is normalized by the detached layer mean of the pressure-equivalent
+sum `P + rho*g*L + |B|^2/mu0`; `div(B)` is normalized by the detached layer mean
+of `|B|`. The optical-depth anchor is the square of the observed-domain mean
+radial `log10(tau500)` at the solar radius. `valid.pressure_increasing_fraction` reports
 the fraction of adjacent validation-depth intervals whose pressure increases
-inward; it should approach one as HSE is satisfied. HSE constrains pressure,
-not monotonic temperature, velocity, or magnetic field profiles.
+inward. MHS constrains pressure and magnetic field jointly, but does not impose
+monotonic temperature or velocity profiles.
 
 During training, the LTE visualization callback writes one update per complete
 validation epoch under `work_directory/atmosphere_visualizations`. One Stokes
@@ -428,30 +418,32 @@ dashboard contains wavelength-integrated absolute reference maps, prediction
 maps on the same color scale, and signed observed/predicted spectra at the
 validation ensemble as median signed profiles with 16--84% bands and integrated
 predicted-versus-reference scatter; both Fe I laboratory wavelengths are marked.
-Integration uses the actual detector wavelength coordinates. A separate
-parameter figure, magnetic-field figure, and velocity figure place quantities
-in columns and configured optical-depth layers in rows ordered from high to low
-tau. They include inferred `T` and `Pgas` and STiC-derived `rho`, all displayed
-in linear physical units with logarithmic color normalization, plus all velocity-vector components,
-magnetic quantities, and
-microturbulence. Full rasters are uniformly subsampled up to
-`max_map_pixels` from the same deterministic validation-derived slit/scan grid
-used by the Stokes maps, and evaluation is chunked with
-`evaluation_batch_size`. Every map uses the actual 2-D Solar-X/Solar-Y Mm
-coordinates rather than detector-index extents. Parameter and Stokes panels
-therefore have identical samples and orientation. Local figures are
+Integration uses the actual detector wavelength coordinates. Separate
+parameter, radial-magnetic-field, and radial-velocity figures place quantities
+in columns and selected spherical-shell heights in rows. These atmosphere maps
+are evaluated directly on regular physical Carrington longitude-latitude shell
+surfaces; they are not reconstructed from detector rays. They include inferred
+`T` and `Pgas`, STiC-derived `rho`, microturbulence, `B_r`, and `v_r`.
+`visualization.slice_sampling` independently controls their angular resolution,
+radial-section resolution, and evaluation batch size. Only the requested shell
+surfaces and radial plane are instantiated, never a full
+longitude-latitude-radius cube. Stokes maps retain the observer-facing chart in
+Mm because those samples are image measurements rather than spherical layers.
+Local figures are
 saved at the configured DPI and WandB uploads that exact PNG instead of
 rerasterizing the live Matplotlib figure at a lower default resolution.
-An optional `visualization.yz_slice` selects an exact detector `scan_index` and
-adds both optical-depth and geometric-height cross sections per visualization
-epoch for the parameters, complete magnetic vector and derived angles, and
-complete velocity vector. The geometric panels use the learned curvilinear
-height mesh and overlay the selected `log_tau500` surfaces as dashed contours.
-A separate tau-mapping dashboard shows height and the signed
-`-dz/dlog10(tau500)` metric.
+An optional `visualization.meridional_slice.longitude_deg` directly selects a Carrington
+longitude and samples a true physical constant-longitude radial plane at the
+independent `slice_sampling` resolution.
+It adds parameter, `B_r`, and `v_r` sections and never computes optical-depth
+slices.
+A separate optical-depth diagnostic integrates `alpha500 ds` along those
+subsampled validation rays, compares the median and 16--84% range with the FALC radial
+shell labels, and maps `log10(tau500)` at the layer nearest `R=R_sun`.
 Integrated maps and agreement scatter retain all validation samples; only the
 complete 4x112 spectra used for percentile curves are capped by
-`max_profile_samples`, keeping callback memory bounded on a full raster.
+`ray_sampling.max_profile_samples`. `ray_sampling.max_pixels` separately caps
+the observer rays used by the optical-depth diagnostic.
 
 The supplied LTE configurations use a `WandbLogger` with project
 `pinn-me-lte`; figures, named losses/metrics, and the complete configuration
@@ -463,14 +455,13 @@ and layers under the top-level `visualization` mapping, or set
 The trainer additionally writes best/last checkpoints and an `on_exception.ckpt`
 for recoverable failures or interruptions. Resume loading verifies the LTE provenance
 and scientific configuration before accepting checkpoint state.
-The supplied configs set `lr_params.iterations: auto`, so the exponential
-schedule reaches its configured end rate on the trainer's actual final
-optimizer step rather than retaining a stale step count from another FOV.
+The diagnostic config uses a constant Adam learning rate; the full-resolution
+config uses the explicitly configured exponential learning-rate schedule.
 
 The standalone recovery command is a compact forward/objective gradient smoke
 test. It fits twelve explicit atmosphere coefficients to a noiseless two-line
 Stokes spectrum with fixed pressure; it does **not** exercise the coordinate
-network, HSE collocation, Hinode loader, or callbacks and is not presented
+network, MHS collocation, Hinode loader, or callbacks and is not presented
 as an end-to-end inversion validation:
 
 ```bash
@@ -701,10 +692,10 @@ reference direction before Bx/By are interpreted as solar-image axes.
 
 The production graph uses one thermodynamic source. The generated STiC/Wittmann
 table supplies total continuum extinction for the tau-height metric and
-geometric transfer, mass density for HSE,
+geometric transfer, mass density for MHS,
 electron and neutral-H perturber densities for damping, and `n(Fe I)/U(Fe I)`
 for both Fe I lower-level populations. Its FALC conversion supplies the
-matching upper pressure boundary and gravity. The Barklem/Saha table remains a
+reference stratification and gravity. The Barklem/Saha table remains a
 separate, inspectable regression reference and is never evaluated during
 training.
 

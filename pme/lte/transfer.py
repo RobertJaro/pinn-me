@@ -29,8 +29,9 @@ def _validate_geometric_height(
     A learned height mapping may be different for every atmosphere column, so
     the accepted shape is either ``[depth]`` or ``[*batch_shape, depth]``.
     Monotonicity is deliberately enforced by the differentiable tau-mapping
-    objective rather than a hard runtime rejection: retaining signed layer
-    thicknesses lets a wrongly oriented mapping receive a corrective gradient.
+    objective rather than a hard runtime rejection. The formal solver uses
+    absolute layer lengths, so a temporary reversal remains finite while the
+    tau-mapping gradient repairs its orientation.
     """
 
     height = torch.as_tensor(geometric_height_m)
@@ -96,6 +97,7 @@ class PolarizedFormalSolver(nn.Module):
         *,
         geometric_height_m: torch.Tensor | None = None,
         alpha500: torch.Tensor | None = None,
+        ray_distance_m: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return emergent Stokes vectors with shape ``[..., wavelength, 4]``.
 
@@ -120,6 +122,13 @@ class PolarizedFormalSolver(nn.Module):
             Total 5000-Angstrom continuum extinction in inverse metres. It is
             required with ``geometric_height_m`` and converts the normalized
             propagation matrix to a dimensional one.
+        ray_distance_m:
+            Optional distance from the observer to every sampled atmosphere
+            point, shape ``[..., depth]``. When supplied, the absolute exact
+            layer lengths replace the local plane-parallel
+            ``delta_height / mu`` path approximation. Taking the absolute
+            length keeps a temporarily folded learned surface from turning
+            physical attenuation into exponential amplification.
         """
 
         matrix = torch.as_tensor(propagation_matrix)
@@ -139,7 +148,7 @@ class PolarizedFormalSolver(nn.Module):
         depth = matrix.shape[-4]
         grid = _validate_depth_grid(log_tau500, depth).to(matrix)
         batch_shape = matrix.shape[:-4]
-        ray_mu = _broadcast_mu(mu, batch_shape, matrix)
+        ray_mu = None if ray_distance_m is not None else _broadcast_mu(mu, batch_shape, matrix)
         use_geometric_height = geometric_height_m is not None or alpha500 is not None
         if use_geometric_height:
             if geometric_height_m is None or alpha500 is None:
@@ -169,6 +178,24 @@ class PolarizedFormalSolver(nn.Module):
             tau = torch.pow(matrix.new_tensor(10.0), grid)
             dimensional_matrix = None
 
+        ray_distance = None
+        if ray_distance_m is not None:
+            if dimensional_matrix is None:
+                raise ValueError(
+                    "ray_distance_m requires geometric_height_m and alpha500 so the "
+                    "propagation matrix has inverse-metre units."
+                )
+            # Ray tracing supplies solar-local path offsets measured from the
+            # outer shell. Preserve their input dtype until differencing.
+            ray_distance = torch.as_tensor(ray_distance_m, device=matrix.device)
+            if ray_distance.shape != (*batch_shape, depth):
+                raise ValueError(
+                    f"ray_distance_m must have shape {(*batch_shape, depth)}, got "
+                    f"{tuple(ray_distance.shape)}"
+                )
+            if not torch.isfinite(ray_distance).all():
+                raise ValueError("ray_distance_m must be finite.")
+
         stokes = source[..., -1, :, :] if bottom_boundary is None else bottom_boundary
         expected_boundary = matrix.shape[:-4] + matrix.shape[-3:-2] + (4,)
         if stokes.shape != expected_boundary:
@@ -186,12 +213,16 @@ class PolarizedFormalSolver(nn.Module):
                     matrix[..., upper, :, :, :] + matrix[..., lower, :, :, :]
                 )
             else:
-                layer_measure = height[..., upper] - height[..., lower]
+                layer_measure = (height[..., upper] - height[..., lower]).abs()
                 midpoint_matrix = 0.5 * (
                     dimensional_matrix[..., upper, :, :, :]
                     + dimensional_matrix[..., lower, :, :, :]
                 )
-            path_scale = layer_measure / ray_mu
+            path_scale = (
+                (ray_distance[..., lower] - ray_distance[..., upper]).abs().to(matrix)
+                if ray_distance is not None
+                else layer_measure / ray_mu
+            )
             attenuation = torch.matrix_exp(
                 -midpoint_matrix * path_scale[..., None, None, None]
             )

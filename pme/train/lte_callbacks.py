@@ -15,6 +15,12 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from pytorch_lightning import Callback
 
+from pme.coordinates import (
+    cartesian_to_spherical,
+    project_cartesian_to_spherical,
+    spherical_to_cartesian,
+)
+
 
 _FIELD_STYLES = {
     "temperature": {
@@ -35,23 +41,18 @@ _FIELD_STYLES = {
         "signed": False,
         "log_norm": True,
     },
-    "geometric_height": {
-        "label": r"$z$ [Mm; $\langle z(q=0)\rangle=0$]",
-        "cmap": "terrain",
-        "signed": False,
-    },
-    "v_x": {
-        "label": r"$v_x$ [km s$^{-1}$]",
+    "v_r": {
+        "label": r"$v_r$ [km s$^{-1}$]",
         "cmap": "seismic",
         "signed": True,
     },
-    "v_y": {
-        "label": r"$v_y$ [km s$^{-1}$]",
+    "v_theta": {
+        "label": r"$v_\theta$ [km s$^{-1}$]",
         "cmap": "seismic",
         "signed": True,
     },
-    "v_z": {
-        "label": r"$v_z$ [km s$^{-1}$; toward observer]",
+    "v_phi": {
+        "label": r"$v_\phi$ [km s$^{-1}$]",
         "cmap": "seismic",
         "signed": True,
     },
@@ -60,22 +61,26 @@ _FIELD_STYLES = {
         "cmap": "cividis",
         "signed": False,
     },
-    "b_x": {"label": r"$B_x$ [G]", "cmap": "RdBu_r", "signed": True},
-    "b_y": {"label": r"$B_y$ [G]", "cmap": "RdBu_r", "signed": True},
-    "b_los": {"label": r"$B_{LOS}$ [G]", "cmap": "RdBu_r", "signed": True},
-    "b_magnitude": {"label": r"$|B|$ [G]", "cmap": "cividis", "signed": False},
-    "b_inclination": {
-        "label": r"$\gamma_B$ [deg]",
-        "cmap": "PiYG",
-        "signed": False,
-        "limits": (0.0, 180.0),
-    },
-    "b_azimuth": {
-        "label": r"$\chi_B$ [deg]",
-        "cmap": "twilight",
+    "b_r": {"label": r"$B_r$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_theta": {"label": r"$B_\theta$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_phi": {"label": r"$B_\phi$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_q": {"label": r"$B_{+Q}$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_u": {"label": r"$B_{+U}$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_toward": {"label": r"$B_{\rm toward}$ [G]", "cmap": "RdBu_r", "signed": True},
+    "v_q": {"label": r"$v_{+Q}$ [km s$^{-1}$]", "cmap": "seismic", "signed": True},
+    "v_u": {"label": r"$v_{+U}$ [km s$^{-1}$]", "cmap": "seismic", "signed": True},
+    "v_toward": {"label": r"$v_{\rm toward}$ [km s$^{-1}$]", "cmap": "seismic", "signed": True},
+    "v_rotation_toward": {
+        "label": r"$v_{\rm rot,toward}$ [km s$^{-1}$]",
+        "cmap": "seismic",
         "signed": True,
-        "limits": (-180.0, 180.0),
     },
+    "v_inertial_magnitude": {
+        "label": r"$|v_{\rm inertial}|$ [km s$^{-1}$]",
+        "cmap": "cividis",
+        "signed": False,
+    },
+    "b_magnitude": {"label": r"$|B|$ [G]", "cmap": "cividis", "signed": False},
     "microturbulence": {
         "label": r"$\xi$ [km s$^{-1}$]",
         "cmap": "magma",
@@ -87,19 +92,11 @@ _THERMODYNAMIC_FIELDS = (
     "temperature",
     "density",
     "pressure",
-    "geometric_height",
     "microturbulence",
 )
-_MAGNETIC_FIELDS = (
-    "b_x",
-    "b_y",
-    "b_los",
-    "b_magnitude",
-    "b_inclination",
-    "b_azimuth",
-)
-_VELOCITY_FIELDS = ("v_x", "v_y", "v_z", "v_magnitude")
-_YZ_THERMODYNAMIC_FIELDS = (
+_MAGNETIC_FIELDS = ("b_r", "b_theta", "b_phi")
+_VELOCITY_FIELDS = ("v_r", "v_theta", "v_phi")
+_MERIDIONAL_THERMODYNAMIC_FIELDS = (
     "temperature",
     "density",
     "pressure",
@@ -112,10 +109,11 @@ class LTEAtmosphereVisualizationCallback(Callback):
 
     The callback evaluates the atmosphere network plus the pinned STiC
     thermodynamic lookup so density is the same quantity used by geometric
-    HSE. It does not repeat polarized synthesis. Full rasters are subsampled before
-    evaluation, bounding both callback memory and runtime. Atmosphere and
-    Stokes maps share the same two-dimensional helioprojective Solar-X/Solar-Y
-    grid in Mm; no detector-index or axis-aligned WCS approximation is used.
+    MHS. It does not repeat polarized synthesis. Optical depth uses a bounded
+    subsample of observed rays. Atmosphere panels instead evaluate only explicit
+    longitude-latitude shell layers and a constant-longitude radial plane in
+    physical Carrington space, at an independently configured resolution.
+    Stokes maps retain the observer-facing Carrington chart supplied with the raster.
     PNG files are always written locally.  When the configured Lightning
     logger implements ``log_image`` (for example WandB), the same figures are
     also uploaded. Integrated Stokes products retain every validation sample;
@@ -128,45 +126,77 @@ class LTEAtmosphereVisualizationCallback(Callback):
         output_directory,
         *,
         every_n_epochs: int = 5,
-        depth_layer_count: int = 4,
-        evaluation_batch_size: int = 8192,
-        max_map_pixels: int = 65_536,
-        max_profile_samples: int = 4_096,
+        ray_sampling: Mapping | None = None,
+        slice_sampling: Mapping | None = None,
         dpi: int = 180,
         include_initial: bool = True,
-        yz_slice: Mapping | None = None,
+        meridional_slice: Mapping | None = None,
     ):
         super().__init__()
         if every_n_epochs < 1:
             raise ValueError("every_n_epochs must be positive.")
-        if depth_layer_count < 2:
-            raise ValueError("depth_layer_count must be at least two.")
-        if evaluation_batch_size < 1:
-            raise ValueError("evaluation_batch_size must be positive.")
-        if max_map_pixels < 1:
-            raise ValueError("max_map_pixels must be positive.")
-        if max_profile_samples < 1:
-            raise ValueError("max_profile_samples must be positive.")
+        ray_config = dict(ray_sampling or {})
+        self.ray_evaluation_batch_size = int(ray_config.pop("batch_size", 8192))
+        self.max_ray_pixels = int(ray_config.pop("max_pixels", 65_536))
+        self.max_profile_samples = int(
+            ray_config.pop("max_profile_samples", 4_096)
+        )
+        if ray_config:
+            raise TypeError(f"Unknown ray-sampling options: {sorted(ray_config)}")
+        slice_config = dict(slice_sampling or {})
+        self.slice_longitude_points = int(
+            slice_config.pop("longitude_points", 256)
+        )
+        self.slice_latitude_points = int(slice_config.pop("latitude_points", 256))
+        self.slice_radial_points = int(slice_config.pop("radial_points", 192))
+        self.slice_layer_count = int(slice_config.pop("layer_count", 4))
+        self.slice_evaluation_batch_size = int(slice_config.pop("batch_size", 8192))
+        if slice_config:
+            raise TypeError(f"Unknown slice-sampling options: {sorted(slice_config)}")
+        positive_counts = {
+            "ray_sampling.batch_size": self.ray_evaluation_batch_size,
+            "ray_sampling.max_pixels": self.max_ray_pixels,
+            "ray_sampling.max_profile_samples": self.max_profile_samples,
+            "slice_sampling.longitude_points": self.slice_longitude_points,
+            "slice_sampling.latitude_points": self.slice_latitude_points,
+            "slice_sampling.radial_points": self.slice_radial_points,
+            "slice_sampling.layer_count": self.slice_layer_count,
+            "slice_sampling.batch_size": self.slice_evaluation_batch_size,
+        }
+        invalid = [name for name, value in positive_counts.items() if value < 1]
+        if invalid:
+            raise ValueError(f"Visualization sample counts must be positive: {invalid}.")
+        if min(self.slice_longitude_points, self.slice_latitude_points) < 2:
+            raise ValueError("Physical shell slices require at least two angular points.")
+        if self.slice_radial_points < 2:
+            raise ValueError("A physical radial slice requires at least two radial points.")
+        if self.slice_layer_count < 2:
+            raise ValueError("Physical shell plots require at least two radial layers.")
         if dpi < 50:
             raise ValueError("dpi must be at least 50.")
         self.output_directory = Path(output_directory).expanduser().resolve()
         self.every_n_epochs = int(every_n_epochs)
-        self.depth_layer_count = int(depth_layer_count)
-        self.evaluation_batch_size = int(evaluation_batch_size)
-        self.max_map_pixels = int(max_map_pixels)
-        self.max_profile_samples = int(max_profile_samples)
         self.dpi = int(dpi)
         self.include_initial = bool(include_initial)
-        yz_config = dict(yz_slice or {})
-        self.yz_slice_enabled = bool(yz_config.pop("enabled", False))
-        raw_scan_index = yz_config.pop("scan_index", None)
-        if yz_config:
-            raise TypeError(f"Unknown YZ-slice options: {sorted(yz_config)}")
-        if self.yz_slice_enabled and raw_scan_index is None:
-            raise ValueError("An enabled YZ slice requires scan_index.")
-        self.yz_slice_scan_index = (
-            None if raw_scan_index is None else int(raw_scan_index)
+        meridional_config = dict(meridional_slice or {})
+        self.meridional_slice_enabled = bool(
+            meridional_config.pop("enabled", False)
         )
+        raw_longitude_deg = meridional_config.pop("longitude_deg", None)
+        if meridional_config:
+            raise TypeError(
+                "Unknown meridional-slice options: "
+                f"{sorted(meridional_config)}"
+            )
+        if self.meridional_slice_enabled and raw_longitude_deg is None:
+            raise ValueError("An enabled meridional slice requires longitude_deg.")
+        self.meridional_slice_longitude_deg = (
+            None if raw_longitude_deg is None else float(raw_longitude_deg)
+        )
+        if self.meridional_slice_longitude_deg is not None and not math.isfinite(
+            self.meridional_slice_longitude_deg
+        ):
+            raise ValueError("Meridional-slice longitude_deg must be finite.")
         self._last_rendered_step: int | None = None
         self._validation_outputs: list[dict[str, torch.Tensor]] = []
         self._profile_reservoir: dict[str, torch.Tensor] | None = None
@@ -194,38 +224,26 @@ class LTEAtmosphereVisualizationCallback(Callback):
         pixel_indices = getattr(dataset, "pixel_indices", None)
         subset_indices = getattr(validation, "indices", None)
         if pixel_indices is None or subset_indices is None:
-            return self._subsample_indices(*raster.spatial_shape, self.max_map_pixels)
-        selected = pixel_indices[torch.as_tensor(subset_indices, dtype=torch.long)]
-        rows = torch.unique(selected[:, 0], sorted=True).cpu().numpy()
-        columns = torch.unique(selected[:, 1], sorted=True).cpu().numpy()
-        stride = max(
-            1,
-            int(math.ceil(math.sqrt(rows.size * columns.size / self.max_map_pixels))),
-        )
-        rows = rows[::stride]
-        columns = columns[::stride]
-        while rows.size * columns.size > self.max_map_pixels:
-            stride += 1
-            all_rows = torch.unique(selected[:, 0], sorted=True).cpu().numpy()
-            all_columns = torch.unique(selected[:, 1], sorted=True).cpu().numpy()
-            rows = all_rows[::stride]
-            columns = all_columns[::stride]
+            rows, columns = self._subsample_indices(
+                *raster.spatial_shape, self.max_ray_pixels
+            )
+        else:
+            selected = pixel_indices[torch.as_tensor(subset_indices, dtype=torch.long)]
+            rows = torch.unique(selected[:, 0], sorted=True).cpu().numpy()
+            columns = torch.unique(selected[:, 1], sorted=True).cpu().numpy()
+            stride = max(
+                1,
+                int(math.ceil(math.sqrt(rows.size * columns.size / self.max_ray_pixels))),
+            )
+            rows = rows[::stride]
+            columns = columns[::stride]
+            while rows.size * columns.size > self.max_ray_pixels:
+                stride += 1
+                all_rows = torch.unique(selected[:, 0], sorted=True).cpu().numpy()
+                all_columns = torch.unique(selected[:, 1], sorted=True).cpu().numpy()
+                rows = all_rows[::stride]
+                columns = all_columns[::stride]
         return rows, columns
-
-    def _depth_indices(self, depth_grid: np.ndarray) -> list[int]:
-        """Select evenly spaced display levels across the represented range."""
-
-        requested_depths = np.linspace(
-            float(depth_grid.min()),
-            float(depth_grid.max()),
-            self.depth_layer_count,
-        )
-        selected: list[int] = []
-        for requested in requested_depths:
-            index = int(np.argmin(np.abs(depth_grid - requested)))
-            if index not in selected:
-                selected.append(index)
-        return selected
 
     @staticmethod
     def _map_coordinates(
@@ -233,20 +251,20 @@ class LTEAtmosphereVisualizationCallback(Callback):
         rows: np.ndarray,
         columns: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return the shared 2-D Solar-X/Solar-Y centre grids in Mm."""
+        """Return the shared 2-D Carrington-chart centre grids in Mm."""
 
-        coords = raster.coords[rows][:, columns].detach().double().cpu().numpy()
+        coords = raster.coords[rows][:, columns].detach().float().cpu().numpy()
         if coords.shape[-1] != 3:
             raise ValueError(
-                "Hinode map coordinates must end in [time_hours, x_mm, y_mm]."
+                "Observation coordinates must end in [time_hours, x_mm, y_mm]."
             )
         x_mm = coords[..., 1]
         y_mm = coords[..., 2]
         if not np.isfinite(x_mm).all() or not np.isfinite(y_mm).all():
-            raise ValueError("Hinode map coordinates must be finite.")
+            raise ValueError("Observation map coordinates must be finite.")
         return x_mm, y_mm
 
-    def _evaluate(
+    def _evaluate_ray_optical_depth(
         self,
         pl_module,
         raster,
@@ -258,97 +276,94 @@ class LTEAtmosphereVisualizationCallback(Callback):
         parameter = next(model.parameters())
         height, width = raster.spatial_shape
         if rows is None or columns is None:
-            rows, columns = self._subsample_indices(height, width, self.max_map_pixels)
+            rows, columns = self._subsample_indices(height, width, self.max_ray_pixels)
         coords = raster.coords[rows][:, columns]
+        ray_origin_m = raster.ray_origin_m[rows][:, columns]
+        ray_direction = raster.ray_direction[rows][:, columns]
+        surface_position_m = raster.surface_position_m[rows][:, columns]
         valid = raster.valid_mask[rows][:, columns]
         flat_coords = coords[valid].to(device=parameter.device, dtype=parameter.dtype)
+        flat_ray_origin_m = ray_origin_m[valid].to(device=parameter.device)
+        flat_ray_direction = ray_direction[valid].to(device=parameter.device)
         if flat_coords.numel() == 0:
             raise ValueError(
-                "No valid Hinode pixels remain for atmosphere visualization."
+                "No valid observation pixels remain for atmosphere visualization."
             )
 
         was_training = model.training
         model.eval()
-        chunks = {
-            "temperature": [],
-            "density": [],
-            "pressure": [],
-            "v_x": [],
-            "v_y": [],
-            "v_z": [],
-            "v_magnitude": [],
-            "b_x": [],
-            "b_y": [],
-            "b_los": [],
-            "b_magnitude": [],
-            "b_inclination": [],
-            "b_azimuth": [],
-            "microturbulence": [],
-        }
-        has_height_mapping = getattr(model, "height_mapping", None) is not None
-        if has_height_mapping:
-            chunks.update({"geometric_height": [], "height_metric": []})
+        chunks = {"tau500_ray": [], "geometric_height": []}
+        traced_chart_xy = []
+        traced_spherical = []
+        sampled_depth_grid = None
         try:
             with torch.no_grad():
-                for start in range(0, flat_coords.shape[0], self.evaluation_batch_size):
+                for start in range(0, flat_coords.shape[0], self.ray_evaluation_batch_size):
                     batch_coords = flat_coords[
-                        start : start + self.evaluation_batch_size
+                        start : start + self.ray_evaluation_batch_size
                     ]
-                    atmosphere = model(batch_coords)
-                    if has_height_mapping:
-                        # Z is a direct coordinate MLP, so its metric is obtained
-                        # by differentiation. no_grad is intentionally overridden
-                        # only for this small validation derivative.
-                        with torch.enable_grad():
-                            height_metric = (
-                                model.height_mapping.metric_m_per_log_tau(
-                                    batch_coords,
-                                    model.log_tau500,
-                                    create_graph=False,
-                                )
-                            )
+                    atmosphere, ray_trace = model.trace_rays(
+                        batch_coords,
+                        flat_ray_origin_m[start : start + self.ray_evaluation_batch_size],
+                        flat_ray_direction[start : start + self.ray_evaluation_batch_size],
+                        model.log_tau500,
+                    )
+                    if bool(getattr(pl_module, "coarse_to_fine_enabled", False)):
+                        atmosphere, ray_trace = pl_module._refine_ray_sampling(
+                            batch_coords,
+                            flat_ray_direction[
+                                start : start + self.ray_evaluation_batch_size
+                            ],
+                            atmosphere,
+                            ray_trace,
+                        )
+                    sampled_depth_grid = atmosphere.log_tau500.detach().float().cpu()
+                    traced_chart_xy.append(
+                        ray_trace.chart_xy_mm.detach().float().cpu()
+                    )
                     gas_pressure = atmosphere.gas_pressure
                     if gas_pressure is None:
                         raise RuntimeError(
                             "LTE atmosphere visualization requires predicted gas pressure."
                         )
-                    mass_density = (
-                        pl_module.synthesizer.continuum_opacity.reference_mass_density(
+                    alpha500 = (
+                        pl_module.synthesizer.continuum_opacity.volume_extinction_at_5000(
                             atmosphere.temperature, gas_pressure
                         )
                     )
-                    magnetic = atmosphere.magnetic_field
-                    velocity = atmosphere.velocity_field / 1_000.0
-                    transverse = torch.linalg.vector_norm(magnetic[..., :2], dim=-1)
-                    values = {
-                        "temperature": atmosphere.temperature,
-                        "density": mass_density,
-                        "pressure": gas_pressure,
-                        "v_x": velocity[..., 0],
-                        "v_y": velocity[..., 1],
-                        "v_z": velocity[..., 2],
-                        "v_magnitude": torch.linalg.vector_norm(velocity, dim=-1),
-                        "b_x": magnetic[..., 0],
-                        "b_y": magnetic[..., 1],
-                        "b_los": magnetic[..., 2],
-                        "b_magnitude": torch.linalg.vector_norm(magnetic, dim=-1),
-                        "b_inclination": torch.rad2deg(
-                            torch.atan2(transverse, magnetic[..., 2])
+                    distance_interval_m = (
+                        ray_trace.distance_m[..., 1:]
+                        - ray_trace.distance_m[..., :-1]
+                    )
+                    tau_increment = 0.5 * (
+                        alpha500[..., :-1] + alpha500[..., 1:]
+                    ) * distance_interval_m
+                    tau500_ray = torch.cat(
+                        (
+                            torch.zeros_like(alpha500[..., :1]),
+                            torch.cumsum(tau_increment, dim=-1),
                         ),
-                        "b_azimuth": torch.rad2deg(
-                            torch.atan2(magnetic[..., 1], magnetic[..., 0])
-                        ),
-                        "microturbulence": atmosphere.microturbulence / 1_000.0,
-                    }
-                    if has_height_mapping:
-                        values.update(
-                            {
-                                "geometric_height": atmosphere.geometric_height_m / 1.0e6,
-                                "height_metric": height_metric / 1.0e3,
-                            }
-                        )
-                    for name, value in values.items():
-                        chunks[name].append(value.detach().float().cpu())
+                        dim=-1,
+                    )
+                    spherical = cartesian_to_spherical(ray_trace.position_m, torch)
+                    scene_center_spherical = cartesian_to_spherical(
+                        model.scene_basis[2].to(spherical), torch
+                    )
+                    longitude_reference = scene_center_spherical[2]
+                    longitude = longitude_reference + torch.atan2(
+                        torch.sin(spherical[..., 2] - longitude_reference),
+                        torch.cos(spherical[..., 2] - longitude_reference),
+                    )
+                    traced_spherical.append(
+                        torch.stack((spherical[..., 0], spherical[..., 1], longitude), dim=-1)
+                        .detach().float().cpu()
+                    )
+                    chunks["tau500_ray"].append(
+                        tau500_ray.detach().float().cpu()
+                    )
+                    chunks["geometric_height"].append(
+                        (ray_trace.geometric_height_m / 1.0e6).detach().float().cpu()
+                    )
         finally:
             model.train(was_training)
 
@@ -360,182 +375,60 @@ class LTEAtmosphereVisualizationCallback(Callback):
             image[valid.numpy()] = values
             map_fields[name] = image
         map_x_mm, map_y_mm = self._map_coordinates(raster, rows, columns)
+        base_spherical = cartesian_to_spherical(surface_position_m, torch)
+        scene_center_spherical = cartesian_to_spherical(
+            model.scene_basis[2].to(base_spherical), torch
+        )
+        longitude_reference = scene_center_spherical[2]
+        base_longitude = longitude_reference + torch.atan2(
+            torch.sin(base_spherical[..., 2] - longitude_reference),
+            torch.cos(base_spherical[..., 2] - longitude_reference),
+        )
+        map_longitude_deg = np.broadcast_to(
+            torch.rad2deg(base_longitude).numpy()[..., None], (*valid.shape, depth)
+        ).copy()
+        map_latitude_deg = np.broadcast_to(
+            (90.0 - torch.rad2deg(base_spherical[..., 1])).numpy()[..., None],
+            (*valid.shape, depth),
+        ).copy()
+        if traced_chart_xy:
+            chart = torch.cat(traced_chart_xy).numpy()
+            # Invalid detector samples are masked in every field. Retain their
+            # finite reference-surface chart coordinates solely so Matplotlib
+            # can construct a complete curvilinear mesh around those holes.
+            map_x_mm = np.broadcast_to(map_x_mm[..., None], (*valid.shape, depth)).copy()
+            map_y_mm = np.broadcast_to(map_y_mm[..., None], (*valid.shape, depth)).copy()
+            map_x_mm[valid.numpy()] = chart[..., 0]
+            map_y_mm[valid.numpy()] = chart[..., 1]
+        if traced_spherical:
+            spherical = torch.cat(traced_spherical).numpy()
+            map_longitude_deg[valid.numpy()] = np.rad2deg(spherical[..., 2])
+            map_latitude_deg[valid.numpy()] = 90.0 - np.rad2deg(spherical[..., 1])
+        shell_height_levels_m = np.nanmedian(
+            fields["geometric_height"], axis=0
+        ) * 1.0e6
+        if sampled_depth_grid is None:
+            raise RuntimeError("Ray optical-depth sampling produced no depth grid.")
         return {
-            "log_tau500": model.log_tau500.detach().float().cpu().numpy(),
+            "log_tau500": sampled_depth_grid.numpy(),
+            "solar_radius_m": float(model.solar_radius_m.detach().cpu()),
+            "shell_height_levels_m": shell_height_levels_m,
             "profile_fields": fields,
             "map_fields": map_fields,
             "rows": rows,
             "columns": columns,
             "map_x_mm": map_x_mm,
             "map_y_mm": map_y_mm,
+            "map_longitude_deg": map_longitude_deg,
+            "map_latitude_deg": map_latitude_deg,
             "slit_indices": np.asarray(
                 raster.metadata.get("slit_indices", np.arange(height))
             )[rows],
             "scan_indices": np.asarray(
                 raster.metadata.get("scan_indices", np.arange(width))
             )[columns],
+            "sampling": "subsampled observed rays for continuum optical depth only",
         }
-
-    def _tau_mapping_figure(
-        self,
-        evaluated: dict,
-        depth_indices: list[int],
-        label: str,
-        *,
-        yz_evaluated: dict | None = None,
-    ) -> Figure:
-        """Show the learned optical-depth geometry and its signed metric.
-
-        Heights use the fixed-FOV gauge ``mean[z(q=0)]=0``. The metric
-        is the automatic derivative ``-dz/dlog10(tau500)`` rather than a
-        finite-difference estimate, so wrong-sign regions remain visible while
-        the optical-depth mapping physics objective is converging.
-        """
-
-        depth_indices = sorted(
-            depth_indices,
-            key=lambda index: float(evaluated["log_tau500"][index]),
-            reverse=True,
-        )
-        rows = 2 if yz_evaluated is not None else 1
-        figure = Figure(
-            figsize=(11.0, 8.0 if yz_evaluated is not None else 4.2),
-            constrained_layout=True,
-        )
-        FigureCanvasAgg(figure)
-        axes = np.asarray(figure.subplots(rows, 2, squeeze=False))
-        q = evaluated["log_tau500"]
-        height_profiles = evaluated["profile_fields"]["geometric_height"]
-        metric_profiles = evaluated["profile_fields"]["height_metric"]
-
-        for axis, profiles, ylabel, logarithmic in (
-            (
-                axes[0, 0],
-                height_profiles,
-                r"$z$ [Mm; $\langle z(q=0)\rangle=0$]",
-                False,
-            ),
-            (
-                axes[0, 1],
-                metric_profiles,
-                r"$-dz/d\log_{10}\tau_{500}$ [km dex$^{-1}$]",
-                True,
-            ),
-        ):
-            percentiles = np.nanpercentile(
-                profiles, (2.0, 16.0, 50.0, 84.0, 98.0), axis=0
-            )
-            axis.fill_between(
-                q, percentiles[0], percentiles[4], color="tab:blue", alpha=0.10
-            )
-            axis.fill_between(
-                q, percentiles[1], percentiles[3], color="tab:blue", alpha=0.24
-            )
-            axis.plot(
-                q,
-                percentiles[2],
-                color="tab:blue",
-                linewidth=1.5,
-                label="spatial median",
-            )
-            for depth_index in depth_indices:
-                axis.axvline(q[depth_index], color="0.55", linewidth=0.6, alpha=0.55)
-            if logarithmic:
-                finite = np.abs(profiles[np.isfinite(profiles)])
-                linear_width = (
-                    max(float(np.nanpercentile(finite, 10.0)), 1.0)
-                    if finite.size
-                    else 1.0
-                )
-                axis.set_yscale("symlog", linthresh=linear_width)
-            axis.set_xlabel(r"$\log_{10}\tau_{500}$ [dimensionless]")
-            # Display optical depth in the same high-to-low order used by the
-            # stratification map rows rather than Matplotlib's numeric order.
-            axis.invert_xaxis()
-            axis.set_ylabel(ylabel)
-            axis.grid(alpha=0.2)
-        axes[0, 0].legend(loc="best", fontsize=8)
-        axes[0, 0].set_title("learned geometric-height mapping")
-        axes[0, 1].set_title("learned signed mapping metric")
-
-        if yz_evaluated is not None:
-            yz_q = yz_evaluated["log_tau500"]
-            y_mm = yz_evaluated["map_y_mm"][:, 0]
-            height_mm = yz_evaluated["map_fields"]["geometric_height"][:, 0, :]
-            metric = yz_evaluated["map_fields"]["height_metric"][:, 0, :]
-            y_grid_mm = np.broadcast_to(y_mm[:, None], height_mm.shape)
-            y_corners_mm = self._curvilinear_cell_corners(y_grid_mm)
-            height_corners_mm = self._curvilinear_cell_corners(height_mm)
-            log_tau_field = np.broadcast_to(yz_q[None, :], height_mm.shape)
-            slice_specs = (
-                (
-                    log_tau_field,
-                    r"optical depth in learned geometry",
-                    "plasma",
-                    (float(yz_q.min()), float(yz_q.max())),
-                    r"$\log_{10}\tau_{500}$ [dimensionless]",
-                ),
-                (
-                    metric,
-                    "signed height metric in learned geometry",
-                    "RdBu_r",
-                    self._limits(metric, signed=True),
-                    r"$-dz/d\log_{10}\tau_{500}$ [km dex$^{-1}$]",
-                ),
-            )
-            contour_levels = sorted({float(q[index]) for index in depth_indices})
-            for column, (values, title, cmap, limits, colorbar_label) in enumerate(
-                slice_specs
-            ):
-                axis = axes[1, column]
-                invalid = ~np.isfinite(height_mm) | ~np.isfinite(values)
-                image = axis.pcolormesh(
-                    y_corners_mm,
-                    height_corners_mm,
-                    np.ma.masked_where(invalid, values),
-                    shading="flat",
-                    cmap=cmap,
-                    vmin=limits[0],
-                    vmax=limits[1],
-                    rasterized=True,
-                )
-                axis.contour(
-                    y_grid_mm,
-                    height_mm,
-                    np.ma.masked_where(invalid, log_tau_field),
-                    levels=contour_levels,
-                    colors="white",
-                    linewidths=0.55,
-                    linestyles="--",
-                    alpha=0.7,
-                )
-                axis.set_title(title, fontsize=9)
-                axis.set_xlabel("Solar-Y [Mm]")
-                if column == 0:
-                    axis.set_ylabel(r"geometric height $z$ [Mm]")
-                # Keep the horizontal and vertical display scales independent;
-                # their physical extents differ strongly in a stratified slice.
-                axis.set_aspect("auto")
-                self._add_shared_colorbar(
-                    figure,
-                    image,
-                    axis,
-                    colorbar_label,
-                    shared_by="column",
-                )
-            scan_index = int(yz_evaluated["slice_scan_index"])
-            axes[1, 0].text(
-                0.01,
-                0.99,
-                f"detector x/scan index {scan_index}",
-                transform=axes[1, 0].transAxes,
-                ha="left",
-                va="top",
-                fontsize=8,
-                color="white",
-            )
-        figure.suptitle(f"Optical-depth to geometric-height mapping — {label}")
-        return figure
 
     @staticmethod
     def _limits(values: np.ndarray, *, signed: bool) -> tuple[float, float]:
@@ -614,11 +507,13 @@ class LTEAtmosphereVisualizationCallback(Callback):
         field_names: tuple[str, ...],
         title: str,
     ) -> Figure:
-        """Show selected fields along x and high-to-low optical depth along y."""
+        """Show selected fields on ordered optical-depth or shell-height layers."""
 
+        depth_axis = evaluated["shell_height_levels_m"]
+        solar_radius_m = float(evaluated["solar_radius_m"])
         depth_indices = sorted(
             depth_indices,
-            key=lambda index: float(evaluated["log_tau500"][index]),
+            key=lambda index: float(depth_axis[index]),
             reverse=True,
         )
         figure = Figure(
@@ -638,33 +533,53 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 sharey=True,
             )
         )
-        map_x_mm = evaluated["map_x_mm"]
-        map_y_mm = evaluated["map_y_mm"]
+        map_longitude_deg = evaluated["map_longitude_deg"]
+        map_latitude_deg = evaluated["map_latitude_deg"]
         shared_norms = {
             name: self._field_norm(evaluated["map_fields"][name], style)
             for name, style in ((name, _FIELD_STYLES[name]) for name in field_names)
         }
         column_images = [None] * len(field_names)
         for row, depth_index in enumerate(depth_indices):
-            log_tau = float(evaluated["log_tau500"][depth_index])
+            depth_value = float(depth_axis[depth_index])
             for column, name in enumerate(field_names):
                 style = _FIELD_STYLES[name]
                 axis = axes[row, column]
                 values = evaluated["map_fields"][name][..., depth_index]
+                layer_longitude_deg = (
+                    map_longitude_deg[..., depth_index]
+                    if map_longitude_deg.ndim == 3
+                    else map_longitude_deg
+                )
+                layer_latitude_deg = (
+                    map_latitude_deg[..., depth_index]
+                    if map_latitude_deg.ndim == 3
+                    else map_latitude_deg
+                )
                 image = axis.pcolormesh(
-                    map_x_mm,
-                    map_y_mm,
+                    layer_longitude_deg,
+                    layer_latitude_deg,
                     values,
                     shading="nearest",
                     cmap=style["cmap"],
                     norm=shared_norms[name],
                     rasterized=True,
                 )
+                slice_longitude = evaluated.get("slice_longitude_deg")
+                if slice_longitude is not None:
+                    axis.axvline(
+                        slice_longitude,
+                        color="black",
+                        linewidth=0.7,
+                        linestyle="--",
+                        alpha=0.8,
+                    )
                 column_images[column] = image
                 axis.set_aspect("equal", adjustable="box")
                 if column == 0:
+                    radius_Rsun = 1.0 + depth_value / solar_radius_m
                     axis.annotate(
-                        rf"$\log_{{10}}\tau_{{500}}={log_tau:.2f}$",
+                        rf"$r={radius_Rsun:.6f}\,R_\odot$",
                         xy=(0.01, 0.98),
                         xycoords="axes fraction",
                         ha="left",
@@ -679,8 +594,8 @@ class LTEAtmosphereVisualizationCallback(Callback):
                         },
                     )
                 axis.label_outer()
-        figure.supxlabel("Solar-X [Mm]")
-        figure.supylabel("Solar-Y [Mm]")
+        figure.supxlabel("Carrington longitude [deg]")
+        figure.supylabel("Carrington latitude [deg]")
         for column, (name, image) in enumerate(
             zip(field_names, column_images, strict=True)
         ):
@@ -694,41 +609,273 @@ class LTEAtmosphereVisualizationCallback(Callback):
         figure.suptitle(f"{title} — {label}")
         return figure
 
-    def _yz_slice_column(self, raster) -> int:
-        """Resolve the configured detector scan index to a raster column."""
+    def _tau_figure(self, evaluated: dict, label: str) -> Figure:
+        """Show continuum optical depth integrated along the traced rays."""
 
-        scan_indices = np.asarray(
-            raster.metadata.get("scan_indices", np.arange(raster.spatial_shape[1]))
+        tau = evaluated["profile_fields"]["tau500_ray"]
+        tiny = np.finfo(tau.dtype).tiny
+        log_tau = np.log10(np.clip(tau, tiny, None))
+        radius_Rsun = 1.0 + (
+            evaluated["shell_height_levels_m"] / evaluated["solar_radius_m"]
         )
-        matches = np.flatnonzero(scan_indices == self.yz_slice_scan_index)
-        if matches.size != 1:
-            available = (int(scan_indices.min()), int(scan_indices.max()))
-            raise ValueError(
-                f"Configured YZ scan_index={self.yz_slice_scan_index} is not present "
-                f"in this raster; available detector scan range is {available}."
+        # The outer boundary is defined to have tau=0 and therefore has no
+        # finite logarithm. Exclude only that endpoint from the profile panel.
+        profile_slice = slice(1, None)
+        lower, median, upper = np.nanpercentile(
+            log_tau[:, profile_slice], (16.0, 50.0, 84.0), axis=0
+        )
+
+        figure = Figure(figsize=(11.0, 4.5), constrained_layout=True)
+        FigureCanvasAgg(figure)
+        profile_axis, map_axis = figure.subplots(1, 2)
+        profile_axis.fill_betweenx(
+            radius_Rsun[profile_slice], lower, upper, color="tab:blue", alpha=0.25,
+            label="validation rays: 16–84%",
+        )
+        profile_axis.plot(
+            median, radius_Rsun[profile_slice], color="tab:blue", linewidth=1.6,
+            label="validation-ray median",
+        )
+        profile_axis.plot(
+            evaluated["log_tau500"][profile_slice],
+            radius_Rsun[profile_slice],
+            color="black", linestyle="--", linewidth=1.0,
+            label="FALC radial shell labels",
+        )
+        profile_axis.axvline(0.0, color="0.45", linewidth=0.8, linestyle=":")
+        profile_axis.set_xlabel(r"$\log_{10}\tau_{500}$")
+        profile_axis.set_ylabel(r"radius $r/R_\odot$")
+        profile_axis.set_title(r"derived $\tau_{500}=\int\alpha_{500}\,ds$")
+        profile_axis.grid(alpha=0.2)
+        profile_axis.legend(loc="best", fontsize=8)
+
+        surface_index = int(np.argmin(np.abs(evaluated["shell_height_levels_m"])))
+        surface_log_tau = evaluated["map_fields"]["tau500_ray"][..., surface_index]
+        finite = surface_log_tau[np.isfinite(surface_log_tau) & (surface_log_tau > 0)]
+        if finite.size:
+            surface_log_tau = np.log10(np.clip(surface_log_tau, tiny, None))
+            vmin, vmax = self._limits(surface_log_tau, signed=False)
+        else:
+            surface_log_tau = np.full_like(surface_log_tau, np.nan)
+            vmin, vmax = -1.0, 1.0
+        map_x = evaluated["map_longitude_deg"]
+        map_y = evaluated["map_latitude_deg"]
+        if map_x.ndim == 3:
+            map_x = map_x[..., surface_index]
+            map_y = map_y[..., surface_index]
+        image = map_axis.pcolormesh(
+            map_x, map_y, surface_log_tau, shading="nearest", cmap="viridis",
+            norm=Normalize(vmin=vmin, vmax=vmax), rasterized=True,
+        )
+        map_axis.set_aspect("equal", adjustable="box")
+        map_axis.set_xlabel("Carrington longitude [deg]")
+        map_axis.set_ylabel("Carrington latitude [deg]")
+        surface_radius_Rsun = radius_Rsun[surface_index]
+        map_axis.set_title(
+            rf"$\log_{{10}}\tau_{{500}}$ at $r={surface_radius_Rsun:.6f}\,R_\odot$"
+        )
+        colorbar = figure.colorbar(image, ax=map_axis, location="right", shrink=0.86)
+        colorbar.set_label(r"$\log_{10}\tau_{500}$")
+        figure.suptitle(f"Continuum optical-depth validation — {label}")
+        return figure
+
+    @staticmethod
+    def _observed_spherical_bounds(model, raster) -> tuple[float, float, float, float]:
+        """Return unwrapped longitude and latitude bounds of valid surface points."""
+
+        surface = raster.surface_position_m[raster.valid_mask].detach().float().cpu()
+        if surface.shape[0] < 2:
+            raise ValueError("Physical slices require at least two valid surface points.")
+        spherical = cartesian_to_spherical(surface, torch)
+        center = cartesian_to_spherical(model.scene_basis[2].detach().float().cpu(), torch)
+        longitude_center = center[2]
+        longitude = longitude_center + torch.atan2(
+            torch.sin(spherical[:, 2] - longitude_center),
+            torch.cos(spherical[:, 2] - longitude_center),
+        )
+        latitude = 0.5 * math.pi - spherical[:, 1]
+        bounds = (
+            float(longitude.min()),
+            float(longitude.max()),
+            float(latitude.min()),
+            float(latitude.max()),
+        )
+        if not all(math.isfinite(value) for value in bounds):
+            raise ValueError("Observed spherical bounds must be finite.")
+        if not bounds[1] > bounds[0] or not bounds[3] > bounds[2]:
+            raise ValueError("Observed spherical bounds must span longitude and latitude.")
+        return bounds
+
+    def _evaluate_physical_positions(
+        self, pl_module, position_m: torch.Tensor
+    ) -> dict[str, np.ndarray]:
+        """Evaluate plot fields at explicitly supplied Carrington positions."""
+
+        model = pl_module.atmosphere_model
+        parameter = next(model.parameters())
+        flat_position = position_m.reshape(-1, 3).to(
+            device=parameter.device, dtype=parameter.dtype
+        )
+        chunks = {
+            name: []
+            for name in (
+                *_MERIDIONAL_THERMODYNAMIC_FIELDS,
+                *_MAGNETIC_FIELDS,
+                *_VELOCITY_FIELDS,
             )
-        return int(matches[0])
+        }
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                for start in range(0, flat_position.shape[0], self.slice_evaluation_batch_size):
+                    position = flat_position[
+                        start : start + self.slice_evaluation_batch_size
+                    ]
+                    atmosphere = model.evaluate_position_points(position)
+                    pressure = atmosphere["gas_pressure"]
+                    density = pl_module.synthesizer.continuum_opacity.reference_mass_density(
+                        atmosphere["temperature"], pressure
+                    )
+                    spherical = cartesian_to_spherical(position, torch)
+                    magnetic_spherical = project_cartesian_to_spherical(
+                        atmosphere["magnetic_field"], spherical, torch
+                    )
+                    velocity_spherical = project_cartesian_to_spherical(
+                        atmosphere["velocity_field"], spherical, torch
+                    ) / 1_000.0
+                    values = {
+                        "temperature": atmosphere["temperature"],
+                        "density": density,
+                        "pressure": pressure,
+                        "microturbulence": atmosphere["microturbulence"] / 1_000.0,
+                        "b_r": magnetic_spherical[..., 0],
+                        "b_theta": magnetic_spherical[..., 1],
+                        "b_phi": magnetic_spherical[..., 2],
+                        "v_r": velocity_spherical[..., 0],
+                        "v_theta": velocity_spherical[..., 1],
+                        "v_phi": velocity_spherical[..., 2],
+                    }
+                    for name, value in values.items():
+                        chunks[name].append(value.detach().float().cpu())
+        finally:
+            model.train(was_training)
+        leading_shape = position_m.shape[:-1]
+        return {
+            name: torch.cat(values).numpy().reshape(leading_shape)
+            for name, values in chunks.items()
+        }
 
-    def _evaluate_yz_slice(self, pl_module, raster) -> dict:
-        """Evaluate every slit position through depth at one detector x index."""
+    def _evaluate_shell_layers(
+        self, pl_module, raster, shell_height_levels_m: np.ndarray
+    ) -> dict:
+        """Evaluate only requested longitude-latitude layers in physical space."""
 
-        column = self._yz_slice_column(raster)
-        evaluated = self._evaluate(
-            pl_module,
-            raster,
-            rows=np.arange(raster.spatial_shape[0], dtype=np.int64),
-            columns=np.asarray((column,), dtype=np.int64),
+        model = pl_module.atmosphere_model
+        lon_min, lon_max, lat_min, lat_max = self._observed_spherical_bounds(
+            model, raster
         )
-        evaluated["slice_scan_index"] = self.yz_slice_scan_index
-        return evaluated
+        longitude = torch.linspace(lon_min, lon_max, self.slice_longitude_points)
+        latitude = torch.linspace(lat_min, lat_max, self.slice_latitude_points)
+        latitude_grid, longitude_grid = torch.meshgrid(
+            latitude, longitude, indexing="ij"
+        )
+        heights = torch.as_tensor(shell_height_levels_m, dtype=torch.float32)
+        spherical = torch.stack(
+            (
+                (
+                    model.solar_radius_m.detach().float().cpu()
+                    + heights[:, None, None]
+                ).expand(-1, self.slice_latitude_points, self.slice_longitude_points),
+                (0.5 * math.pi - latitude_grid)[None].expand(heights.numel(), -1, -1),
+                longitude_grid[None].expand(heights.numel(), -1, -1),
+            ),
+            dim=-1,
+        )
+        position = spherical_to_cartesian(spherical, torch).permute(1, 2, 0, 3)
+        fields = self._evaluate_physical_positions(pl_module, position)
+        map_longitude = np.broadcast_to(
+            np.rad2deg(longitude_grid.numpy())[..., None], position.shape[:-1]
+        ).copy()
+        map_latitude = np.broadcast_to(
+            np.rad2deg(latitude_grid.numpy())[..., None], position.shape[:-1]
+        ).copy()
+        result = {
+            "solar_radius_m": float(model.solar_radius_m.detach().cpu()),
+            "shell_height_levels_m": np.asarray(shell_height_levels_m),
+            "map_fields": fields,
+            "map_longitude_deg": map_longitude,
+            "map_latitude_deg": map_latitude,
+            "sampling": "explicit Carrington longitude-latitude shell layers",
+        }
+        if self.meridional_slice_enabled:
+            result["slice_longitude_deg"] = math.degrees(
+                self._meridional_slice_longitude(model)
+            )
+        return result
+
+    def _meridional_slice_longitude(self, model) -> float:
+        """Return the configured longitude on the scene-centred continuous branch."""
+
+        requested = math.radians(self.meridional_slice_longitude_deg)
+        center = float(
+            cartesian_to_spherical(model.scene_basis[2].detach().float().cpu(), torch)[2]
+        )
+        return center + math.atan2(
+            math.sin(requested - center), math.cos(requested - center)
+        )
+
+    def _evaluate_meridional_slice(self, pl_module, raster) -> dict:
+        """Evaluate a constant-longitude radial plane in physical space."""
+
+        model = pl_module.atmosphere_model
+        longitude = self._meridional_slice_longitude(model)
+        _, _, latitude_min, latitude_max = self._observed_spherical_bounds(model, raster)
+        latitude = torch.linspace(
+            latitude_min, latitude_max, self.slice_latitude_points
+        )
+        outer_height_m, inner_height_m = (
+            float(value) * 1.0e6 for value in model.shell_height_bounds_Mm
+        )
+        height = torch.linspace(
+            outer_height_m, inner_height_m, self.slice_radial_points
+        )
+        latitude_grid, height_grid = torch.meshgrid(latitude, height, indexing="ij")
+        spherical = torch.stack(
+            (
+                model.solar_radius_m.detach().float().cpu() + height_grid,
+                0.5 * math.pi - latitude_grid,
+                torch.full_like(latitude_grid, longitude),
+            ),
+            dim=-1,
+        )
+        position = spherical_to_cartesian(spherical, torch)
+        fields = self._evaluate_physical_positions(pl_module, position)
+        shape = (self.slice_latitude_points, 1, self.slice_radial_points)
+        return {
+            "solar_radius_m": float(model.solar_radius_m.detach().cpu()),
+            "map_fields": {
+                **{name: values[:, None, :] for name, values in fields.items()},
+                "geometric_height": (height_grid / 1.0e6).numpy()[:, None, :],
+            },
+            "map_latitude_deg": np.rad2deg(latitude_grid.numpy())[:, None, :],
+            "map_longitude_deg": np.full(
+                shape, math.degrees(longitude), dtype=np.float32
+            ),
+            "requested_longitude_deg": self.meridional_slice_longitude_deg,
+            "slice_longitude_deg": math.degrees(longitude),
+            "sampling": "explicit constant-Carrington-longitude radial plane",
+        }
 
     @staticmethod
     def _curvilinear_cell_corners(centers: np.ndarray) -> np.ndarray:
         """Construct finite cell corners from a two-dimensional centre grid."""
 
-        centers = np.asarray(centers, dtype=np.float64)
+        centers = np.asarray(centers, dtype=np.float32)
         if centers.ndim != 2 or min(centers.shape) < 2:
-            raise ValueError("A YZ section needs at least two slit and depth samples.")
+            raise ValueError(
+                "A meridional section needs at least two angular and radial samples."
+            )
         if not np.isfinite(centers).all():
             # Invalid atmosphere pixels remain masked in the plotted values.
             # Interpolate only their plotting coordinates along the slit so
@@ -740,14 +887,14 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 valid = np.isfinite(centers[:, depth_index])
                 if valid.sum() < 2:
                     raise ValueError(
-                        "A YZ section needs at least two valid slit samples at "
-                        "every optical-depth level."
+                        "A meridional section needs at least two valid angular samples at "
+                        "every depth level."
                     )
                 centers[:, depth_index] = np.interp(
                     row, row[valid], centers[valid, depth_index]
                 )
         padded = np.empty(
-            (centers.shape[0] + 2, centers.shape[1] + 2), dtype=np.float64
+            (centers.shape[0] + 2, centers.shape[1] + 2), dtype=np.float32
         )
         padded[1:-1, 1:-1] = centers
         padded[0, 1:-1] = 2.0 * centers[0] - centers[1]
@@ -758,16 +905,17 @@ class LTEAtmosphereVisualizationCallback(Callback):
             padded[:-1, :-1] + padded[1:, :-1] + padded[:-1, 1:] + padded[1:, 1:]
         )
 
-    def _yz_field_panel_figure(
+    def _meridional_field_panel_figure(
         self,
         evaluated: dict,
         label: str,
         *,
         field_names: tuple[str, ...],
         title: str,
-        vertical_coordinate: str = "geometric_height",
+        norm_evaluated: dict | None = None,
+        reference_depth_indices: list[int] | None = None,
     ) -> Figure:
-        """Plot fields on a Y-depth section in tau or geometric height."""
+        """Plot fields on an explicitly sampled constant-longitude radial plane."""
 
         figure = Figure(
             figsize=(max(4.2 * len(field_names), 7.0), 5.5),
@@ -779,78 +927,54 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 1, len(field_names), squeeze=False, sharex=True, sharey=True
             )
         )[0]
-        y_mm = evaluated["map_y_mm"][:, 0]
-        if vertical_coordinate == "geometric_height":
-            if "geometric_height" not in evaluated["map_fields"]:
-                raise ValueError(
-                    "A geometric-height YZ panel requires a learned height mapping."
-                )
-            vertical = evaluated["map_fields"]["geometric_height"][:, 0, :]
-            vertical_label = r"geometric height $z$ [Mm]"
-            depth_plane = "Y-Z"
-            invert_vertical_axis = False
-        elif vertical_coordinate == "log_tau500":
-            vertical = np.broadcast_to(
-                evaluated["log_tau500"][None, :],
-                (y_mm.shape[0], evaluated["log_tau500"].size),
-            )
-            vertical_label = r"$\log_{10}\tau_{500}$ [dimensionless]"
-            depth_plane = r"Y-$\log\tau_{500}$"
-            invert_vertical_axis = True
-        else:
-            raise ValueError(
-                "vertical_coordinate must be 'geometric_height' or 'log_tau500'."
-            )
-        y_grid_mm = np.broadcast_to(y_mm[:, None], vertical.shape)
-        y_corners_mm = self._curvilinear_cell_corners(y_grid_mm)
+        map_latitude = evaluated["map_latitude_deg"][:, 0]
+        latitude_deg = map_latitude if map_latitude.ndim == 2 else map_latitude[:, None]
+        vertical = 1.0 + (
+            evaluated["map_fields"]["geometric_height"][:, 0, :] * 1.0e6
+            / evaluated["solar_radius_m"]
+        )
+        vertical_label = r"radius $r/R_\odot$"
+        depth_plane = "physical Carrington latitude-radius"
+        latitude_grid_deg = (
+            latitude_deg
+            if latitude_deg.shape == vertical.shape
+            else np.broadcast_to(latitude_deg, vertical.shape)
+        )
+        latitude_corners_deg = self._curvilinear_cell_corners(latitude_grid_deg)
         vertical_corners = self._curvilinear_cell_corners(vertical)
-        solar_x_mm = evaluated["map_x_mm"][:, 0]
+        longitude_deg = evaluated["map_longitude_deg"][:, 0]
 
         images = []
-        contour_sets = []
-        log_tau_field = np.broadcast_to(
-            evaluated["log_tau500"][None, :], vertical.shape
-        )
-        contour_levels = sorted(
-            {
-                float(evaluated["log_tau500"][index])
-                for index in self._depth_indices(evaluated["log_tau500"])
-            }
-        )
         for axis, name in zip(axes, field_names, strict=True):
             style = _FIELD_STYLES[name]
             values = evaluated["map_fields"][name][:, 0, :]
+            norm_values = (
+                norm_evaluated["map_fields"][name]
+                if norm_evaluated is not None
+                else values
+            )
             image = axis.pcolormesh(
-                y_corners_mm,
+                latitude_corners_deg,
                 vertical_corners,
                 np.ma.masked_invalid(values),
                 shading="flat",
                 cmap=style["cmap"],
-                norm=self._field_norm(values, style),
+                norm=self._field_norm(norm_values, style),
                 rasterized=True,
             )
-            images.append(image)
-            if vertical_coordinate == "geometric_height":
-                invalid = ~np.isfinite(vertical) | ~np.isfinite(values)
-                contours = axis.contour(
-                    y_grid_mm,
-                    vertical,
-                    np.ma.masked_where(invalid, log_tau_field),
-                    levels=contour_levels,
-                    colors="white",
-                    linewidths=0.65,
-                    linestyles="--",
-                    alpha=0.85,
+            for depth_index in reference_depth_indices or ():
+                axis.plot(
+                    latitude_grid_deg[:, depth_index],
+                    vertical[:, depth_index],
+                    color="black",
+                    linewidth=0.6,
+                    linestyle=":",
+                    alpha=0.7,
                 )
-                contour_sets.append(contours)
+            images.append(image)
             axis.set_aspect("auto")
             axis.label_outer()
-        if invert_vertical_axis:
-            # The panels share their y-axis, so invert it exactly once. Inverting
-            # every panel toggles the shared axis repeatedly and cancels out for
-            # the usual even number of validation fields.
-            axes[0].invert_yaxis()
-        figure.supxlabel("Solar-Y [Mm]")
+        figure.supxlabel("Carrington latitude [deg]")
         figure.supylabel(vertical_label)
         for axis, name, image in zip(axes, field_names, images, strict=True):
             self._add_shared_colorbar(
@@ -860,24 +984,15 @@ class LTEAtmosphereVisualizationCallback(Callback):
                 _FIELD_STYLES[name]["label"],
                 shared_by="column",
             )
-        if contour_sets:
-            axes[0].clabel(
-                contour_sets[0],
-                fmt=lambda value: rf"$\log\tau={value:g}$",
-                inline=True,
-                fontsize=7,
-            )
 
-        scan_index = int(evaluated["slice_scan_index"])
-        finite_x = solar_x_mm[np.isfinite(solar_x_mm)]
-        x_description = (
-            f"Solar-X={float(np.mean(finite_x)):.3f} Mm"
-            if finite_x.size
-            else "Solar-X unavailable"
-        )
+        finite_x = longitude_deg[np.isfinite(longitude_deg)]
+        if finite_x.size:
+            x_min, x_max = float(np.min(finite_x)), float(np.max(finite_x))
+            x_description = f"Carrington longitude={0.5 * (x_min + x_max):.3f} deg"
+        else:
+            x_description = "Carrington longitude unavailable"
         figure.suptitle(
-            f"{title} {depth_plane} slice — detector x/scan index {scan_index}, "
-            f"{x_description} — {label}"
+            f"{title} {depth_plane} slice — {x_description} — {label}"
         )
         return figure
 
@@ -894,7 +1009,7 @@ class LTEAtmosphereVisualizationCallback(Callback):
     ) -> Figure:
         """Show loss-space Stokes predictions and references without rescaling."""
 
-        wavelength = wavelength_angstrom.detach().double().cpu().numpy()
+        wavelength = wavelength_angstrom.detach().float().cpu().numpy()
         if not isinstance(outputs, dict):
             raise TypeError(
                 "Stokes visualization requires the streamed callback payload."
@@ -923,7 +1038,7 @@ class LTEAtmosphereVisualizationCallback(Callback):
         compact_rows = np.searchsorted(sampled_rows, pixel_index[:, 0])
         compact_columns = np.searchsorted(sampled_columns, pixel_index[:, 1])
         prediction_maps = np.full(
-            (sampled_rows.size, sampled_columns.size, 4), np.nan, dtype=np.float64
+            (sampled_rows.size, sampled_columns.size, 4), np.nan, dtype=np.float32
         )
         reference_maps = np.full_like(prediction_maps, np.nan)
         prediction_maps[compact_rows, compact_columns] = integrated_prediction
@@ -958,8 +1073,8 @@ class LTEAtmosphereVisualizationCallback(Callback):
         scatter_figure.subplots_adjust(
             left=0.07, right=0.99, bottom=0.22, top=0.82, wspace=0.16
         )
-        map_figure.supxlabel("Solar-X [Mm]")
-        map_figure.supylabel("Solar-Y [Mm]")
+        map_figure.supxlabel("Carrington chart X [Mm]")
+        map_figure.supylabel("Carrington chart Y [Mm]")
         map_figure.text(
             0.985, 0.66, "reference", rotation=-90, ha="center", va="center"
         )
@@ -1163,10 +1278,19 @@ class LTEAtmosphereVisualizationCallback(Callback):
 
         if rows is None or columns is None:
             rows, columns = self._display_indices(trainer, raster)
-        evaluated = self._evaluate(pl_module, raster, rows=rows, columns=columns)
+        ray_evaluated = self._evaluate_ray_optical_depth(
+            pl_module, raster, rows=rows, columns=columns
+        )
         paths = []
-        depth_grid = evaluated["log_tau500"]
-        selected_indices = self._depth_indices(depth_grid)
+        outer_height_Mm, inner_height_Mm = pl_module.atmosphere_model.shell_height_bounds_Mm
+        slice_heights = np.linspace(
+            outer_height_Mm * 1.0e6,
+            inner_height_Mm * 1.0e6,
+            self.slice_layer_count,
+            dtype=np.float32,
+        )
+        evaluated = self._evaluate_shell_layers(pl_module, raster, slice_heights)
+        selected_indices = list(range(len(slice_heights)))
         thermodynamic_fields = tuple(
             name for name in _THERMODYNAMIC_FIELDS
             if name in evaluated["map_fields"]
@@ -1180,13 +1304,13 @@ class LTEAtmosphereVisualizationCallback(Callback):
             ),
             (
                 _MAGNETIC_FIELDS,
-                "Depth-stratified magnetic field",
+                r"Depth-stratified magnetic field components",
                 "magnetic_field",
                 "Magnetic field",
             ),
             (
                 _VELOCITY_FIELDS,
-                "Depth-stratified velocity field",
+                r"Depth-stratified velocity components",
                 "velocity",
                 "Velocity",
             ),
@@ -1206,76 +1330,54 @@ class LTEAtmosphereVisualizationCallback(Callback):
                     log_key,
                 )
             )
-        yz_evaluated = (
-            self._evaluate_yz_slice(pl_module, raster)
-            if self.yz_slice_enabled
+        paths.append(
+            self._save_figure(
+                trainer,
+                self._tau_figure(ray_evaluated, label),
+                f"{label}_tau500.png",
+                "Optical depth",
+            )
+        )
+        meridional_evaluated = (
+            self._evaluate_meridional_slice(pl_module, raster)
+            if self.meridional_slice_enabled
             else None
         )
-        if "geometric_height" in evaluated["map_fields"]:
-            paths.append(
-                self._save_figure(
-                    trainer,
-                    self._tau_mapping_figure(
-                        evaluated,
-                        selected_indices,
-                        label,
-                        yz_evaluated=yz_evaluated,
-                    ),
-                    f"{label}_tau_mapping.png",
-                    "Tau mapping",
-                )
-            )
-        if self.yz_slice_enabled:
-            yz_panels = (
+        if self.meridional_slice_enabled:
+            meridional_panels = (
                 (
-                    _YZ_THERMODYNAMIC_FIELDS,
+                    _MERIDIONAL_THERMODYNAMIC_FIELDS,
                     "LTE thermodynamic parameters",
-                    "yz_parameters",
+                    "meridional_parameters",
                     "Parameters",
                 ),
                 (
                     _MAGNETIC_FIELDS,
-                    "Magnetic field",
-                    "yz_magnetic_field",
+                    r"Magnetic field components",
+                    "meridional_magnetic_field",
                     "Magnetic field",
                 ),
                 (
                     _VELOCITY_FIELDS,
-                    "Velocity field",
-                    "yz_velocity",
+                    r"Velocity components",
+                    "meridional_velocity",
                     "Velocity",
                 ),
             )
-            for field_names, title, filename_suffix, log_key in yz_panels:
+            for field_names, title, filename_suffix, log_key in meridional_panels:
                 paths.append(
                     self._save_figure(
                         trainer,
-                        self._yz_field_panel_figure(
-                            yz_evaluated,
+                        self._meridional_field_panel_figure(
+                            meridional_evaluated,
                             label,
                             field_names=field_names,
                             title=title,
-                            vertical_coordinate="log_tau500",
-                        ),
-                        f"{label}_y_tau_{filename_suffix.removeprefix('yz_')}.png",
-                        f"{log_key} Y-tau",
-                    )
-                )
-            if "geometric_height" not in yz_evaluated["map_fields"]:
-                return paths
-            for field_names, title, filename_suffix, log_key in yz_panels:
-                paths.append(
-                    self._save_figure(
-                        trainer,
-                        self._yz_field_panel_figure(
-                            yz_evaluated,
-                            label,
-                            field_names=field_names,
-                            title=title,
-                            vertical_coordinate="geometric_height",
+                            norm_evaluated=evaluated,
+                            reference_depth_indices=None,
                         ),
                         f"{label}_{filename_suffix}.png",
-                        f"{log_key} YZ",
+                        f"{log_key} meridional slice",
                     )
                 )
         return paths
@@ -1286,8 +1388,8 @@ class LTEAtmosphereVisualizationCallback(Callback):
         raster = getattr(data_module, "raster", None)
         if raster is None:
             raise RuntimeError(
-                "LTEAtmosphereVisualizationCallback requires a Hinode data module "
-                "whose setup() method has populated raster."
+                "LTEAtmosphereVisualizationCallback requires a data module whose "
+                "setup() method has populated a compatible ray raster."
             )
         return raster
 
