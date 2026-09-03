@@ -1,15 +1,28 @@
 import glob
 import os
+from pathlib import Path
+import sys
+import tempfile
 
 import numpy as np
 import pytest
 from astropy.io import fits
 
 
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+_TEST_RUNTIME = Path(tempfile.gettempdir()) / "prom3theus-tests"
+_TEST_RUNTIME.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("SUNPY_CONFIGDIR", str(_TEST_RUNTIME / "sunpy"))
+os.environ.setdefault("MPLCONFIGDIR", str(_TEST_RUNTIME / "matplotlib"))
+
+
 HINODE_N_WAVELENGTH = 112
-HINODE_CRVAL_ANGSTROM = 6302.0
+HINODE_CRVAL_ANGSTROM = 6301.5091 + 0.021549 * (138.0 - 111.5)
 HINODE_CRPIX = 56.5
-HINODE_CDELT_ANGSTROM = -0.021549
+HINODE_CDELT_ANGSTROM = 0.021549
 HINODE_SPCCDIY0 = 56
 HINODE_SPCCDIY1 = 167
 
@@ -23,21 +36,20 @@ def hinode_header(date_obs="2007-01-05T23:59:07.816"):
     header["CDELT1"] = HINODE_CDELT_ANGSTROM
     header["CRPIX2"] = 1.5
     header["CDELT2"] = 0.1585
+    header["CTYPE2"] = "Solar-Y"
+    header["CUNIT2"] = "arcsec"
     header["DATE_OBS"] = date_obs
     header["XCEN"] = -22.0
     header["YCEN"] = -4.0
-    header["XSCALE"] = 0.14857
-    header["YSCALE"] = 0.15999
     header["CROTA2"] = 0.0
     # SolarSoft thermd_sbsp defines DOP_RCV as m/s, positive for redshift, and
     # sp_prep has already removed it from these Level-1 spectra.
     header["DOP_RCV"] = 2011.0
-    header["DOPVUSED"] = 0
     header["SPWLSHFT"] = 4.72823
     header["SPWLSFT0"] = -0.887668
     header["SPCCDIY0"] = HINODE_SPCCDIY0
     header["SPCCDIY1"] = HINODE_SPCCDIY1
-    header.add_history("sp_prep VERSION:  1.04")
+    header.add_history("sp_prep VERSION:  1.07")
     return header
 
 
@@ -52,10 +64,7 @@ def synthetic_hinode_files(tmp_path):
             for slit_index in range(3):
                 if stokes_index == 0:
                     data[stokes_index, slit_index] = (
-                        10000
-                        + scan_index * 1000
-                        + slit_index * 100
-                        + wavelength_index
+                        10000 + scan_index * 1000 + slit_index * 100 + wavelength_index
                     )
                 else:
                     data[stokes_index, slit_index] = (
@@ -68,7 +77,7 @@ def synthetic_hinode_files(tmp_path):
         header = hinode_header(f"2007-01-05T23:59:0{7 + scan_index}.816")
         # Represent a real raster step in the helioprojective pointing rather
         # than creating two detector columns at one identical Solar-X.
-        header["XCEN"] = -22.0 + scan_index * header["XSCALE"]
+        header["XCEN"] = -22.0 + scan_index * 0.14857
         header["SLITINDX"] = scan_index
         header["NSLITPOS"] = 2
         fits.writeto(path, data, header, overwrite=False)
@@ -79,9 +88,7 @@ def synthetic_hinode_files(tmp_path):
 @pytest.fixture
 def expected_hinode_wavelength():
     pixel = np.arange(HINODE_N_WAVELENGTH, dtype=np.float64) + 1.0
-    roi_center = 0.5 * (HINODE_SPCCDIY0 + HINODE_SPCCDIY1)
-    effective_crval = 6301.5091 + abs(HINODE_CDELT_ANGSTROM) * (138.0 - roi_center)
-    return effective_crval + (pixel - HINODE_CRPIX) * abs(HINODE_CDELT_ANGSTROM)
+    return HINODE_CRVAL_ANGSTROM + (pixel - HINODE_CRPIX) * HINODE_CDELT_ANGSTROM
 
 
 @pytest.fixture

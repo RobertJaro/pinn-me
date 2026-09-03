@@ -1,0 +1,68 @@
+{
+  "schema_version": 2,
+  "bundle_type": "prom3theus-lte-runtime-resources",
+  "supported_instruments": [
+    "hinode_sp",
+    "hmi_stokes"
+  ],
+  "source_manifest_sha256": "30d1ace0b529a3ad0ce0f6d3f07c79f3d2e075eea3e365037aa5b592f9519903",
+  "runtime_files": [
+    "common/abundances.json",
+    "common/lines.json",
+    "common/stic_continuum_table.json",
+    "hinode_sp/blend_inventory.json",
+    "hinode_sp/instrument_hinode_sp.json",
+    "hinode_sp/solar_reference_630nm.json",
+    "hmi_stokes/instrument_hmi.json",
+    "hmi_stokes/solar_reference_617nm.json",
+    "sources.json"
+  ],
+  "training_contract": "offline-read-only; no downloads or table conversion",
+  "common_production_files": [
+    "common/abundances.json",
+    "common/lines.json",
+    "common/stic_continuum_table.json"
+  ],
+  "instrument_production_files": {
+    "hinode_sp": [
+      "hinode_sp/blend_inventory.json",
+      "hinode_sp/instrument_hinode_sp.json",
+      "hinode_sp/solar_reference_630nm.json"
+    ],
+    "hmi_stokes": [
+      "hmi_stokes/instrument_hmi.json",
+      "hmi_stokes/solar_reference_617nm.json"
+    ]
+  },
+  "physical_depth_contract": {
+    "tau500_quantity": "total extinction = true absorption + scattering",
+    "scattering_is_stored_separately": true,
+    "physical_height_qualified": true,
+    "runtime_fallback": "none; missing or invalid STiC table is a hard error",
+    "source_function_limitation": "The current LTE formal solver applies B_lambda to total continuum extinction and does not iterate a coherent-scattering source. The tau500/geometric metric uses STiC total extinction, but upper-layer continuum intensities retain this explicit thermal-source approximation.",
+    "thermodynamic_population_contract": "Continuum coefficients, mass density, electron density, neutral atomic-H density, and n(Fe I)/U(Fe I) all come from the same converged pinned STiC/Wittmann (T, Pgas) state. Fe-I lower-level populations apply the LTE Boltzmann factor using reviewed line E_l and J_l at runtime."
+  },
+  "falc_top_boundary": {
+    "model": "FALC_82",
+    "target_log10_tau500": -5.0,
+    "gas_pressure_pa": 0.0903679135719897,
+    "temperature_k": 7456.57046516284,
+    "log10_column_mass_g_cm2": -4.483985744660035,
+    "gravity_cm_s2": 27542.28703338169,
+    "falc_log10_tau500_range": [-5.405870771873386, 1.3948466796994528],
+    "bracketing_depth_indices": [36, 37],
+    "integration": "STiC ceos::hydrostatic_cmass convention: tau[0]=m[0]*kappa[0]; subsequent tau increments use trapezoidal kappa500 over column mass",
+    "tau500_extinction": "true absorption plus scattering at vacuum 5000 Angstrom",
+    "pressure_interpolation": "linear in log10(Pgas) versus log10(tau500)",
+    "stic_state_at_interpolated_boundary": {
+      "total_extinction_m1": 2.8784599239306297e-11,
+      "true_absorption_m1": 5.268141807958203e-12,
+      "scattering_extinction_m1": 2.3516457431348094e-11,
+      "mass_density_kg_m3": 1.1239128335585617e-09,
+      "mass_extinction_m2_kg": 0.025611060199542127,
+      "required_metric_m_per_log10_tau": 799936.4777848955,
+      "dlog_pressure_dlog10_tau": 2.740147091229793,
+      "pressure_efold_width_log10_tau": 0.36494391239092006
+    }
+  }
+}

@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "asplund_2021_abundances": {
+      "url": "https://arxiv.org/pdf/2105.01661v2",
+      "sha256": "b3aa4a0a2561992ce3f0aa75a6f9c14f9f2f4487de2bf3fe5eb8bf3782f7ef33",
+      "filename": "asplund_amarsi_grevesse_2021_arxiv_2105.01661.pdf"
+    },
+    "ciaaw_standard_atomic_weights_2024": {
+      "url": "https://ciaaw.org/atomic-weights.htm",
+      "sha256": "b48282594b1fb01eee3cbc9d469ce5e3483b628157ea1b09ede33e3476895cf2",
+      "filename": "ciaaw_standard_atomic_weights_2024.html"
+    },
+    "ciaaw_abridged_atomic_weights_2024": {
+      "url": "https://ciaaw.org/abridged-atomic-weights.htm",
+      "sha256": "f9e9554471749c55a624aec55151922470a7f4104c62811eb194fed9731b907d",
+      "filename": "ciaaw_abridged_atomic_weights_2024.html"
+    },
+    "yang_2024_spin4d_table3": {
+      "url": "https://arxiv.org/pdf/2407.20309v2",
+      "sha256": "ef21353629a777f796e1d968eb5ad59fecde30934fe7ef7fca82cfeb5f23b392",
+      "filename": "yang_et_al_2024_arxiv_2407.20309v2.pdf"
+    },
+    "nist_fe1_lines": {
+      "url": "https://physics.nist.gov/cgi-bin/ASD/lines1.pl?spectra=Fe%20I&low_w=6300.8&upp_w=6303.2&unit=0&de=0&format=2&line_out=0&en_unit=1&output=0&bibrefs=1&page_size=100&show_obs_wl=1&show_calc_wl=1&unc_out=1&order_out=0&show_av=2&A_out=0&f_out=1&S_out=1&loggf_out=1&intens_out=1&allowed_out=1&forbid_out=1&conf_out=1&term_out=1&enrg_out=1&J_out=1&g_out=1",
+      "sha256": "b392a86c9f61c589cf68541fae983f12ea77cefe4c286d15b40eb15acfa54ccb",
+      "filename": "nist_asd_5.12_fe1_6300.8_6303.2_lines.csv"
+    },
+    "nist_fe1_levels": {
+      "url": "https://physics.nist.gov/cgi-bin/ASD/energy1.pl?de=0&spectrum=Fe%20I&units=0&format=2&output=0&page_size=5000&multiplet_ordered=1&conf_out=on&term_out=on&level_out=on&unc_out=1&j_out=on&g_out=on&lande_out=on&biblio=on",
+      "sha256": "66736300d491520119991512e54ff05435e649b78055ddc146b7e90c5323d8a7",
+      "filename": "nist_asd_5.12_fe1_levels.csv"
+    },
+    "hinode_sp_prep": {
+      "url": "https://sohoftp.nascom.nasa.gov/solarsoft/hinode/sot/idl/sp/util/sp_prep.pro",
+      "sha256": "63bd10f742fae21cb32f62fb11abb29f00c82c2445eb8fabd65976f7d22f60a9",
+      "filename": "hinode_sp_prep_2026-08-19.pro"
+    },
+    "sir2015_blends2": {
+      "url": "https://raw.githubusercontent.com/cdiazbas/SIRcode/def666eccddc92c0c2d0d3e72eaeb4b96939f8de/SIR2015/blends2.f",
+      "sha256": "38c5e8344c6646db1349d41a34674565aca00faa4919d75f61248912bac2ad17",
+      "filename": "sir2015_blends2_def666e.f"
+    },
+    "stic_witt_eos": {
+      "url": "https://raw.githubusercontent.com/jaimedelacruz/stic/18cda77d038a97f007a783dcb61ea9a9a1244bf7/pythontools/py2/witt.py",
+      "sha256": "49e62261302f45be29af287f1ea7c2eae33807d484ce6b54dca2bd3e3ee32394",
+      "filename": "stic_18cda77_witt.py"
+    },
+    "stic_kurucz_partition_functions": {
+      "url": "https://raw.githubusercontent.com/jaimedelacruz/stic/18cda77d038a97f007a783dcb61ea9a9a1244bf7/pythontools/py2/pf_Kurucz.input",
+      "sha256": "a7d15b25406b2736331253b6457d8ef4cfa3f3ef2275462120999121b8a734a8",
+      "filename": "stic_18cda77_pf_Kurucz.input"
+    },
+    "stic_abundances": {
+      "url": "https://raw.githubusercontent.com/jaimedelacruz/stic/18cda77d038a97f007a783dcb61ea9a9a1244bf7/input/Atoms/abundance.input",
+      "sha256": "6ed3664858107e423eac59a01d65735940c67ff7fd75afebdd2d0887a4108124",
+      "filename": "stic_18cda77_abundance.input"
+    },
+    "stic_falc_82": {
+      "url": "https://raw.githubusercontent.com/jaimedelacruz/stic/18cda77d038a97f007a783dcb61ea9a9a1244bf7/input/Atmos/FALC_82.atmos",
+      "sha256": "7725352edeec3c29efa551db8bf61e7ff7a43760b4ec6bb017392ab71b4e1697",
+      "filename": "stic_18cda77_FALC_82.atmos"
+    },
+    "stic_fts_disk_center": {
+      "url": "https://raw.githubusercontent.com/jaimedelacruz/stic/18cda77d038a97f007a783dcb61ea9a9a1244bf7/pythontools/py2/fts_disk_center.idlsave",
+      "sha256": "1332b2b9a10c390171dac6a7cc47d4d3e4590d89d9f122124a9b971125ad8550",
+      "filename": "stic_18cda77_fts_disk_center.idlsave"
+    },
+    "neckel_2005_limb_darkening": {
+      "url": "https://doi.org/10.1007/s11207-005-4081-z",
+      "sha256": "citation-only:10.1007/s11207-005-4081-z",
+      "filename": "neckel_2005_limb_darkening_citation"
+    }
+  },
+  "source_roles": {
+    "bundle_input_ids": [
+      "stic_witt_eos",
+      "stic_kurucz_partition_functions",
+      "stic_abundances",
+      "stic_falc_82",
+      "stic_fts_disk_center"
+    ],
+    "citation_only_ids": [
+      "asplund_2021_abundances",
+      "ciaaw_standard_atomic_weights_2024",
+      "ciaaw_abridged_atomic_weights_2024",
+      "yang_2024_spin4d_table3",
+      "nist_fe1_lines",
+      "nist_fe1_levels",
+      "hinode_sp_prep",
+      "sir2015_blends2",
+      "neckel_2005_limb_darkening"
+    ],
+    "citation_only_contract": "reviewed provenance only; these mutable endpoints are not downloaded or required to reproduce the generated runtime tables"
+  },
+  "vendored_files": {},
+  "generated_files": {
+    "common/stic_continuum_table.json": {
+      "sha256": "c84768093556a0642fd7f9a7035df443b4100b2b0aa661a9f651e7e192f24e75"
+    },
+    "hmi_stokes/solar_reference_617nm.json": {
+      "sha256": "894a77e2604c6b5a17fface9b2222632294497d2492a1bf454405ac998d95207"
+    },
+    "hinode_sp/solar_reference_630nm.json": {
+      "sha256": "69bdd4236888b5f45598dc08f2652a9f6b3cd4ad5caed4128ea19f2747add20c"
+    }
+  },
+  "reviewed_files": {
+    "common/lines.json": {
+      "sha256": "a9dbf795990bebc137be63279dbfb94bbb067a9600cec113e4b4f82613e82109"
+    },
+    "common/abundances.json": {
+      "sha256": "594bf6aac22c6b05caf9ba6af54dde587423f4a1db425a078eb4c6771eac86db"
+    },
+    "hinode_sp/blend_inventory.json": {
+      "sha256": "d09df37173fde77a9011c0fdc45dadb51d1e346d90d409c6f1b17da0e264b329"
+    },
+    "hinode_sp/instrument_hinode_sp.json": {
+      "sha256": "6b5b4528656d639a56eae44d2be41533710542cba76b1528ac67361e93b2c8f3"
+    },
+    "hmi_stokes/instrument_hmi.json": {
+      "sha256": "d668dd7550e224704108fb248493bd89169a0d372e05536899197d92fcb56170"
+    }
+  }
+}

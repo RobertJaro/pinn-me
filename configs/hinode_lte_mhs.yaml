@@ -1,0 +1,170 @@
+# Static LTE inversion of the full Hinode/SOT-SP raster 20110214_000004.
+#
+# These are the literal operational paths from the preserved run. The input
+# directory must contain the prepared FITS columns for this raster directly.
+schema_version: 1
+
+solver:
+  kind: lte
+  output_directory: /glade/work/rjarolim/lte/hinode_mhs_20110214_000004_v03
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_20110214_000004_v03
+
+resources:
+  # Common LTE atomic tables plus the complete Hinode/SP instrument bundle.
+  bundle: packaged
+
+observation:
+  type: hinode_sp
+  directory: /glade/work/rjarolim/data/inversion/hinode_2011_02/20110214_000004
+  selection:
+    slit_slice:
+      start: 0
+      stop: 512
+  loader:
+    batch_size: 128
+    validation_batch_size: 64
+    validation_stride: 16
+    preparation_workers: 8
+    workers: 8
+    pin_memory: true
+    progress: true
+  calibration:
+    continuum_edge_samples: 8
+    quiet_sun_max_fractional_polarization: 1.0e-2
+    quiet_sun_continuum_trim_quantiles: [0.05, 0.95]
+    minimum_quiet_sun_pixels: 1024
+    stokes_reference_angle_deg: 0.0
+
+atmosphere:
+  depth_grid:
+    coordinate: log_tau500
+    minimum: -5.0
+    maximum: 1.0
+    count: 51
+  geometry:
+    type: spherical_shell
+    time_dependent: false
+    height_input_scale_m: 1.0e+6
+    outer_height_megameter: 1.5
+    inner_height_megameter: -0.1
+    tangent_margin_m: 1000.0
+  reference_atmosphere: falc_82
+  parameters:
+    temperature:
+      log10_bounds: [3.4, 4.0]
+      log_scale: 0.1
+    velocity:
+      scale_m_per_s: 1000.0
+      maximum_m_per_s: 100000.0
+    magnetic_field:
+      scale_gauss: 100.0
+    microturbulence:
+      log10_bounds: [1.0, 4.0]
+      log_scale: 0.2
+    gas_pressure:
+      log10_bounds: [-1.5, 6.0]
+      log_scale: 0.5
+  network:
+    type: mlp
+    hidden_dimension: 256
+    hidden_layers: 8
+    activation: silu
+    encoding:
+      type: fourier
+      # Three static Carrington spatial coordinates; there is no time input.
+      num_frequencies: [64, 64, 64]
+      max_frequencies: [8, 8, 8]
+      include_input: true
+
+synthesis:
+  line_ids: [FeI_6301.5008, FeI_6302.4932]
+  excluded_wavelength_windows_angstrom: [[6302.04, 6302.14]]
+
+instrument:
+  type: hinode_sp
+  spectral_psf:
+    type: gaussian
+    fwhm_angstrom: 0.025
+    oversample: 4
+    truncate_sigma: 4.0
+  radial_velocity_correction_m_per_s: 0.0
+
+training:
+  depth_sampling:
+    sample_count: 25
+    coarse_to_fine:
+      enabled: true
+      fine_sample_count: 16
+      uniform_weight_floor: 0.05
+  vector_regularization:
+    enabled: false
+    magnetic_weight: 0.0
+    velocity_weight: 0.0
+    decay_steps: 0
+  physics:
+    vector_basis_matches_spatial_coordinates: true
+    collocation:
+      volume_points_per_step: 1024
+      height_layers_per_step: 32
+      upper_boundary_points_per_step: 256
+      validation_height_layers: 8
+      validation_points_per_height: 32
+    normalization:
+      length_m: 1.0e+6
+      time_s: 3600.0
+    equations:
+      hydrostatic_equilibrium: {enabled: false, weight: 0.0}
+      magnetohydrostatic_equilibrium: {enabled: true, weight: 1.0e-3}
+      momentum: {enabled: false, weight: 0.0}
+      magnetic_divergence: {enabled: true, weight: 1.0e-3}
+      induction: {enabled: false, weight: 0.0}
+      continuity: {enabled: false, weight: 0.0}
+      upper_boundary_gas_pressure_prior: {enabled: true, weight: 1.0e-4}
+  learning_rate:
+    start: 1.0e-3
+    end: 1.0e-4
+    iterations: auto
+
+loss:
+  type: mse
+  stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
+  polarization_transform:
+    type: asinh
+    q_alpha: 1.0e-2
+    u_alpha: 1.0e-2
+    v_alpha: 1.0e-2
+
+diagnostics:
+  validation_every_n_epochs: 1
+  visualization:
+    enabled: true
+    every_n_validations: 1
+    ray_sampling:
+      batch_size: 1024
+      max_pixels: 16384
+      max_profile_samples: 4096
+    slice_sampling:
+      batch_size: 1024
+      layer_count: 4
+      longitude_points: 256
+      latitude_points: 256
+      radial_points: 192
+    dpi: 220
+    meridional_slice:
+      enabled: true
+      longitude_deg: 36.0
+    include_initial: true
+
+runtime:
+  max_epochs: 500
+  log_every_n_steps: 10
+  validation_check_interval_steps: 1000
+  gradient_clip_norm: 0.1
+
+logging:
+  type: wandb
+  project: PROM3THEUS
+  tags:
+    [hinode, sot-sp, lte, mhs, magnetohydrostatic-equilibrium, spherical-shell,
+     carrington, full-resolution, "20110214_000004"]
+  run_name: Hinode LTE MHS 20110214_000004

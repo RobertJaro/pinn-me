@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "instrument": "Hinode/SOT-SP",
+  "sources": {
+    "CSAC_LEVEL1": {
+      "title": "Collection of Hinode/SOT-SP Level-1 calibrated Stokes spectra",
+      "authors": "B. W. Lites and K. Ichimoto",
+      "doi": "10.5065/D6T151QF",
+      "url": "https://csac.hao.ucar.edu/sp_dois.php",
+      "processing": "Level-1 files are calibrated Stokes spectra produced with SolarSoft sp_prep"
+    },
+    "NAOJ_SPECIFICATION": {
+      "title": "Spectro-polarimeter",
+      "publisher": "Hinode Science Center at NAOJ",
+      "url": "https://hinode.nao.ac.jp/en/for-researchers/instruments/sot/spectro-polarimeter/",
+      "reported_spectral_coverage_nm": [630.08, 630.32],
+      "nominal_spectral_resolution_milliangstrom": 30.0,
+      "spectral_sampling_milliangstrom": 21.5
+    },
+    "LITES_ET_AL_2013": {
+      "citation": "Lites et al. 2013, Solar Physics 283, 579-599",
+      "doi": "10.1007/s11207-012-0206-3",
+      "url": "https://link.springer.com/article/10.1007/s11207-012-0206-3",
+      "measurement": "Pre-launch tunable-laser response near the 6302-A Fe I lines",
+      "measured_fwhm_milliangstrom": "approximately 25",
+      "measured_sampling_milliangstrom": 21.549,
+      "profile_shape": "Slight red-wing asymmetry and elevated inner wings relative to the Gaussian fits"
+    },
+    "SP_PREP": {
+      "title": "SolarSoft Hinode/SOT sp_prep.pro",
+      "url": "https://sohoftp.nascom.nasa.gov/solarsoft/hinode/sot/idl/sp/util/sp_prep.pro",
+      "sha256_retrieved_2026_08_19": "63bd10f742fae21cb32f62fb11abb29f00c82c2445eb8fabd65976f7d22f60a9",
+      "relevant_version": "1.05 (2008-04-18)",
+      "wavelength_calibration": "Reverse the calibrated spectral dimension to increasing wavelength, make CDELT1 positive, and repair CRVAL1 for the spectral ROI",
+      "shift_keywords": "DOP_RCV is the spacecraft-Sun LOS velocity in m/s, positive for redshift, and is already removed by sp_prep; SPWLSFT0 contains orbital plus predicted thermal shift and SPWLSHFT records line registration, so their difference reconstructs the removed solar LOS shift without shifting the calibrated spectra again"
+    }
+  },
+  "modeled_spectral_response": {
+    "type": "normalized_gaussian_approximation",
+    "fwhm_angstrom": 0.025,
+    "basis": "The measured as-built response has FWHM approximately 25 mA",
+    "limitation": "The measured response is not exactly Gaussian; its sampled asymmetric profile is not bundled, so the reported wings and red asymmetry are not represented unless the caller supplies provenance-labeled response samples"
+  },
+  "excluded_effects": {
+    "undispersed_stray_light": "Not modeled; Lites et al. report an observational upper limit of approximately 3-4 percent of continuum, not a measured kernel or fixed fraction",
+    "spatial_psf": "Not modeled. No web-verifiable Hinode/SP spatial kernel is bundled, and physical Solar-X/Solar-Y convolution requires a per-pixel detector-to-Mm basis with explicit boundary handling."
+  }
+}

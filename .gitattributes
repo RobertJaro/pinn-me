@@ -1,3 +1,0 @@
-# Checksum-pinned upstream scientific tables are preserved byte-for-byte.
-pme/lte/data/*.dat -whitespace
-pme/lte/data/*.txt -whitespace

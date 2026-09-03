@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "instrument": "SDO/HMI",
+  "spectral_line": {
+    "species": "Fe I",
+    "atomic_line_id": "FeI_6173.3352",
+    "laboratory_air_wavelength_angstrom": 6173.3352,
+    "instrument_tuning_reference_air_wavelength_angstrom": 6173.3433,
+    "reference_difference_milliangstrom": 8.1,
+    "reference_contract": "The LTE opacity uses the laboratory wavelength; phase-map offsets are added to the HMI tuning reference. The difference is retained and may not be absorbed into the atmospheric velocity zero point."
+  },
+  "sampling": {
+    "segment_storage_order": ["red_172.0_mA", "red_103.2_mA", "red_34.4_mA", "blue_34.4_mA", "blue_103.2_mA", "blue_172.0_mA"],
+    "training_order": ["blue_172.0_mA", "blue_103.2_mA", "blue_34.4_mA", "red_34.4_mA", "red_103.2_mA", "red_172.0_mA"],
+    "training_offsets_angstrom": [-0.172, -0.1032, -0.0344, 0.0344, 0.1032, 0.172]
+  },
+  "transmission_model": {
+    "runtime_input": "record-specific archive produced by prom3theus.instruments.hmi.preparation",
+    "phase_map_series": "hmi.phasemaps_extended",
+    "equation": "T(lambda)=(1+B*cos(2*pi*lambda/FSR+Phi+4*phi))/2 for each tunable element; the total response is the element product times the blocking filter",
+    "mean_element_contrasts_NB_WB_E1_E2_E3_E4_E5": [0.969, 0.997, 0.962, 0.985, 0.965, 0.988, 1.0],
+    "blocking_filter_fwhm_angstrom": 8.43,
+    "untuned_stack_center_from_target_angstrom": 0.016,
+    "inner_quadrature_half_width_angstrom": 0.65,
+    "continuum_contract": "The response archive integrates throughput outside the inner quadrature window into a continuum weight; LTE uses the mean synthesized Stokes-I edge continuum and zero polarized continuum for this term."
+  },
+  "polarization": {
+    "stored_stokes_order": ["I", "Q", "U", "V"],
+    "reference_axis": "detector +Y (CCD column-up), derived per acquisition from the FITS WCS pixel-scale matrix",
+    "azimuth_direction": "counter-clockwise as viewed from the observer",
+    "contract": "The HMI Stokes basis is derived from detector orientation for every acquisition, so CROTA2 is handled by WCS geometry. Stored Q and U are not sign-flipped or rotated in the LTE line operator."
+  },
+  "provenance": {
+    "design_and_ground_calibration": {
+      "citation": "Schou et al. 2012, Solar Physics 275, 229-259",
+      "doi": "10.1007/s11207-011-9842-2"
+    },
+    "wavelength_response": {
+      "citation": "Couvidat et al. 2012, Solar Physics 275, 285-325",
+      "doi": "10.1007/s11207-011-9723-8"
+    },
+    "stokes_pipeline": {
+      "citation": "Hoeksema et al. 2014, Solar Physics 289, 3483-3530",
+      "doi": "10.1007/s11207-014-0516-8"
+    },
+    "observables_processing": {
+      "citation": "Couvidat et al. 2016, Solar Physics 291, 1887-1938",
+      "doi": "10.1007/s11207-016-0957-3"
+    }
+  }
+}
