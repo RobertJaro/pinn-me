@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import torch
 
-from prom3theus.core import NormalizationModule
 from prom3theus.diagnostics.synthetic import synthetic_temperature_profile
 from prom3theus.inversion.objective import StokesObjective
 from prom3theus.rt import (
@@ -103,10 +102,11 @@ def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
         )
     inferred_scaled = torch.nn.Parameter(0.05 * torch.randn_like(truth_scaled))
     optimizer = torch.optim.Adam((inferred_scaled,), lr=0.03)
-    normalization = NormalizationModule(
-        asinh_alphas={"Q": 1.0e-2, "U": 1.0e-2, "V": 1.0e-2}
+    stokes_loss = StokesObjective(
+        type="huber",
+        stokes_sigmas={"I": 5.0e-3, "Q": 2.0e-3, "U": 2.0e-3, "V": 2.0e-3},
+        huber_delta=1.0,
     ).to(target_device)
-    stokes_loss = StokesObjective(type="mse")
     losses = []
     for _ in range(steps):
         optimizer.zero_grad()
@@ -116,9 +116,9 @@ def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
             path=OpticalDepthPath(mu=1.0),
             radiance_scale=radiance_scale,
         )
-        # Match the shipped LTE configurations: linear I, asinh-scaled
-        # Q/U/V, and equal component weights.
-        loss = stokes_loss(prediction, target, normalization).mean()
+        # Match the shipped LTE configurations: noise-standardized Huber
+        # residuals with equal component preference.
+        loss = stokes_loss(prediction, target).mean()
         loss.backward()
         optimizer.step()
         losses.append(float(loss.detach()))

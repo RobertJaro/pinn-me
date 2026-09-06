@@ -72,16 +72,32 @@ class HMIFilterProfiles(nn.Module):
         if not observed.is_floating_point():
             observed = observed.float()
         _validate_wavelength(observed, "observed_wavelength_angstrom")
+        quadrature = self.quadrature_wavelength_angstrom.to(observed)
+        _validate_wavelength(quadrature, "quadrature_wavelength_angstrom")
         endpoints = observed.new_tensor(
             [
                 self.tuning_reference_angstrom - self.inner_half_width_angstrom,
                 self.tuning_reference_angstrom + self.inner_half_width_angstrom,
             ]
         )
+        # At visible wavelengths one float32 ULP is about 5e-4 Angstrom.  The
+        # outermost Gauss--Legendre node of the production HMI grid lies less
+        # than one ULP inside each nominal continuum endpoint, so a direct cast
+        # can collapse both pairs onto identical values.  Keep the fast float32
+        # forward model and move only a collided auxiliary endpoint by one
+        # representable value away from the quadrature interval.
+        if endpoints[0] >= quadrature[0]:
+            endpoints[0] = torch.nextafter(
+                quadrature[0], quadrature.new_tensor(-torch.inf)
+            )
+        if endpoints[1] <= quadrature[-1]:
+            endpoints[1] = torch.nextafter(
+                quadrature[-1], quadrature.new_tensor(torch.inf)
+            )
         return torch.cat(
             (
                 endpoints[:1],
-                self.quadrature_wavelength_angstrom.to(observed),
+                quadrature,
                 endpoints[1:],
             )
         )

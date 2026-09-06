@@ -105,6 +105,7 @@ def test_response_manifest_binds_profile_bytes(tmp_path):
         json.dumps(
             {
                 "format": response.MANIFEST_FORMAT,
+                "phase_map_assignment_series": response.PHASE_MAP_ASSIGNMENT_SERIES,
                 "profiles": {
                     "INVPHMAP=1|HCAMID=3": {
                         "file": profile.name,
@@ -119,6 +120,8 @@ def test_response_manifest_binds_profile_bytes(tmp_path):
                         "record_time": "2024.03.24_01:00:00_TAI",
                         "observation_time": "2024.03.24_01:00:00_TAI",
                         "hcamid": 3,
+                        "phase_map_fsn": 1,
+                        "assignment_record": "hmi.B_720s[2024.03.24_01:00:00_TAI]",
                         "profile": "INVPHMAP=1|HCAMID=3",
                     }
                 },
@@ -142,6 +145,7 @@ def test_response_resolution_binds_current_fits_observation_time(tmp_path):
         json.dumps(
             {
                 "format": response.MANIFEST_FORMAT,
+                "phase_map_assignment_series": response.PHASE_MAP_ASSIGNMENT_SERIES,
                 "profiles": {
                     "INVPHMAP=1|HCAMID=3": {
                         "file": profile.name,
@@ -156,6 +160,8 @@ def test_response_resolution_binds_current_fits_observation_time(tmp_path):
                         "record_time": "2024.03.24_01:00:00_TAI",
                         "observation_time": "2024.03.24_00:59:58_TAI",
                         "hcamid": 3,
+                        "phase_map_fsn": 1,
+                        "assignment_record": "hmi.B_720s[2024.03.24_01:00:00_TAI]",
                         "profile": "INVPHMAP=1|HCAMID=3",
                     }
                 },
@@ -199,6 +205,7 @@ def test_response_manifest_binds_profile_identity(tmp_path):
     _profile(profile)
     manifest = {
         "format": response.MANIFEST_FORMAT,
+        "phase_map_assignment_series": response.PHASE_MAP_ASSIGNMENT_SERIES,
         "profiles": {
             "INVPHMAP=2|HCAMID=3": {
                 "file": profile.name,
@@ -213,6 +220,8 @@ def test_response_manifest_binds_profile_identity(tmp_path):
                 "record_time": "2024.03.24_01:00:00_TAI",
                 "observation_time": "2024.03.24_01:00:00_TAI",
                 "hcamid": 3,
+                "phase_map_fsn": 2,
+                "assignment_record": "hmi.B_720s[2024.03.24_01:00:00_TAI]",
                 "profile": "INVPHMAP=2|HCAMID=3",
             }
         },

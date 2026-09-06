@@ -12,22 +12,22 @@ from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
 FIELD_STYLES = {
     "temperature": {
-        "label": r"$T$ [K]",
+        "label": r"$\log_{10}(T / \mathrm{K})$",
         "cmap": "inferno",
         "signed": False,
-        "log_norm": True,
+        "log10": True,
     },
     "density": {
-        "label": r"$\rho$ [kg m$^{-3}$]",
+        "label": r"$\log_{10}(\rho / \mathrm{kg\,m^{-3}})$",
         "cmap": "cividis",
         "signed": False,
-        "log_norm": True,
+        "log10": True,
     },
     "pressure": {
-        "label": r"$P_{gas}$ [Pa]",
+        "label": r"$\log_{10}(P_{\rm gas} / \mathrm{Pa})$",
         "cmap": "viridis",
         "signed": False,
-        "log_norm": True,
+        "log10": True,
     },
     "v_r": {
         "label": r"$v_r$ [km s$^{-1}$]",
@@ -47,10 +47,42 @@ FIELD_STYLES = {
     "b_r": {"label": r"$B_r$ [G]", "cmap": "RdBu_r", "signed": True},
     "b_theta": {"label": r"$B_\theta$ [G]", "cmap": "RdBu_r", "signed": True},
     "b_phi": {"label": r"$B_\phi$ [G]", "cmap": "RdBu_r", "signed": True},
+    "field_strength": {
+        "label": r"$|\mathbf{B}|$ [G]",
+        "cmap": "viridis",
+        "signed": False,
+        "log_norm": True,
+    },
+    "inclination": {
+        "label": r"inclination $\gamma$ [deg]",
+        "cmap": "PiYG",
+        "signed": False,
+        "vmin": 0.0,
+        "vmax": 180.0,
+    },
+    "azimuth": {
+        "label": r"azimuth $\chi$ [deg]",
+        "cmap": "twilight",
+        "signed": False,
+        "vmin": -180.0,
+        "vmax": 180.0,
+    },
+    "v_toward": {
+        "label": r"$v_{\rm toward\ observer}$ [km s$^{-1}$]",
+        "cmap": "seismic",
+        "signed": True,
+    },
     "microturbulence": {
-        "label": r"$\xi$ [km s$^{-1}$]",
+        "label": r"$\log_{10}(\xi / \mathrm{km\,s^{-1}})$",
         "cmap": "magma",
         "signed": False,
+        "log10": True,
+    },
+    "current_density": {
+        "label": r"$\|\mathbf{J}\|$ [A m$^{-2}$]",
+        "cmap": "magma",
+        "signed": False,
+        "log_norm": True,
     },
 }
 
@@ -76,6 +108,11 @@ class DiagnosticPlotter:
     def _field_norm(cls, values: np.ndarray, style: Mapping) -> Normalize:
         """Return a shared linear or logarithmic normalization for a field."""
 
+        values = cls._display_values(values, style)
+
+        if "vmin" in style or "vmax" in style:
+            return Normalize(vmin=style.get("vmin"), vmax=style.get("vmax"))
+
         if not style.get("log_norm", False):
             vmin, vmax = cls._limits(values, signed=style["signed"])
             return Normalize(vmin=vmin, vmax=vmax)
@@ -93,11 +130,25 @@ class DiagnosticPlotter:
         )
 
     @staticmethod
+    def _display_values(values: np.ndarray, style: Mapping) -> np.ndarray:
+        """Convert physical field values to the units shown by a plot style."""
+
+        values = np.asarray(values)
+        if not style.get("log10", False):
+            return values
+        transformed = np.full(values.shape, np.nan, dtype=np.result_type(values, float))
+        valid = np.isfinite(values) & (values > 0.0)
+        transformed[valid] = np.log10(values[valid])
+        return transformed
+
+    @staticmethod
     def _add_shared_colorbar(
         figure: Figure,
         mappable,
         axes,
         label: str,
+        *,
+        scientific_notation: bool = True,
     ):
         """Add one horizontal colorbar shared by a panel column."""
 
@@ -112,8 +163,17 @@ class DiagnosticPlotter:
         colorbar.set_label(label)
         colorbar.ax.set_title("")
         colorbar.locator = MaxNLocator(nbins=4, min_n_ticks=2)
-        formatter = ScalarFormatter(useOffset=True, useMathText=True)
-        formatter.set_powerlimits((-3, 4))
+        formatter = ScalarFormatter(
+            useOffset=scientific_notation,
+            useMathText=scientific_notation,
+        )
+        if scientific_notation:
+            formatter.set_powerlimits((-3, 4))
+        else:
+            # Stokes panels span different orders of magnitude. Full decimal
+            # labels prevent one component from silently acquiring an offset
+            # multiplier such as ``x10^-3`` while its neighbours do not.
+            formatter.set_scientific(False)
         colorbar.formatter = formatter
         colorbar.update_ticks()
         colorbar.minorticks_off()

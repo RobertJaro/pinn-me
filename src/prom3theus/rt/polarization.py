@@ -279,7 +279,12 @@ class PolarizedLineOpacity(nn.Module):
             alpha500,
         )
 
-        def validated_density(name: str, values: torch.Tensor) -> torch.Tensor:
+        def validated_density(
+            name: str,
+            values: torch.Tensor,
+            *,
+            allow_zero: bool = False,
+        ) -> torch.Tensor:
             values = torch.as_tensor(
                 values,
                 dtype=temperature.dtype,
@@ -287,15 +292,17 @@ class PolarizedLineOpacity(nn.Module):
             )
             if values.shape != temperature.shape:
                 raise ValueError(f"{name} must share the temperature shape")
-            if not torch.isfinite(values).all() or torch.any(values <= 0):
-                raise ValueError(f"{name} must be finite and strictly positive")
+            invalid = values < 0 if allow_zero else values <= 0
+            if not torch.isfinite(values).all() or torch.any(invalid):
+                qualifier = "non-negative" if allow_zero else "strictly positive"
+                raise ValueError(f"{name} must be finite and {qualifier}")
             return values
 
         diagnostic_electron_density = damping_electron_density
         if damping_electron_density is None:
             if self.requires_stark_electron_density:
                 raise ValueError(
-                    "A pinned-STiC damping_electron_density is required when any "
+                    "A plasma-state damping_electron_density is required when any "
                     "selected line has Stark broadening."
                 )
             electron_density_for_rate = torch.zeros_like(temperature)
@@ -306,7 +313,9 @@ class PolarizedLineOpacity(nn.Module):
             diagnostic_electron_density = damping_electron_density
             electron_density_for_rate = damping_electron_density
         damping_hydrogen_neutral = validated_density(
-            "damping_hydrogen_neutral", damping_hydrogen_neutral
+            "damping_hydrogen_neutral",
+            damping_hydrogen_neutral,
+            allow_zero=True,
         )
         validated_lower_populations = {}
         for line in self.lines:
@@ -315,6 +324,7 @@ class PolarizedLineOpacity(nn.Module):
             validated_lower_populations[line.id] = validated_density(
                 f"lower_level_populations[{line.id!r}]",
                 lower_level_populations[line.id],
+                allow_zero=True,
             )
 
         if frequency_hz is None:

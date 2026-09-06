@@ -15,7 +15,7 @@ observation, instrument, training, or artifact layers.
 ```text
 src/prom3theus/
   core/             units, coordinates, neural primitives, solar kinematics
-  config/           strict schema-v1 model, YAML loading, path resolution
+  config/           strict schema-v2 model, YAML loading, path resolution
   resources/        checksum-verified LTE atomic and continuum data
   rt/               atmosphere contract, LTE synthesis, formal transfer
   observations/     canonical rasters, datasets, safe array stores
@@ -37,17 +37,20 @@ never pickles Python classes.
 
 ## Configuration reset
 
-Ship exactly two YAML files:
+Ship four explicit LTE workflows:
 
 - `configs/hinode_lte_mhs.yaml`
-- `configs/hmi_lte_subframe.yaml`
+- `configs/hinode_lte_mhs_extrapolation.yaml`
+- `configs/hmi_lte_mhs.yaml`
+- `configs/hmi_lte_dynamic.yaml`
 
 The Hinode file preserves the full-resolution static MHS run for raster
 `20110214_000004`, translated from its earlier operational configuration. The
-HMI file converts the retained `lte_subframe_20240324.yaml` workflow. There is
+HMI files expose static MHS and dynamic ideal-MHD variants of the retained
+`lte_subframe_20240324.yaml` workflow. There is
 no maintained Hinode time-series configuration or compatibility parser.
 
-Both files use the same top-level order:
+All files use the same top-level order:
 
 1. `schema_version` and `solver`
 2. `resources`
@@ -121,7 +124,7 @@ environment variables never redirect maintained workflows.
   download/input preparation, and synthetic recovery.
 - Use a `src/` package layout. Keep heavy observation, visualization, and HMI
   response-preparation dependencies in optional extras.
-- Wheels contain the `prom3theus` package, verified resources, and the two
+- Wheels contain the `prom3theus` package, verified resources, and the maintained
   public configurations. Source distributions additionally retain the
   architecture documents and static checkout scripts referenced by the README.
 
@@ -133,7 +136,7 @@ The port removes these superseded surfaces in full:
   spherical-ME training and evaluation, generic loaders, entry points, and LTE
   copies under that namespace;
 - all 46 files under `config/` and every configuration variant other than the
-  two schema-v1 LTE runs;
+  schema-v1 LTE runs;
 - legacy shell launchers and one-off Python scripts replaced by the unified CLI
   plus static, instrument-specific checkout scripts for HMI download,
   preparation, and run and for Hinode resource validation and the MHS run;
@@ -148,7 +151,7 @@ the port does not delete them.
 
 ## Verification gates
 
-1. Exactly two source YAML files exist, and both load through the strict schema.
+1. Exactly the maintained source YAML files exist, and all load through the strict schema.
 2. Source, entry-point, metadata, and closed-registry inventories match the
    current `prom3theus` package.
 3. Core, transfer, observation-store, instrument, inversion, artifact, CLI, and
@@ -163,7 +166,7 @@ the port does not delete them.
 ## Execution order
 
 1. Snapshot the dirty worktree and establish the removal inventory.
-2. Introduce the `src/prom3theus` package and strict two-file configuration.
+2. Introduce the `src/prom3theus` package and strict maintained configuration set.
 3. Port and isolate the scientific core, resources, and LTE transfer solver.
 4. Port independent Hinode/HMI adapters and safe observation persistence.
 5. Split inversion composition from Lightning orchestration; add artifacts and

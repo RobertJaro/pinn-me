@@ -20,6 +20,11 @@ from .evaluation import (
     resolve_storage_dtype,
     select_export_device,
 )
+from .full_shell import (
+    evaluate_full_shell_atmosphere,
+    full_shell_height_grid,
+    full_shell_metadata,
+)
 from .stokes import evaluate_stokes
 from .validation import load_validated_artifact
 
@@ -62,6 +67,8 @@ def export_artifact(
     batch_size: int = 4096,
     include_stokes: bool = False,
     stokes_batch_size: int = 16,
+    include_full_shell: bool = False,
+    full_shell_samples: int = 101,
     storage_dtype: str = "float32",
     device: str = "auto",
 ) -> Path:
@@ -80,6 +87,8 @@ def export_artifact(
         raise ValueError("output must use the .npz suffix.")
     if batch_size < 1 or stokes_batch_size < 1:
         raise ValueError("batch_size and stokes_batch_size must be positive.")
+    if type(full_shell_samples) is not int or full_shell_samples < 2:
+        raise ValueError("full_shell_samples must be an integer of at least two.")
     resolve_storage_dtype(storage_dtype)
 
     artifact = load_validated_artifact(artifact_root)
@@ -100,6 +109,19 @@ def export_artifact(
         batch_size=batch_size,
         storage_dtype=storage_dtype,
     )
+    full_shell = None
+    if include_full_shell:
+        shell_height = full_shell_height_grid(module, full_shell_samples)
+        arrays.update(
+            evaluate_full_shell_atmosphere(
+                module,
+                raster,
+                height_grid_m=shell_height,
+                batch_size=batch_size,
+                storage_dtype=storage_dtype,
+            )
+        )
+        full_shell = full_shell_metadata(shell_height)
     if include_stokes:
         arrays.update(
             evaluate_stokes(
@@ -119,6 +141,7 @@ def export_artifact(
         artifact.raster_selection,
         depth_samples=int(evaluation_depth.numel()),
         include_stokes=include_stokes,
+        full_shell=full_shell,
         storage_dtype=storage_dtype,
         device=export_device,
     )

@@ -107,7 +107,7 @@ def test_hinode_registered_velocity_subtracts_the_removed_solar_shift():
         synthesis_wavelength_angstrom=wavelength,
         radiance_scale=1.0,
         carrington_angular_velocity_rad_per_s=0.0,
-        instrument_radial_velocity_correction_m_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
     )
 
     composition.synthesize(
@@ -132,7 +132,7 @@ def test_velocity_offsets_and_instrument_zero_point_must_be_physical():
         synthesis_wavelength_angstrom=wavelength,
         radiance_scale=1.0,
         carrington_angular_velocity_rad_per_s=0.0,
-        instrument_radial_velocity_correction_m_per_s=torch.tensor([0.0, 1.0]),
+        instrument_line_of_sight_velocity_correction_m_per_s=torch.tensor([0.0, 1.0]),
     )
 
     with torch.no_grad(), pytest.raises(ValueError, match="must be scalar"):
@@ -150,7 +150,7 @@ def test_velocity_offsets_and_instrument_zero_point_must_be_physical():
         synthesis_wavelength_angstrom=wavelength,
         radiance_scale=1.0,
         carrington_angular_velocity_rad_per_s=0.0,
-        instrument_radial_velocity_correction_m_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
     )
     with pytest.raises(ValueError, match="finite and subluminal"):
         composition.synthesize(

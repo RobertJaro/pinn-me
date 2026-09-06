@@ -24,8 +24,13 @@ THERMODYNAMIC_FIELDS = (
     "pressure",
     "microturbulence",
 )
-MAGNETIC_FIELDS = ("b_r", "b_theta", "b_phi")
-VELOCITY_FIELDS = ("v_r", "v_theta", "v_phi")
+MAGNETIC_SPHERICAL_FIELDS = ("b_r", "b_theta", "b_phi")
+MAGNETIC_OBSERVER_FIELDS = ("field_strength", "inclination", "azimuth")
+MAGNETIC_FIELDS = (*MAGNETIC_SPHERICAL_FIELDS, *MAGNETIC_OBSERVER_FIELDS)
+VELOCITY_SPHERICAL_FIELDS = ("v_r", "v_theta", "v_phi")
+VELOCITY_OBSERVER_FIELDS = ("v_toward",)
+VELOCITY_FIELDS = (*VELOCITY_SPHERICAL_FIELDS, *VELOCITY_OBSERVER_FIELDS)
+CURRENT_DENSITY_FIELDS = ("current_density",)
 
 
 def _option_mapping(value: Mapping | None, name: str) -> dict:
@@ -79,7 +84,7 @@ class AtmosphereSampling:
         slice_longitude_points = _integer_option(slice_config, "longitude_points", 256)
         slice_latitude_points = _integer_option(slice_config, "latitude_points", 256)
         slice_radial_points = _integer_option(slice_config, "radial_points", 192)
-        slice_layer_count = _integer_option(slice_config, "layer_count", 4)
+        slice_layer_count = _integer_option(slice_config, "layer_count", 6)
         slice_evaluation_batch_size = _integer_option(slice_config, "batch_size", 8192)
         if slice_config:
             raise TypeError(f"Unknown slice-sampling options: {sorted(slice_config)}")
@@ -131,8 +136,8 @@ class AtmosphereSampling:
             raise ValueError(
                 "A physical radial slice requires at least two radial points."
             )
-        if slice_layer_count < 2:
-            raise ValueError("Physical shell plots require at least two radial layers.")
+        if slice_layer_count < 3:
+            raise ValueError("Physical shell plots require at least three radial layers.")
         return cls(
             ray_evaluation_batch_size=ray_evaluation_batch_size,
             max_ray_pixels=max_ray_pixels,
@@ -154,6 +159,25 @@ class AtmosphereEvaluator:
         self.sampling = sampling
         for name in AtmosphereSampling.__dataclass_fields__:
             setattr(self, name, getattr(sampling, name))
+
+    @staticmethod
+    def _central_observer_basis(raster) -> torch.Tensor:
+        """Return the real Stokes basis nearest the validation field center."""
+
+        valid = raster.valid_mask.detach().cpu().bool()
+        surface = raster.surface_position_m.detach().float().cpu()[valid]
+        bases = raster.stokes_basis.detach().float().cpu()[valid]
+        if surface.shape[0] < 1 or bases.shape != (surface.shape[0], 3, 3):
+            raise ValueError(
+                "Observer-frame validation requires at least one valid Stokes basis."
+            )
+        surface_unit = surface / torch.linalg.vector_norm(
+            surface, dim=-1, keepdim=True
+        )
+        center = surface_unit.mean(dim=0)
+        center = center / torch.linalg.vector_norm(center)
+        center_index = torch.argmax(surface_unit @ center)
+        return bases[center_index]
 
     def evaluate_ray_optical_depth(
         self,
@@ -325,7 +349,11 @@ class AtmosphereEvaluator:
         return bounds
 
     def _evaluate_physical_positions(
-        self, pl_module, position_m: torch.Tensor
+        self,
+        pl_module,
+        position_m: torch.Tensor,
+        *,
+        observer_basis: torch.Tensor | None = None,
     ) -> dict[str, np.ndarray]:
         """Evaluate plot fields at explicitly supplied Carrington positions."""
 
@@ -334,30 +362,35 @@ class AtmosphereEvaluator:
         flat_position = position_m.reshape(-1, 3).to(
             device=parameter.device, dtype=parameter.dtype
         )
+        vector_fields = (*MAGNETIC_SPHERICAL_FIELDS, *VELOCITY_SPHERICAL_FIELDS)
+        if observer_basis is not None:
+            vector_fields = (
+                *vector_fields,
+                *MAGNETIC_OBSERVER_FIELDS,
+                *VELOCITY_OBSERVER_FIELDS,
+            )
         chunks = {
             name: []
             for name in (
                 *THERMODYNAMIC_FIELDS,
-                *MAGNETIC_FIELDS,
-                *VELOCITY_FIELDS,
+                *vector_fields,
+                *CURRENT_DENSITY_FIELDS,
             )
         }
         was_training = model.training
         model.eval()
         try:
-            with torch.no_grad():
+            with torch.enable_grad():
                 for start in range(
                     0, flat_position.shape[0], self.slice_evaluation_batch_size
                 ):
                     position = flat_position[
                         start : start + self.slice_evaluation_batch_size
-                    ]
+                    ].detach().requires_grad_(True)
                     atmosphere = model.evaluate_position_points(position)
                     pressure = atmosphere["gas_pressure"]
-                    density = (
-                        pl_module.synthesizer.continuum_opacity.reference_mass_density(
-                            atmosphere["temperature"], pressure
-                        )
+                    density = model.thermodynamic_eos.mass_density(
+                        atmosphere["temperature"], pressure
                     )
                     spherical = cartesian_to_spherical(position, torch)
                     magnetic_spherical = project_cartesian_to_spherical(
@@ -368,6 +401,54 @@ class AtmosphereEvaluator:
                             atmosphere["velocity_field"], spherical, torch
                         )
                         / 1_000.0
+                    )
+                    magnetic = atmosphere["magnetic_field"]
+                    observer = (
+                        None
+                        if observer_basis is None
+                        else observer_basis.to(magnetic)
+                    )
+                    magnetic_observer = (
+                        None
+                        if observer is None
+                        else torch.einsum("ij,nj->ni", observer, magnetic)
+                    )
+                    velocity_observer = (
+                        None
+                        if observer is None
+                        else torch.einsum(
+                            "ij,nj->ni", observer, atmosphere["velocity_field"]
+                        )
+                        / 1_000.0
+                    )
+                    component_basis = torch.eye(
+                        3, dtype=magnetic.dtype, device=magnetic.device
+                    )[:, None, :].expand(3, magnetic.shape[0], 3)
+                    magnetic_jacobian = torch.autograd.grad(
+                        magnetic,
+                        position,
+                        grad_outputs=component_basis,
+                        create_graph=False,
+                        retain_graph=False,
+                        is_grads_batched=True,
+                    )[0].movedim(0, 1)
+                    curl_magnetic_gauss_per_m = torch.stack(
+                        (
+                            magnetic_jacobian[:, 2, 1]
+                            - magnetic_jacobian[:, 1, 2],
+                            magnetic_jacobian[:, 0, 2]
+                            - magnetic_jacobian[:, 2, 0],
+                            magnetic_jacobian[:, 1, 0]
+                            - magnetic_jacobian[:, 0, 1],
+                        ),
+                        dim=-1,
+                    )
+                    # J = curl(B) / mu_0, with the learned magnetic field in
+                    # gauss and physical position derivatives in metres.
+                    current_density = torch.linalg.vector_norm(
+                        curl_magnetic_gauss_per_m * 1.0e-4
+                        / (4.0 * math.pi * 1.0e-7),
+                        dim=-1,
                     )
                     values = {
                         "temperature": atmosphere["temperature"],
@@ -380,7 +461,42 @@ class AtmosphereEvaluator:
                         "v_r": velocity_spherical[..., 0],
                         "v_theta": velocity_spherical[..., 1],
                         "v_phi": velocity_spherical[..., 2],
+                        "current_density": current_density,
                     }
+                    if magnetic_observer is not None and velocity_observer is not None:
+                        field_strength = torch.linalg.vector_norm(
+                            magnetic_observer, dim=-1
+                        )
+                        valid_field = field_strength > 0.0
+                        valid_azimuth = torch.linalg.vector_norm(
+                            magnetic_observer[..., :2], dim=-1
+                        ) > 0.0
+                        cos_inclination = torch.where(
+                            valid_field,
+                            magnetic_observer[..., 2] / field_strength.clamp_min(
+                                torch.finfo(field_strength.dtype).tiny
+                            ),
+                            torch.nan,
+                        )
+                        values.update(
+                            {
+                                "field_strength": field_strength,
+                                "inclination": torch.rad2deg(
+                                    torch.acos(cos_inclination.clamp(-1.0, 1.0))
+                                ),
+                                "azimuth": torch.where(
+                                    valid_azimuth,
+                                    torch.rad2deg(
+                                        torch.atan2(
+                                            magnetic_observer[..., 1],
+                                            magnetic_observer[..., 0],
+                                        )
+                                    ),
+                                    torch.nan,
+                                ),
+                                "v_toward": velocity_observer[..., 2],
+                            }
+                        )
                     for name, value in values.items():
                         chunks[name].append(value.detach().float().cpu())
         finally:
@@ -425,7 +541,11 @@ class AtmosphereEvaluator:
             dim=-1,
         )
         position = spherical_to_cartesian(spherical, torch).permute(1, 2, 0, 3)
-        fields = self._evaluate_physical_positions(pl_module, position)
+        fields = self._evaluate_physical_positions(
+            pl_module,
+            position,
+            observer_basis=self._central_observer_basis(raster),
+        )
         map_longitude = np.broadcast_to(
             np.rad2deg(longitude_grid.numpy())[..., None], position.shape[:-1]
         ).copy()
@@ -485,7 +605,11 @@ class AtmosphereEvaluator:
             dim=-1,
         )
         position = spherical_to_cartesian(spherical, torch)
-        fields = self._evaluate_physical_positions(pl_module, position)
+        fields = self._evaluate_physical_positions(
+            pl_module,
+            position,
+            observer_basis=self._central_observer_basis(raster),
+        )
         shape = (self.slice_latitude_points, 1, self.slice_radial_points)
         return {
             "solar_radius_m": float(model.solar_radius_m.detach().cpu()),
@@ -504,7 +628,12 @@ class AtmosphereEvaluator:
 __all__ = [
     "AtmosphereEvaluator",
     "AtmosphereSampling",
+    "CURRENT_DENSITY_FIELDS",
     "MAGNETIC_FIELDS",
+    "MAGNETIC_OBSERVER_FIELDS",
+    "MAGNETIC_SPHERICAL_FIELDS",
     "THERMODYNAMIC_FIELDS",
     "VELOCITY_FIELDS",
+    "VELOCITY_OBSERVER_FIELDS",
+    "VELOCITY_SPHERICAL_FIELDS",
 ]

@@ -11,4 +11,4 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 test "$#" -eq 0
 
-PYTHONPATH=src python -m prom3theus.cli.main invert configs/hmi_lte_subframe.yaml
+PYTHONPATH=src python -m prom3theus.cli.main invert configs/hmi_lte_dynamic.yaml

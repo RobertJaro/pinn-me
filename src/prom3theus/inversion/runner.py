@@ -62,16 +62,22 @@ def _atmosphere_config(config: InversionConfig) -> dict[str, Any]:
             geometry.outer_height_megameter,
             geometry.inner_height_megameter,
         ],
+        "line_formation_height_bounds_Mm": [
+            geometry.line_formation_outer_height_megameter,
+            geometry.inner_height_megameter,
+        ],
         "tangent_margin_m": geometry.tangent_margin_m,
         "reference_atmosphere_config": atmosphere.reference_atmosphere,
-        "temperature_log10_bounds": list(parameters.temperature.log10_bounds),
+        "upper_atmosphere_config": (
+            None
+            if atmosphere.upper_atmosphere is None
+            else atmosphere.upper_atmosphere.to_dict()
+        ),
         "temperature_log_scale": parameters.temperature.log_scale,
         "velocity_scale_m_per_s": parameters.velocity.scale_m_per_s,
         "velocity_max_m_per_s": parameters.velocity.maximum_m_per_s,
         "magnetic_scale_gauss": parameters.magnetic_field.scale_gauss,
-        "microturbulence_log10_bounds": list(parameters.microturbulence.log10_bounds),
         "microturbulence_log_scale": parameters.microturbulence.log_scale,
-        "gas_pressure_log10_bounds": list(parameters.gas_pressure.log10_bounds),
         "gas_pressure_log_scale": parameters.gas_pressure.log_scale,
         "model_config": {
             "type": network.type,
@@ -90,10 +96,15 @@ def _physics_config(config: InversionConfig) -> dict[str, Any]:
         "vector_basis_matches_spatial_coordinates": (
             physics.vector_basis_matches_spatial_coordinates
         ),
+        "upper_boundary_current_free_ramp_steps": (
+            physics.upper_boundary_current_free_ramp_steps
+        ),
+        "adiabatic_index": physics.adiabatic_index,
         "normalization": physics.normalization.to_dict(),
         "equations": physics.equations.to_dict(),
         "gravity_m_per_s2": None,
         "sampling_domain": None,
+        "upper_sampling_domain": None,
     }
 
 
@@ -141,24 +152,9 @@ def _inject_resource_contract(
     physics: dict[str, Any],
     resources: Mapping[str, Any],
 ) -> None:
-    """Bind decoder domains and gravity to the verified production tables."""
+    """Bind resource-derived physical constants to the runtime configuration."""
 
-    try:
-        bounds = resources["stic_lookup_bounds"]
-        temperature = [float(value) for value in bounds["temperature_log10_k"]]
-        pressure = [float(value) for value in bounds["gas_pressure_log10_pa"]]
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            "LTE resources do not expose valid STiC lookup bounds."
-        ) from error
-    if atmosphere["temperature_log10_bounds"] != temperature:
-        raise ValueError(
-            "Configured temperature bounds must exactly match the verified STiC table."
-        )
-    if atmosphere["gas_pressure_log10_bounds"] != pressure:
-        raise ValueError(
-            "Configured gas-pressure bounds must exactly match the verified STiC table."
-        )
+    del atmosphere
 
     gravity_equations = (
         "hydrostatic_equilibrium",
@@ -187,13 +183,21 @@ def _physics_sampling(
         "magnetohydrostatic_equilibrium",
         "momentum",
         "magnetic_divergence",
+        "radial_magnetic_energy_gradient",
         "induction",
         "continuity",
+        "adiabatic_pressure",
+    )
+    upper_volume_names = (
+        "upper_domain_microturbulence_prior",
+        "upper_domain_temperature_prior",
     )
     volume_active = any(equations[name]["enabled"] for name in volume_names)
+    upper_volume_active = any(equations[name]["enabled"] for name in upper_volume_names)
     boundary_active = any(equations[name]["enabled"] for name in BOUNDARY_EQUATIONS)
-    if not volume_active and not boundary_active:
+    if not volume_active and not upper_volume_active and not boundary_active:
         physics["sampling_domain"] = None
+        physics["upper_sampling_domain"] = None
         return None
     bounds = getattr(data_module, "observation_sampling_bounds", None)
     if bounds is None:
@@ -205,7 +209,23 @@ def _physics_sampling(
         atmosphere["shell_height_bounds_Mm"],
     )
     physics["sampling_domain"] = domain.configuration()
-    return domain.metadata()
+    line_outer, _ = atmosphere["line_formation_height_bounds_Mm"]
+    full_outer, _ = atmosphere["shell_height_bounds_Mm"]
+    upper_domain = None
+    if upper_volume_active:
+        if not full_outer > line_outer:
+            raise ValueError(
+                "Active upper-domain physics requires a non-empty height extension."
+            )
+        upper_domain = domain.with_height_bounds((line_outer, full_outer))
+        physics["upper_sampling_domain"] = upper_domain.configuration()
+    metadata = {"full_domain": domain.metadata()}
+    if upper_domain is not None:
+        metadata["upper_domain"] = upper_domain.metadata()
+    metadata["line_formation_height_bounds_Mm"] = list(
+        atmosphere["line_formation_height_bounds_Mm"]
+    )
+    return metadata
 
 
 def _logger(config: InversionConfig):
@@ -240,7 +260,7 @@ def _visualization_callback(config: InversionConfig):
     options = visualization.to_dict()
     options.pop("enabled")
     return AtmosphereVisualizationCallback(
-        config.solver.work_directory / "diagnostics",
+        config.solver.output_directory / "diagnostics",
         **options,
     )
 
@@ -248,16 +268,25 @@ def _visualization_callback(config: InversionConfig):
 def _instrument_config(
     config: InversionConfig,
     observation: Any,
-) -> tuple[dict[str, Any], float]:
+) -> tuple[dict[str, Any], float, bool]:
     instrument = config.instrument.to_dict()
-    radial_velocity = float(instrument.pop("radial_velocity_correction_m_per_s"))
+    line_of_sight_velocity = float(
+        instrument.pop("line_of_sight_velocity_correction_m_per_s")
+    )
+    optimize_line_of_sight_velocity = bool(
+        instrument.pop("optimize_line_of_sight_velocity_correction")
+    )
     for name, value in observation.instrument_options.items():
         if name in instrument and instrument[name] != value:
             raise ValueError(
                 f"Configured instrument option {name!r} conflicts with the observation."
             )
         instrument[name] = value
-    return resolve_instrument_config(instrument), radial_velocity
+    return (
+        resolve_instrument_config(instrument),
+        line_of_sight_velocity,
+        optimize_line_of_sight_velocity,
+    )
 
 
 def run_inversion(
@@ -309,9 +338,11 @@ def run_inversion(
             f"Observation {observation.observation_id!r} requires missing lines: "
             f"{sorted(missing)}."
         )
-    instrument, radial_velocity = _instrument_config(
-        config,
-        observation,
+    instrument, line_of_sight_velocity, optimize_line_of_sight_velocity = (
+        _instrument_config(
+            config,
+            observation,
+        )
     )
     run_metadata = data_module.run_metadata()
     run_metadata.update(
@@ -323,7 +354,6 @@ def run_inversion(
         }
     )
 
-    transform = config.loss.polarization_transform
     weights = config.loss.stokes_weights
     module = LTEInversionModule(
         log_tau500=log_tau500,
@@ -333,14 +363,16 @@ def run_inversion(
             "line_ids": line_ids,
         },
         instrument_config=instrument,
-        normalization_config={
-            "asinh_alphas": {
-                "Q": transform.q_alpha,
-                "U": transform.u_alpha,
-                "V": transform.v_alpha,
-            }
+        stokes_loss_config={
+            "type": config.loss.type,
+            "stokes_sigmas": {
+                "I": config.loss.stokes_sigmas.i,
+                "Q": config.loss.stokes_sigmas.q,
+                "U": config.loss.stokes_sigmas.u,
+                "V": config.loss.stokes_sigmas.v,
+            },
+            "huber_delta": config.loss.huber_delta,
         },
-        stokes_loss_config={"type": config.loss.type},
         weight_config={
             "I": weights.i,
             "Q": weights.q,
@@ -359,7 +391,10 @@ def run_inversion(
         run_metadata=run_metadata,
         observation_id=observation.observation_id,
         velocity_synthesis_mode=str(observation.velocity_synthesis_mode),
-        instrument_radial_velocity_correction_m_per_s=radial_velocity,
+        instrument_line_of_sight_velocity_correction_m_per_s=line_of_sight_velocity,
+        optimize_instrument_line_of_sight_velocity_correction=(
+            optimize_line_of_sight_velocity
+        ),
         vector_regularization_config=config.training.vector_regularization.to_dict(),
     ).float()
 
@@ -384,7 +419,7 @@ def run_inversion(
     if logger is not False:
         logger.log_hyperparams(config.to_dict())
     runtime = config.runtime
-    trainer = Trainer(
+    trainer_options = dict(
         logger=logger,
         callbacks=callbacks,
         max_epochs=runtime.max_epochs,
@@ -395,10 +430,12 @@ def run_inversion(
         num_sanity_val_steps=0,
         log_every_n_steps=runtime.log_every_n_steps,
         check_val_every_n_epoch=config.diagnostics.validation_every_n_epochs,
-        val_check_interval=runtime.validation_check_interval_steps,
         inference_mode=False,
         enable_checkpointing=False,
     )
+    if runtime.validation_check_interval_steps is not None:
+        trainer_options["val_check_interval"] = runtime.validation_check_interval_steps
+    trainer = Trainer(**trainer_options)
     trainer.fit(module, datamodule=data_module)
 
     observation_store = Path(data_module.observation_store_path).resolve()

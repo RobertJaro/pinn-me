@@ -36,6 +36,20 @@ def _build_parser() -> argparse.ArgumentParser:
     export.add_argument("--batch-size", type=int, default=4096)
     export.add_argument("--include-stokes", action="store_true")
     export.add_argument("--stokes-batch-size", type=int, default=16)
+    export.add_argument(
+        "--include-full-shell",
+        action="store_true",
+        help=(
+            "also export radial Carrington columns over the complete configured "
+            "geometric-height shell"
+        ),
+    )
+    export.add_argument(
+        "--full-shell-samples",
+        type=int,
+        default=101,
+        help="outer-to-inner geometric-height samples for --include-full-shell",
+    )
     export.add_argument("--device", default="auto")
     export.add_argument(
         "--storage-dtype", choices=("float32", "float64"), default="float32"
@@ -87,17 +101,15 @@ def _build_parser() -> argparse.ArgumentParser:
     hmi_subframes.add_argument("--height-pixels", type=int, required=True)
     hmi_subframes.add_argument("--overwrite", action="store_true")
     hmi = prepare_commands.add_parser(
-        "hmi-responses", help="prepare offline HMI filter responses for FITS inputs"
+        "hmi-responses",
+        help=(
+            "resolve assigned phase maps from JSOC and prepare offline HMI filter "
+            "responses for FITS inputs"
+        ),
     )
     hmi.add_argument("inputs", nargs="+")
     hmi.add_argument("--output", type=Path, required=True)
     hmi.add_argument("--email", default=os.environ.get("JSOC_EMAIL"))
-    hmi.add_argument(
-        "--phase-map-fsn",
-        type=int,
-        required=True,
-        help="authoritative hmi.phasemaps_extended FSN for these acquisitions",
-    )
     hmi.add_argument("--overwrite", action="store_true")
 
     recovery = commands.add_parser(
@@ -143,6 +155,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             batch_size=args.batch_size,
             include_stokes=args.include_stokes,
             stokes_batch_size=args.stokes_batch_size,
+            include_full_shell=args.include_full_shell,
+            full_shell_samples=args.full_shell_samples,
             storage_dtype=args.storage_dtype,
             device=args.device,
         )
@@ -201,7 +215,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             inputs=args.inputs,
             output_directory=args.output,
             email=args.email,
-            phase_map_fsn=args.phase_map_fsn,
             overwrite=args.overwrite,
         )
         print(result)

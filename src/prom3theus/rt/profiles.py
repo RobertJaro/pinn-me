@@ -96,7 +96,7 @@ class VoigtFaraday(nn.Module):
         If ``doppler_width`` is omitted the profiles are dimensionless. When
         supplied, the returned profiles are divided by it, so their units are
         the reciprocal of the supplied width. Production callers construct a
-        strictly positive width from bounded atmospheric variables.
+        strictly positive width from positive atmospheric variables.
         """
 
         absorption, dispersion = self.dimensionless(frequency_offset, damping)

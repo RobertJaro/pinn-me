@@ -25,6 +25,7 @@ from prom3theus.core import (
     SPEED_OF_LIGHT,
 )
 from prom3theus.resources import verify_manifest_resource
+from ._interpolation import clamped_catmull_rom, uniform_axis_coordinate
 from .atomic import AtomicDatabase, SpectralLine
 from .wavelength import air_to_vacuum_angstrom
 
@@ -62,9 +63,10 @@ def _open_text(resource):
 
 @dataclass(frozen=True)
 class STICLookupState:
-    """Reusable cubic thermodynamic interpolation coordinates."""
+    """Reusable edge-saturated cubic thermodynamic interpolation state."""
 
     temperature: torch.Tensor
+    gas_pressure: torch.Tensor
     t_indices: torch.Tensor
     p_indices: torch.Tensor
     t_weight: torch.Tensor
@@ -315,7 +317,14 @@ class ContinuumOpacity(nn.Module):
         temperature: torch.Tensor,
         gas_pressure: torch.Tensor,
     ) -> STICLookupState:
-        """Prepare differentiable `(T, P)` coordinates once per atmosphere."""
+        """Prepare edge-saturated `(T, P)` coordinates once per atmosphere.
+
+        The primary atmosphere remains unbounded.  Only the effective state seen
+        by the finite STiC radiative table is saturated at its nearest endpoint.
+        Finite positive inputs outside the table are therefore a defined constant
+        continuation rather than an exception; invalid physical inputs remain
+        hard errors.
+        """
 
         if temperature.dtype not in (torch.float32, torch.float64):
             raise TypeError("STiC lookup supports float32 and float64 tensors only")
@@ -340,30 +349,56 @@ class ContinuumOpacity(nn.Module):
         log_pressure = torch.log10(gas_pressure)
         t_axis = self.stic_log_temperature.to(temperature)
         p_axis = self.stic_log_pressure.to(temperature)
-        tolerance = 16.0 * torch.finfo(temperature.dtype).eps
-        if torch.any(log_temperature < t_axis[0] - tolerance) or torch.any(
-            log_temperature > t_axis[-1] + tolerance
-        ):
-            raise ValueError(
-                "temperature lies outside the prepared STiC continuum table"
-            )
-        if torch.any(log_pressure < p_axis[0] - tolerance) or torch.any(
-            log_pressure > p_axis[-1] + tolerance
-        ):
-            raise ValueError(
-                "gas_pressure lies outside the prepared STiC continuum table"
-            )
-        t_coordinate = (log_temperature - t_axis[0]) / (t_axis[1] - t_axis[0])
-        p_coordinate = (log_pressure - p_axis[0]) / (p_axis[1] - p_axis[0])
+        lookup_log_temperature = log_temperature.clamp(t_axis[0], t_axis[-1])
+        lookup_log_pressure = log_pressure.clamp(p_axis[0], p_axis[-1])
+        t_coordinate = uniform_axis_coordinate(lookup_log_temperature, t_axis)
+        p_coordinate = uniform_axis_coordinate(lookup_log_pressure, p_axis)
         t_lower = torch.floor(t_coordinate).long().clamp(0, t_axis.numel() - 2)
         p_lower = torch.floor(p_coordinate).long().clamp(0, p_axis.numel() - 2)
         offsets = self._stic_cubic_offsets.to(device=temperature.device)
+        ten = temperature.new_tensor(10.0)
+        lookup_temperature = temperature.clamp(
+            torch.pow(ten, t_axis[0]),
+            torch.pow(ten, t_axis[-1]),
+        )
+        lookup_pressure = gas_pressure.clamp(
+            torch.pow(ten, p_axis[0]),
+            torch.pow(ten, p_axis[-1]),
+        )
         return STICLookupState(
-            temperature=temperature,
+            temperature=lookup_temperature,
+            gas_pressure=lookup_pressure,
             t_indices=(t_lower[..., None] + offsets).clamp(0, t_axis.numel() - 1),
             p_indices=(p_lower[..., None] + offsets).clamp(0, p_axis.numel() - 1),
             t_weight=(t_coordinate - t_lower).clamp(0.0, 1.0),
             p_weight=(p_coordinate - p_lower).clamp(0.0, 1.0),
+        )
+
+    def stic_support_residuals(
+        self,
+        temperature: torch.Tensor,
+        gas_pressure: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return signed log10 distances outside the finite STiC table.
+
+        Values are zero inside the table, negative below its lower endpoint, and
+        positive above its upper endpoint.  The residuals are evaluated on the
+        unsaturated model state so training can retain an honest return gradient
+        even though the LTE observation operator is constant outside support.
+        """
+
+        self.prepare_stic_lookup(temperature, gas_pressure)
+        temperature, gas_pressure = torch.broadcast_tensors(
+            temperature,
+            gas_pressure,
+        )
+        log_temperature = torch.log10(temperature)
+        log_pressure = torch.log10(gas_pressure)
+        t_axis = self.stic_log_temperature.to(temperature)
+        p_axis = self.stic_log_pressure.to(temperature)
+        return (
+            log_temperature - log_temperature.clamp(t_axis[0], t_axis[-1]),
+            log_pressure - log_pressure.clamp(p_axis[0], p_axis[-1]),
         )
 
     def _interpolate_stic_log_table(
@@ -385,25 +420,24 @@ class ContinuumOpacity(nn.Module):
         trailing_dimensions = values.ndim - 2
         interpolation_dimension = -(trailing_dimensions + 1)
 
-        def cubic(samples: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-            p0, p1, p2, p3 = samples.unbind(dim=interpolation_dimension)
-            while weight.ndim < p1.ndim:
-                weight = weight[..., None]
-            return p1 + 0.5 * weight * (
-                p2
-                - p0
-                + weight
-                * (
-                    2.0 * p0
-                    - 5.0 * p1
-                    + 4.0 * p2
-                    - p3
-                    + weight * (3.0 * (p1 - p2) + p3 - p0)
-                )
+        def cubic(
+            samples: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            return clamped_catmull_rom(
+                samples,
+                weight,
+                dimension=interpolation_dimension,
             )
 
-        pressure_interpolated = cubic(neighborhood, state.p_weight)
-        return cubic(pressure_interpolated, state.t_weight)
+        pressure_interpolated = cubic(
+            neighborhood,
+            state.p_weight,
+        )
+        return cubic(
+            pressure_interpolated,
+            state.t_weight,
+        )
 
     def _validate_stic_wavelengths(self, wavelength: torch.Tensor) -> None:
         if not self.validated_wavelength_domains_angstrom:
@@ -822,6 +856,18 @@ class ContinuumOpacity(nn.Module):
 
         return {
             "lookup_units": dict(STIC_LOOKUP_UNITS),
+            "thermodynamic_lookup_policy": (
+                "finite positive model states are saturated at the nearest STiC "
+                "temperature and gas-pressure endpoint for LTE synthesis"
+            ),
+            "log10_temperature_bounds_k": [
+                float(self.stic_log_temperature[0]),
+                float(self.stic_log_temperature[-1]),
+            ],
+            "log10_gas_pressure_bounds_pa": [
+                float(self.stic_log_pressure[0]),
+                float(self.stic_log_pressure[-1]),
+            ],
             "stic_table_schema_version": self.stic_table_schema_version,
             "stic_table_sha256": self.stic_table_sha256,
             "reference_solver": self.reference_solver,

@@ -145,7 +145,7 @@ class ForwardRuntime:
     synthesis_wavelength_angstrom: torch.Tensor
     radiance_scale: torch.Tensor | float
     carrington_angular_velocity_rad_per_s: torch.Tensor | float
-    instrument_radial_velocity_correction_m_per_s: torch.Tensor | float
+    instrument_line_of_sight_velocity_correction_m_per_s: torch.Tensor | float
 
 
 class LTEForwardComposition:
@@ -429,6 +429,7 @@ class LTEForwardComposition:
         removed_solar_los_velocity_m_per_s: torch.Tensor | None = None,
         randomize_depth: bool = False,
         depth_grid: torch.Tensor | None = None,
+        return_atmosphere: bool = False,
         return_details: bool = False,
         instrument_response: Mapping[str, torch.Tensor] | None = None,
     ) -> dict[str, Any]:
@@ -480,36 +481,43 @@ class LTEForwardComposition:
         velocity_field_inertial_cartesian = (
             sampled_atmosphere.velocity_field + rotation_velocity_cartesian
         )
-        radial_unit = ray_trace.position_m / torch.linalg.vector_norm(
-            ray_trace.position_m,
-            dim=-1,
-            keepdim=True,
-        )
-        radial_velocity_correction = torch.as_tensor(
-            runtime.instrument_radial_velocity_correction_m_per_s
+        line_of_sight_velocity_correction = torch.as_tensor(
+            runtime.instrument_line_of_sight_velocity_correction_m_per_s
         ).to(sampled_atmosphere.velocity_field)
-        if radial_velocity_correction.numel() != 1:
+        if line_of_sight_velocity_correction.numel() != 1:
             raise ValueError(
-                "instrument_radial_velocity_correction_m_per_s must be scalar."
+                "instrument_line_of_sight_velocity_correction_m_per_s must be scalar."
             )
-        if not torch.isfinite(radial_velocity_correction).all() or torch.any(
-            radial_velocity_correction.abs() >= SPEED_OF_LIGHT
+        if not torch.isfinite(line_of_sight_velocity_correction).all() or torch.any(
+            line_of_sight_velocity_correction.abs() >= SPEED_OF_LIGHT
         ):
             raise ValueError(
-                "instrument_radial_velocity_correction_m_per_s must be finite "
+                "instrument_line_of_sight_velocity_correction_m_per_s must be finite "
                 "and subluminal."
             )
-        radial_velocity_correction_cartesian = radial_unit * radial_velocity_correction
-        velocity_field_synthesis_cartesian = (
-            velocity_field_inertial_cartesian + radial_velocity_correction_cartesian
-        )
         magnetic_field_observer = project_vectors_to_stokes(
             sampled_atmosphere.magnetic_field,
             stokes_basis,
         )
-        velocity_field_synthesis_observer = project_vectors_to_stokes(
-            velocity_field_synthesis_cartesian,
+        velocity_field_corotating_observer = project_vectors_to_stokes(
+            sampled_atmosphere.velocity_field,
             stokes_basis,
+        )
+        velocity_field_inertial_observer = project_vectors_to_stokes(
+            velocity_field_inertial_cartesian,
+            stokes_basis,
+        )
+        # This fitted zero point is positive-redshift LOS velocity.  The third
+        # Stokes-basis component points toward the observer, so apply it with
+        # the opposite sign after projection.  It must never be interpreted as
+        # a radial Cartesian flow or acquire a center-to-limb mu factor.
+        velocity_field_synthesis_observer = torch.cat(
+            (
+                velocity_field_inertial_observer[..., :2],
+                velocity_field_inertial_observer[..., 2:]
+                - line_of_sight_velocity_correction,
+            ),
+            dim=-1,
         )
         velocity_field_observer = velocity_field_synthesis_observer
         if observer_los_velocity_m_per_s is not None:
@@ -556,12 +564,10 @@ class LTEForwardComposition:
             instrument_response,
         )
         result: dict[str, Any] = {"stokes": sampled_stokes}
+        if return_atmosphere:
+            result["atmosphere"] = sampled_atmosphere
         if not return_details:
             return result
-        velocity_field_inertial_observer = project_vectors_to_stokes(
-            velocity_field_inertial_cartesian,
-            stokes_basis,
-        )
         spherical_coordinates = cartesian_to_spherical(
             ray_trace.position_m,
             torch,
@@ -573,11 +579,6 @@ class LTEForwardComposition:
         )
         velocity_field_inertial_spherical = project_cartesian_to_spherical(
             velocity_field_inertial_cartesian,
-            spherical_coordinates,
-            torch,
-        )
-        velocity_field_synthesis_spherical = project_cartesian_to_spherical(
-            velocity_field_synthesis_cartesian,
             spherical_coordinates,
             torch,
         )
@@ -594,19 +595,13 @@ class LTEForwardComposition:
                 "velocity_field_inertial_spherical": (
                     velocity_field_inertial_spherical
                 ),
-                "velocity_field_synthesis_spherical": (
-                    velocity_field_synthesis_spherical
-                ),
-                "instrument_radial_velocity_correction_m_per_s": (
-                    runtime.instrument_radial_velocity_correction_m_per_s
-                ),
-                "instrument_radial_velocity_correction_cartesian": (
-                    radial_velocity_correction_cartesian
-                ),
-                "velocity_field_synthesis_cartesian": (
-                    velocity_field_synthesis_cartesian
+                "instrument_line_of_sight_velocity_correction_m_per_s": (
+                    runtime.instrument_line_of_sight_velocity_correction_m_per_s
                 ),
                 "magnetic_field_observer": magnetic_field_observer,
+                "velocity_field_corotating_observer": (
+                    velocity_field_corotating_observer
+                ),
                 "velocity_field_inertial_observer": (velocity_field_inertial_observer),
                 "velocity_field_synthesis_observer": (
                     velocity_field_synthesis_observer

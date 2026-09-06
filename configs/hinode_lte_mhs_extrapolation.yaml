@@ -1,16 +1,18 @@
-# Static LTE inversion of the full Hinode/SOT-SP raster 20110214_000004.
+# Static Hinode/SOT-SP LTE inversion with an MHS upper-atmosphere extension.
 #
-# These are the literal operational paths from the preserved run. The input
-# directory must contain the prepared FITS columns for this raster directly.
+# One shared PINN represents the complete -0.1--20.0 Mm shell. LTE line
+# formation is evaluated only below 1.5 Mm; full-domain MHS/divB collocation,
+# upper-domain thermodynamic priors and transmissive/external-pressure/current-free
+# top conditions
+# constrain the spectrally invisible extension.
 schema_version: 2
 
 solver:
   kind: lte
-  output_directory: /glade/work/rjarolim/lte/hinode_mhs_20110214_000004_v03
-  work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_20110214_000004_v03
+  output_directory: /glade/work/rjarolim/lte/hinode_mhs_extrapolation_v01
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_extrapolation_v01
 
 resources:
-  # Common LTE atomic tables plus the complete Hinode/SP instrument bundle.
   bundle: packaged
 
 observation:
@@ -44,12 +46,19 @@ atmosphere:
   geometry:
     type: spherical_shell
     time_dependent: false
-    height_input_scale_m: 1.0e+6
-    outer_height_megameter: 1.5
+    height_input_scale_m: 1.0e+7
+    # Full PINN/physics domain top.
+    outer_height_megameter: 20.0
+    # LTE rays retain the original, contribution-relevant atmosphere only.
     line_formation_outer_height_megameter: 1.5
     inner_height_megameter: -0.1
     tangent_margin_m: 1000.0
   reference_atmosphere: falc_82
+  upper_atmosphere:
+    type: hydrostatic_corona
+    transition_region_top_megameter: 2.5
+    coronal_temperature_k: 1.0e+6
+    reference_grid_points: 2048
   parameters:
     temperature:
       log_scale: 0.1
@@ -61,6 +70,8 @@ atmosphere:
     microturbulence:
       log_scale: 0.2
     gas_pressure:
+      # The hydrostatic FALC-to-corona profile is the zero-residual reference;
+      # the learned natural-log pressure residual is unbounded.
       log_scale: 0.5
   network:
     type: mlp
@@ -69,9 +80,8 @@ atmosphere:
     activation: silu
     encoding:
       type: fourier
-      # Three static Carrington spatial coordinates; there is no time input.
       num_frequencies: [64, 64, 64]
-      max_frequencies: [8, 8, 8]
+      max_frequencies: [8, 8, 64]
       include_input: true
 
 synthesis:
@@ -87,6 +97,8 @@ instrument:
     truncate_sigma: 4.0
 
 training:
+  # This grid and its opacity-guided refinement apply only to LTE rays in the
+  # lower line-formation domain.
   depth_sampling:
     sample_count: 25
     coarse_to_fine:
@@ -100,17 +112,22 @@ training:
     decay_steps: 0
   physics:
     vector_basis_matches_spatial_coordinates: true
-    upper_boundary_current_free_ramp_steps: 0
+    # Do not let the current-free top condition dominate before the lower
+    # atmosphere has begun resolving the Stokes ambiguity.
+    upper_boundary_current_free_ramp_steps: 10000
     collocation:
-      volume_points_per_step: 1024
-      height_layers_per_step: 32
-      upper_volume_points_per_step: 0
-      upper_height_layers_per_step: 0
+      # MHS and divB span the complete -0.1--20.0 Mm domain.
+      volume_points_per_step: 2048
+      height_layers_per_step: 64
+      # Upper-domain priors use a separate 1.5--20.0 Mm sampler.
+      upper_volume_points_per_step: 1024
+      upper_height_layers_per_step: 32
+      # J=0 and hydrostatically integrated gas pressure apply only at 20 Mm.
       upper_boundary_points_per_step: 256
       side_boundary_points_per_step: 0
       side_height_layers_per_step: 0
-      validation_height_layers: 8
-      validation_upper_height_layers: 0
+      validation_height_layers: 12
+      validation_upper_height_layers: 6
       validation_points_per_height: 32
     normalization:
       length_m: 1.0e+6
@@ -119,16 +136,17 @@ training:
       velocity_scale_m_per_s: 1000.0
     equations:
       hydrostatic_equilibrium: {enabled: false, weight: 0.0}
-      magnetohydrostatic_equilibrium: {enabled: true, weight: 1.0e-1}
+      magnetohydrostatic_equilibrium: {enabled: true, weight: 1.0e-3}
       momentum: {enabled: false, weight: 0.0}
-      magnetic_divergence: {enabled: true, weight: 1.0e-1}
+      magnetic_divergence: {enabled: true, weight: 1.0e-3}
       radial_magnetic_energy_gradient: {enabled: false, weight: 0.0}
       induction: {enabled: false, weight: 0.0}
       continuity: {enabled: false, weight: 0.0}
-      upper_domain_microturbulence_prior: {enabled: false, weight: 0.0}
-      upper_boundary_open_velocity: {enabled: false, weight: 0.0}
+      upper_boundary_open_velocity: {enabled: true, weight: 1.0e-5}
       side_boundary_open_velocity: {enabled: false, weight: 0.0}
-      upper_boundary_current_free: {enabled: false, weight: 0.0}
+      upper_domain_microturbulence_prior: {enabled: true, weight: 1.0e-5}
+      upper_domain_temperature_prior: {enabled: true, weight: 1.0e-5}
+      upper_boundary_current_free: {enabled: true, weight: 1.0e-3}
       side_boundary_current_free: {enabled: false, weight: 0.0}
       upper_boundary_gas_pressure_prior: {enabled: true, weight: 1.0e-4}
   learning_rate:
@@ -160,7 +178,7 @@ diagnostics:
       layer_count: 6
       longitude_points: 256
       latitude_points: 256
-      radial_points: 192
+      radial_points: 256
     dpi: 220
     meridional_slice:
       enabled: true
@@ -176,6 +194,6 @@ logging:
   type: wandb
   project: PROM3THEUS
   tags:
-    [hinode, sot-sp, lte, mhs, magnetohydrostatic-equilibrium, spherical-shell,
+    [hinode, sot-sp, lte, mhs, extrapolation, current-free-top, spherical-shell,
      carrington, full-resolution, "20110214_000004"]
-  run_name: Hinode LTE MHS 20110214_000004
+  run_name: Hinode LTE MHS extrapolation 20110214_000004

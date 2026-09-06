@@ -11,10 +11,10 @@ from torch import nn
 from prom3theus.core import SPEED_OF_LIGHT
 from .atomic import AtomicDatabase, SpectralLine
 from .opacity import (
-    ContinuumOpacity,
     STICSpectralState,
     planck_lambda,
 )
+from .plasma import SolarPlasmaTable
 from .polarization import PolarizedLineOpacity, PropagationDiagnostics
 from .transfer import (
     GeometricHeightPath,
@@ -33,7 +33,10 @@ if TYPE_CHECKING:
 class SynthesisDiagnostics:
     """Depth-dependent state returned by an opt-in diagnostic synthesis."""
 
+    model_temperature: torch.Tensor
     gas_pressure: torch.Tensor
+    lte_temperature: torch.Tensor
+    lte_gas_pressure: torch.Tensor
     reference_thermodynamics: dict[str, torch.Tensor]
     alpha500: torch.Tensor
     continuum_extinction: torch.Tensor
@@ -57,7 +60,7 @@ class LTESynthesizer(nn.Module):
         lines: Sequence[SpectralLine] | None = None,
         line_ids: Sequence[str] | None = None,
         wavelength_window_angstrom: tuple[float, float] | None = None,
-        continuum_opacity: ContinuumOpacity | None = None,
+        continuum_opacity: SolarPlasmaTable | None = None,
         formal_solver: nn.Module | None = None,
         faddeeva_coefficients: int = 32,
     ):
@@ -70,7 +73,7 @@ class LTESynthesizer(nn.Module):
                 "Pass exactly one of lines, line_ids, or wavelength_window_angstrom."
             )
         self.atomic = atomic_database or AtomicDatabase()
-        self.continuum_opacity = continuum_opacity or ContinuumOpacity(self.atomic)
+        self.continuum_opacity = continuum_opacity or SolarPlasmaTable(self.atomic)
         self.formal_solver = formal_solver or PolarizedFormalSolver()
 
         if lines is None:
@@ -282,8 +285,8 @@ class LTESynthesizer(nn.Module):
                 "path must be OpticalDepthPath, GeometricHeightPath, or RayDistancePath."
             )
         grid = self._atmosphere_grid(atmosphere)
-        temperature = atmosphere.temperature
-        if temperature.dtype not in (torch.float32, torch.float64):
+        model_temperature = atmosphere.temperature
+        if model_temperature.dtype not in (torch.float32, torch.float64):
             raise TypeError(
                 "LTE synthesis supports float32 and float64 atmospheres only"
             )
@@ -292,24 +295,26 @@ class LTESynthesizer(nn.Module):
                 raise RuntimeError(
                     "prepare_wavelength_grid() must be called before synthesis without an explicit grid."
                 )
-            wavelength = self._prepared_wavelength_air_angstrom.to(temperature)
+            wavelength = self._prepared_wavelength_air_angstrom.to(model_temperature)
             wavelength_vacuum = self._prepared_wavelength_vacuum_angstrom.to(
-                temperature
+                model_temperature
             )
             continuum_wavelength = (
-                self._prepared_continuum_wavelength_vacuum_angstrom.to(temperature)
+                self._prepared_continuum_wavelength_vacuum_angstrom.to(
+                    model_temperature
+                )
             )
             spectral_state = STICSpectralState(
                 self._prepared_stic_lower_indices,
                 self._prepared_stic_upper_indices,
-                self._prepared_stic_weight.to(temperature),
+                self._prepared_stic_weight.to(model_temperature),
             )
-            frequency_hz = self._prepared_frequency_hz.to(temperature)
+            frequency_hz = self._prepared_frequency_hz.to(model_temperature)
         else:
             wavelength = torch.as_tensor(
                 wavelength_angstrom,
-                dtype=temperature.dtype,
-                device=temperature.device,
+                dtype=model_temperature.dtype,
+                device=model_temperature.device,
             )
             self._validate_wavelength_grid(wavelength)
             wavelength_vacuum = air_to_vacuum_angstrom(wavelength)
@@ -318,15 +323,15 @@ class LTESynthesizer(nn.Module):
             )
             spectral_state = None
             frequency_hz = None
-        gas_pressure = self._gas_pressure(atmosphere, grid)
+        model_gas_pressure = self._gas_pressure(atmosphere, grid)
         if (
-            not torch.isfinite(temperature).all()
-            or not torch.isfinite(gas_pressure).all()
+            not torch.isfinite(model_temperature).all()
+            or not torch.isfinite(model_gas_pressure).all()
             or not torch.isfinite(atmosphere.microturbulence).all()
             or not torch.isfinite(atmosphere.velocity_field).all()
             or not torch.isfinite(atmosphere.magnetic_field).all()
-            or torch.any(temperature <= 0)
-            or torch.any(gas_pressure <= 0)
+            or torch.any(model_temperature <= 0)
+            or torch.any(model_gas_pressure <= 0)
             or torch.any(atmosphere.microturbulence < 0)
             or torch.any(atmosphere.v_los.abs() >= SPEED_OF_LIGHT)
         ):
@@ -334,15 +339,20 @@ class LTESynthesizer(nn.Module):
                 "LTE atmospheric fields must be finite, temperature and gas pressure "
                 "must be positive, microturbulence must be non-negative, and |v_los| < c."
             )
-        lookup_state = self.continuum_opacity.prepare_stic_lookup(
-            temperature,
-            gas_pressure,
+        plasma_state = self.continuum_opacity.prepare_plasma_state(
+            model_temperature,
+            model_gas_pressure,
         )
+        # Every path uses the unrestricted atmosphere temperature and pressure.
+        # Only the finite photospheric opacity/population contribution is faded
+        # by the shared STiC/CHIANTI/ideal plasma provider.
+        temperature = plasma_state.temperature
+        gas_pressure = plasma_state.gas_pressure
         continuum_and_reference = self.continuum_opacity(
             continuum_wavelength,
             temperature,
             gas_pressure,
-            lookup_state,
+            plasma_state,
             spectral_state=spectral_state,
         )
         continuum_extinction = continuum_and_reference[..., :-1]
@@ -351,7 +361,7 @@ class LTESynthesizer(nn.Module):
         line_thermodynamics = self.continuum_opacity.reference_line_thermodynamics(
             temperature,
             gas_pressure,
-            lookup_state,
+            plasma_state,
             include_electron_density=self.requires_stark_electron_density,
         )
         damping_electron_density = line_thermodynamics.get("electron_density")
@@ -361,7 +371,7 @@ class LTESynthesizer(nn.Module):
                 self.lines,
                 temperature,
                 gas_pressure,
-                lookup_state,
+                plasma_state,
                 fe_i_population_over_partition=line_thermodynamics[
                     "fe_i_population_over_partition"
                 ],
@@ -409,15 +419,18 @@ class LTESynthesizer(nn.Module):
         if not return_diagnostics:
             return stokes
         diagnostics = SynthesisDiagnostics(
-            gas_pressure=gas_pressure,
+            model_temperature=model_temperature,
+            gas_pressure=model_gas_pressure,
+            lte_temperature=temperature,
+            lte_gas_pressure=gas_pressure,
             reference_thermodynamics={
                 **self.continuum_opacity.reference_thermodynamics(
-                    temperature, gas_pressure, lookup_state
+                    temperature, gas_pressure, plasma_state
                 ),
                 "hydrogen_neutral": damping_hydrogen_neutral,
                 "fe_i_population_over_partition": (
                     self.continuum_opacity.reference_fe_i_population_over_partition(
-                        temperature, gas_pressure, lookup_state
+                        temperature, gas_pressure, plasma_state
                     )
                 ),
             },
@@ -525,14 +538,16 @@ class LTESynthesizer(nn.Module):
                 ),
             },
             "pressure_source": "supplied atmosphere (no iterative force-balance solve)",
-            "thermodynamic_source": "pinned offline-generated STiC/Wittmann lookup",
+            "thermodynamic_source": (
+                "combined STiC, CHIANTI-equilibrium, and fully ionized ideal closure"
+            ),
             "continuum_lookup": self.continuum_opacity.metadata(),
             "thermodynamic_roles": {
-                "stic_wittmann": (
-                    "total continuum extinction, mass density for the configured force balance, "
-                    "electron density for Stark broadening, physical neutral atomic-H "
-                    "density for ABO broadening, n(Fe I)/U(Fe I) for LTE lower-level "
-                    "populations, and the FALC reference stratification and gravity"
+                "solar_plasma_table": (
+                    "STiC photospheric continuum and line reservoirs with a C1 hot "
+                    "fade; CHIANTI/ideal mass and electron densities shared with force "
+                    "balance; Thomson scattering after the photospheric contribution "
+                    "vanishes; and the FALC reference stratification and gravity"
                 ),
             },
         }

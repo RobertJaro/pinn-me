@@ -1,4 +1,4 @@
-"""HMI response preparation uses an explicit phase-map identity only."""
+"""HMI response preparation resolves phase maps from definitive records."""
 
 from __future__ import annotations
 
@@ -66,8 +66,15 @@ class _Client:
     def __init__(self):
         self.queries = []
 
-    def query(self, record, *, key, seg):
+    def query(self, record, *, key, seg=None):
         self.queries.append((record, key, seg))
+        if record.startswith("hmi.B_720s["):
+            record_time = record.removeprefix("hmi.B_720s[").removesuffix("]")
+            fsn = {
+                "2024.03.24_00:00:00_TAI": 4242,
+                "2024.03.24_00:12:00_TAI": 5252,
+            }.get(record_time, 4242)
+            return _Frame([{"T_REC": record_time, "INVPHMAP": fsn}])
         keys = _Frame(
             [
                 {
@@ -130,7 +137,7 @@ def test_transmission_metadata_serialization_is_exact_and_finite(tmp_path):
         )
 
 
-def test_preparation_uses_explicit_phase_map_for_each_acquisition_camera(
+def test_preparation_queries_phase_map_assignment_for_each_acquisition(
     tmp_path, monkeypatch
 ):
     acquisitions = [
@@ -186,28 +193,33 @@ def test_preparation_uses_explicit_phase_map_for_each_acquisition_camera(
         [tmp_path / "unused-input"],
         tmp_path / "responses",
         "scientist@example.test",
-        phase_map_fsn=4242,
         client=client,
     )
 
     manifest = json.loads(manifest_path.read_text())
     assert set(manifest["profiles"]) == {
         "INVPHMAP=4242|HCAMID=2",
-        "INVPHMAP=4242|HCAMID=3",
+        "INVPHMAP=5252|HCAMID=3",
     }
     assert {entry["profile"] for entry in manifest["acquisitions"].values()} == set(
         manifest["profiles"]
     )
-    assert {entry["phase_map_fsn"] for entry in written} == {4242}
+    assert {entry["phase_map_fsn"] for entry in written} == {4242, 5252}
     assert all(
         entry["sha256"] == sha256_file(manifest_path.parent / entry["file"])
         for entry in manifest["profiles"].values()
     )
     assert {entry["HCAMID"] for entry in written} == {2, 3}
     assert [record for record, _, _ in client.queries] == [
+        "hmi.B_720s[2024.03.24_00:00:00_TAI]",
+        "hmi.B_720s[2024.03.24_00:12:00_TAI]",
         "hmi.phasemaps_extended[4242]",
-        "hmi.phasemaps_extended[4242]",
+        "hmi.phasemaps_extended[5252]",
     ]
+    assert manifest["phase_map_assignment_series"] == "hmi.B_720s"
+    assert {
+        entry["phase_map_fsn"] for entry in manifest["acquisitions"].values()
+    } == {4242, 5252}
 
 
 def test_detune_sequence_times_do_not_limit_phase_map_observation_time():
@@ -222,6 +234,18 @@ def test_detune_sequence_times_do_not_limit_phase_map_observation_time():
     assert metadata["T_REC"] == "2023.10.10_19:26:26_TAI"
     assert metadata["T_STOP"] == "2023.10.10_19:27:22_TAI"
     assert metadata["observation_time"] == "2024.03.24_00:59:58_TAI"
+
+
+def test_phase_map_assignment_is_read_from_the_matching_definitive_record():
+    assignment = preparation.resolve_hmi_phase_map_assignment(
+        _Client(), "2024.03.24_00:12:00_TAI"
+    )
+
+    assert assignment == {
+        "record": "hmi.B_720s[2024.03.24_00:12:00_TAI]",
+        "record_time": "2024.03.24_00:12:00_TAI",
+        "phase_map_fsn": 5252,
+    }
 
 
 def test_response_directory_requires_explicit_atomic_replacement(tmp_path, monkeypatch):
@@ -240,7 +264,6 @@ def test_response_directory_requires_explicit_atomic_replacement(tmp_path, monke
             [tmp_path / "unused-input"],
             output,
             "scientist@example.test",
-            phase_map_fsn=4242,
             client=_Client(),
         )
     assert marker.read_text() == "preserve"
@@ -269,7 +292,6 @@ def test_response_output_must_not_contain_source_fits(tmp_path, monkeypatch):
             [source],
             output,
             "scientist@example.test",
-            phase_map_fsn=4242,
             overwrite=True,
             client=_Client(),
         )

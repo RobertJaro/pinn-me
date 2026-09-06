@@ -20,7 +20,7 @@ def test_visualization_configuration_is_strict(tmp_path):
         ray_sampling={"batch_size": 8, "max_pixels": 16, "max_profile_samples": 4},
         slice_sampling={
             "batch_size": 8,
-            "layer_count": 2,
+            "layer_count": 3,
             "longitude_points": 2,
             "latitude_points": 2,
             "radial_points": 2,

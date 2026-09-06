@@ -66,6 +66,16 @@
       "sha256": "1332b2b9a10c390171dac6a7cc47d4d3e4590d89d9f122124a9b971125ad8550",
       "filename": "stic_18cda77_fts_disk_center.idlsave"
     },
+    "chianti_ioneq_v11_0_2": {
+      "url": "https://sohoftp.nascom.nasa.gov/solarsoft/packages/chianti/dbase/ioneq/chianti.ioneq",
+      "sha256": "706029c824704ab727c40570a8709bae42bf69745db2fa5cd54d5b8b12bc41db",
+      "filename": "chianti_11.0.2_chianti.ioneq"
+    },
+    "chianti_database_version_11_0_2": {
+      "url": "https://sohoftp.nascom.nasa.gov/solarsoft/packages/chianti/dbase/VERSION",
+      "sha256": "da359533575a52b213dddd1b0ba267aa1f20855443bc00906eb0fa1b6cd2cc1f",
+      "filename": "chianti_11.0.2_VERSION"
+    },
     "neckel_2005_limb_darkening": {
       "url": "https://doi.org/10.1007/s11207-005-4081-z",
       "sha256": "citation-only:10.1007/s11207-005-4081-z",
@@ -78,7 +88,9 @@
       "stic_kurucz_partition_functions",
       "stic_abundances",
       "stic_falc_82",
-      "stic_fts_disk_center"
+      "stic_fts_disk_center",
+      "chianti_ioneq_v11_0_2",
+      "chianti_database_version_11_0_2"
     ],
     "citation_only_ids": [
       "asplund_2021_abundances",
@@ -95,6 +107,12 @@
   },
   "vendored_files": {},
   "generated_files": {
+    "common/chianti_thermodynamic_table.json": {
+      "sha256": "7fa3ee6cca2b615fbbdc2f0b8c5c63bcb1d4757afca707e7b2810d205c10a693"
+    },
+    "common/falc_reference_atmosphere.json": {
+      "sha256": "4aa882182842e948f48a17a0a6cc63402706886d84576d6e4a9c1c014e0e1ded"
+    },
     "common/stic_continuum_table.json": {
       "sha256": "c84768093556a0642fd7f9a7035df443b4100b2b0aa661a9f651e7e192f24e75"
     },

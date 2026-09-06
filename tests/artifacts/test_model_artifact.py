@@ -40,7 +40,7 @@ def _manifest():
     return ArtifactManifest.create(
         package_version="test",
         resolved_config={
-            "schema_version": 1,
+            "schema_version": 2,
             "solver": {"kind": "lte"},
             "resources": {"bundle": "packaged"},
         },

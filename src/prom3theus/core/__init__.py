@@ -18,7 +18,7 @@ from .coordinates import (
     spherical_to_cartesian_matrix,
     spherical_to_observer_matrix,
 )
-from .nn import FourierEncoding, MLPModel, NormalizationModule
+from .nn import FourierEncoding, MLPModel
 from .integrity import sha256_file, sha256_file_set
 from .solar_velocity import (
     CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
@@ -38,7 +38,6 @@ __all__ = [
     "K_BOLTZMANN",
     "MLPModel",
     "M_ELECTRON",
-    "NormalizationModule",
     "SPEED_OF_LIGHT",
     "carrington_rotation_velocity_cartesian",
     "cartesian_to_spherical",

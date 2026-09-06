@@ -5,9 +5,11 @@
     "hinode_sp",
     "hmi_stokes"
   ],
-  "source_manifest_sha256": "30d1ace0b529a3ad0ce0f6d3f07c79f3d2e075eea3e365037aa5b592f9519903",
+  "source_manifest_sha256": "33242a985a6a8915e2676414ef920a0073cff7f3ed811142123c863aceec2bb0",
   "runtime_files": [
     "common/abundances.json",
+    "common/chianti_thermodynamic_table.json",
+    "common/falc_reference_atmosphere.json",
     "common/lines.json",
     "common/stic_continuum_table.json",
     "hinode_sp/blend_inventory.json",
@@ -20,6 +22,8 @@
   "training_contract": "offline-read-only; no downloads or table conversion",
   "common_production_files": [
     "common/abundances.json",
+    "common/chianti_thermodynamic_table.json",
+    "common/falc_reference_atmosphere.json",
     "common/lines.json",
     "common/stic_continuum_table.json"
   ],

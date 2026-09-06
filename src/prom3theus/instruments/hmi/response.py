@@ -26,7 +26,8 @@ from .acquisition import (
 
 DEFAULT_PROFILE_HALF_WIDTH = 0.65
 MANIFEST_NAME = "manifest.json"
-MANIFEST_FORMAT = "prom3theus.hmi_response_manifest.v3"
+MANIFEST_FORMAT = "prom3theus.hmi_response_manifest.v4"
+PHASE_MAP_ASSIGNMENT_SERIES = "hmi.B_720s"
 
 
 def _read_profile_metadata(path: Path) -> dict[str, Any]:
@@ -78,6 +79,7 @@ def load_response_manifest(directory: str | os.PathLike[str]) -> dict[str, Any]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or set(manifest) != {
         "format",
+        "phase_map_assignment_series",
         "profiles",
         "acquisitions",
     }:
@@ -85,6 +87,10 @@ def load_response_manifest(directory: str | os.PathLike[str]) -> dict[str, Any]:
     if manifest["format"] != MANIFEST_FORMAT:
         raise ValueError(
             f"Unsupported HMI response manifest in {path}; reprepare it with the current framework."
+        )
+    if manifest["phase_map_assignment_series"] != PHASE_MAP_ASSIGNMENT_SERIES:
+        raise ValueError(
+            f"Unsupported HMI phase-map assignment source in {path}."
         )
     profiles, acquisitions = manifest["profiles"], manifest["acquisitions"]
     if not isinstance(profiles, dict) or not profiles:
@@ -150,8 +156,18 @@ def load_response_manifest(directory: str | os.PathLike[str]) -> dict[str, Any]:
             not isinstance(key, str)
             or not isinstance(acquisition, dict)
             or set(acquisition)
-            != {"record_time", "observation_time", "hcamid", "profile"}
+            != {
+                "record_time",
+                "observation_time",
+                "hcamid",
+                "phase_map_fsn",
+                "assignment_record",
+                "profile",
+            }
             or acquisition["profile"] not in profiles
+            or type(acquisition["phase_map_fsn"]) is not int
+            or acquisition["phase_map_fsn"] < 0
+            or not isinstance(acquisition["assignment_record"], str)
         ):
             raise ValueError(f"Invalid HMI acquisition {key!r} in {path}.")
         try:
@@ -162,7 +178,15 @@ def load_response_manifest(directory: str | os.PathLike[str]) -> dict[str, Any]:
         except (TypeError, ValueError) as error:
             raise ValueError(f"Invalid HMI acquisition {key!r} in {path}.") from error
         profile = profiles[acquisition["profile"]]
-        if key != expected_key or acquisition["hcamid"] != profile["hcamid"]:
+        expected_assignment = (
+            f"{PHASE_MAP_ASSIGNMENT_SERIES}[{acquisition['record_time']}]"
+        )
+        if (
+            key != expected_key
+            or acquisition["hcamid"] != profile["hcamid"]
+            or acquisition["phase_map_fsn"] != profile["phase_map_fsn"]
+            or acquisition["assignment_record"] != expected_assignment
+        ):
             raise ValueError(f"Inconsistent HMI acquisition {key!r} in {path}.")
     return manifest
 
@@ -369,6 +393,7 @@ __all__ = [
     "HMIResponseArchive",
     "MANIFEST_FORMAT",
     "MANIFEST_NAME",
+    "PHASE_MAP_ASSIGNMENT_SERIES",
     "load_response_manifest",
     "load_response_profile",
     "resolve_response_profile",

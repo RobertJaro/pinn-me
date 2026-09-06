@@ -30,7 +30,7 @@ def _build_data(config: Mapping) -> HMIDataModule:
     selection = dict(raw["selection"])
     loader = dict(raw["loader"])
     calibration = dict(raw["calibration"])
-    expected_selection = {"validation_raster"}
+    expected_selection = {"acquisition_indices", "validation_raster"}
     expected_loader = {
         "batch_size",
         "validation_batch_size",
@@ -60,6 +60,7 @@ def _build_data(config: Mapping) -> HMIDataModule:
             )
     return HMIDataModule(
         directory=raw["directory"],
+        acquisition_indices=selection["acquisition_indices"],
         validation_raster=selection["validation_raster"],
         transmission_profile_directory=calibration.pop(
             "transmission_profile_directory"

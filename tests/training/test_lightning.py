@@ -9,10 +9,12 @@ import pytest
 import torch
 
 from prom3theus.inversion.objective import StokesObjective
+from prom3theus.inversion.constraints import MagnetofluidConstraints
 from prom3theus.inversion.forward import (
     DepthRefinement,
     LTEForwardComposition,
 )
+from prom3theus.rt import StratifiedAtmosphereModel
 from prom3theus.training.lightning import LTEInversionModule
 
 
@@ -22,10 +24,76 @@ def test_constructor_requires_the_explicit_lte_runtime_contract():
         "learning_rate",
         "observation_id",
         "velocity_synthesis_mode",
-        "instrument_radial_velocity_correction_m_per_s",
+        "instrument_line_of_sight_velocity_correction_m_per_s",
         "vector_regularization_config",
         "run_metadata",
     } <= set(parameters)
+
+
+def test_current_free_boundary_ramps_without_delaying_other_boundaries():
+    harness = SimpleNamespace(
+        upper_boundary_current_free_ramp_steps=100,
+        _trainer=SimpleNamespace(global_step=9),
+    )
+    assert LTEInversionModule._current_free_boundary_factor(harness) == 0.1
+    harness._trainer.global_step = 1000
+    assert LTEInversionModule._current_free_boundary_factor(harness) == 1.0
+    harness.upper_boundary_current_free_ramp_steps = 0
+    assert LTEInversionModule._current_free_boundary_factor(harness) == 1.0
+
+
+def test_current_free_boundary_validation_computes_derivatives_under_no_grad():
+    model = StratifiedAtmosphereModel(
+        torch.linspace(-5.0, 1.0, 3),
+        scene_geometry_config={
+            "solar_radius_m": 695_700_000.0,
+            "scene_basis": torch.eye(3),
+        },
+        model_config={
+            "type": "mlp",
+            "dim": 8,
+            "n_layers": 2,
+            "activation": "silu",
+            "encoding_config": {"type": "identity"},
+        },
+    )
+    constraints = MagnetofluidConstraints(
+        {
+            "upper_boundary_current_free": {"enabled": True, "weight": 1.0e-3},
+            "side_boundary_current_free": {"enabled": True, "weight": 1.0e-3},
+        },
+        vector_basis_matches_spatial_coordinates=True,
+    )
+    harness = SimpleNamespace(
+        atmosphere_model=model,
+        physics=constraints,
+        _current_free_boundary_factor=lambda: 1.0,
+    )
+    coordinates = torch.tensor([[0.0, 0.0, 0.0], [0.05, -0.03, 0.0]])
+    top_height = coordinates.new_full((2,), model.shell_height_bounds_Mm[0] * 1.0e6)
+    boundary = {
+        "position_m": model.position_from_coords_height(coordinates, top_height),
+        "time_hours": coordinates[:, 2:3],
+    }
+    side = {
+        "position_m": boundary["position_m"].reshape(1, 2, 3),
+        "time_hours": boundary["time_hours"].reshape(1, 2, 1),
+        "normal": torch.tensor([[[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]]),
+    }
+
+    with torch.no_grad():
+        losses, weighted = LTEInversionModule._physics_objective(
+            harness,
+            None,
+            None,
+            boundary,
+            side,
+            create_graph=False,
+        )
+
+    assert torch.isfinite(losses["upper_boundary_current_free"])
+    assert torch.isfinite(losses["side_boundary_current_free"])
+    assert torch.isfinite(weighted)
 
 
 def test_shared_step_consumes_the_canonical_observation_batch_fields():
@@ -103,8 +171,11 @@ def test_artifact_metadata_keeps_the_exact_physical_radiance_scale():
                 "truncate_sigma": 4.0,
             },
         },
-        normalization_config={"asinh_alphas": {"Q": 1.0e-3, "U": 1.0e-3, "V": 1.0e-3}},
-        stokes_loss_config={"type": "mse"},
+        stokes_loss_config={
+            "type": "huber",
+            "stokes_sigmas": {"I": 5.0e-3, "Q": 2.0e-3, "U": 2.0e-3, "V": 2.0e-3},
+            "huber_delta": 1.0,
+        },
         weight_config={"I": 1.0, "Q": 1.0, "U": 1.0, "V": 1.0},
         wavelength_weights=None,
         wavelength_exclude_windows_angstrom=[],
@@ -128,16 +199,32 @@ def test_artifact_metadata_keeps_the_exact_physical_radiance_scale():
                     "magnetic_divergence",
                     "induction",
                     "continuity",
+                    "adiabatic_pressure",
+                    "upper_boundary_open_velocity",
+                    "side_boundary_open_velocity",
+                    "side_boundary_current_free",
+                    "upper_domain_microturbulence_prior",
+                    "upper_domain_temperature_prior",
+                    "radial_magnetic_energy_gradient",
+                    "upper_boundary_current_free",
                     "upper_boundary_gas_pressure_prior",
                 )
             },
             "gravity_m_per_s2": None,
+            "adiabatic_index": 5.0 / 3.0,
+            "upper_boundary_current_free_ramp_steps": 0,
             "volume_points_per_step": 0,
             "height_layers_per_step": 0,
+            "upper_volume_points_per_step": 0,
+            "upper_height_layers_per_step": 0,
             "upper_boundary_points_per_step": 0,
+            "side_boundary_points_per_step": 0,
+            "side_height_layers_per_step": 0,
             "validation_height_layers": 0,
+            "validation_upper_height_layers": 0,
             "validation_points_per_height": 0,
             "sampling_domain": None,
+            "upper_sampling_domain": None,
             "vector_basis_matches_spatial_coordinates": True,
             "normalization": {"length_m": 1.0e6, "time_s": 3600.0},
         },
@@ -145,7 +232,8 @@ def test_artifact_metadata_keeps_the_exact_physical_radiance_scale():
         run_metadata={},
         observation_id="hinode-test",
         velocity_synthesis_mode="carrington_registered_relative",
-        instrument_radial_velocity_correction_m_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
+        optimize_instrument_line_of_sight_velocity_correction=True,
         vector_regularization_config={
             "enabled": False,
             "magnetic_weight": 0.0,
@@ -156,6 +244,16 @@ def test_artifact_metadata_keeps_the_exact_physical_radiance_scale():
 
     assert module.atlas_continuum_radiance_w_m3_sr.dtype is torch.float32
     assert module.hparams["atlas_continuum_radiance_w_m3_sr"] == radiance_scale
+    assert (
+        module.synthesizer.continuum_opacity
+        is module.atmosphere_model.thermodynamic_eos
+    )
+    assert module.instrument_line_of_sight_velocity_correction_normalized.requires_grad
+    correction = module.instrument_line_of_sight_velocity_correction_m_per_s
+    correction.add(1.0).square().backward()
+    assert (
+        module.instrument_line_of_sight_velocity_correction_normalized.grad is not None
+    )
 
 
 def test_vector_regularization_shrinks_only_nonzero_components():
@@ -267,28 +365,30 @@ def test_auto_learning_rate_schedule_uses_estimated_optimizer_steps():
 def test_stokes_weight_reduction_follows_prediction_dtype():
     harness = SimpleNamespace(
         wavelength_weights=torch.tensor([1.0, 1.0], dtype=torch.float32),
-        stokes_weights=torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32),
-        stokes_loss=StokesObjective(),
-        normalization=torch.nn.Identity(),
+        stokes_weights=torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float32),
+        stokes_loss=StokesObjective(
+            stokes_sigmas={"I": 1.0, "Q": 1.0, "U": 1.0, "V": 1.0}
+        ),
     )
     prediction = torch.zeros(2, 4, 2, dtype=torch.float64)
     target = torch.ones_like(prediction)
 
-    component_mse, total = LTEInversionModule._stokes_objective(
+    component_loss, total = LTEInversionModule._stokes_objective(
         harness, prediction, target
     )
 
-    assert component_mse.dtype is torch.float64
+    assert component_loss.dtype is torch.float64
     assert total.dtype is torch.float64
-    torch.testing.assert_close(total, torch.tensor(10.0, dtype=torch.float64))
+    torch.testing.assert_close(total, torch.tensor(0.5, dtype=torch.float64))
 
 
 def test_stokes_objective_rejects_nonfinite_synthesis_and_observations():
     harness = SimpleNamespace(
         wavelength_weights=torch.ones(2),
         stokes_weights=torch.ones(4),
-        stokes_loss=StokesObjective(),
-        normalization=torch.nn.Identity(),
+        stokes_loss=StokesObjective(
+            stokes_sigmas={"I": 1.0, "Q": 1.0, "U": 1.0, "V": 1.0}
+        ),
     )
     finite = torch.zeros(1, 4, 2)
     invalid_prediction = finite.clone()
@@ -321,3 +421,27 @@ def test_optimizer_guards_reject_nonfinite_parameters_and_gradients():
         harness.value.fill_(float("nan"))
     with pytest.raises(FloatingPointError, match="parameters"):
         harness.on_train_batch_start({}, 0)
+
+
+def test_unclipped_gradient_diagnostic_logs_the_global_rank_maximum():
+    class GradientHarness(torch.nn.Module):
+        on_before_optimizer_step = LTEInversionModule.on_before_optimizer_step
+
+        def __init__(self):
+            super().__init__()
+            self.value = torch.nn.Parameter(torch.ones(2))
+            self.logged = None
+
+        def log(self, name, value, **options):
+            self.logged = (name, value, options)
+
+    harness = GradientHarness()
+    harness.value.grad = torch.tensor([-3.0, 4.0])
+
+    harness.on_before_optimizer_step(None)
+
+    name, value, options = harness.logged
+    assert name == "train.gradient_max_abs_unclipped"
+    torch.testing.assert_close(value, torch.tensor(4.0))
+    assert options["sync_dist"] is True
+    assert options["reduce_fx"] == "max"

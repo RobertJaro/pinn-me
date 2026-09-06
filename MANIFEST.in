@@ -2,7 +2,9 @@ include LICENSE
 include README.md
 include pyproject.toml
 include configs/hinode_lte_mhs.yaml
-include configs/hmi_lte_subframe.yaml
+include configs/hinode_lte_mhs_extrapolation.yaml
+include configs/hmi_lte_dynamic.yaml
+include configs/hmi_lte_mhs.yaml
 recursive-include docs *.md
 recursive-include resource_builder *.py *.md *.txt
 recursive-include scripts *.sh

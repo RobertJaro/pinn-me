@@ -20,7 +20,10 @@ SEGMENT_KEYS = tuple(
     f"{component}{index}" for component in "IQUV" for index in range(6)
 )
 _SEGMENT_PATTERN = re.compile(r"\.(?P<stokes>[IQUV])(?P<filter>[0-5])\.fits$")
-_ACQUISITION_PATTERN = re.compile(r"hmi\.S_720s\.\d{8}_\d{6}_TAI\.3")
+# JSOC export filenames spell the series prefix as ``hmi.s_720s`` even though
+# the DRMS series name is conventionally written ``hmi.S_720s``. Accept only
+# those two exact spellings; the remaining acquisition contract stays strict.
+_ACQUISITION_PATTERN = re.compile(r"hmi\.[Ss]_720s\.\d{8}_\d{6}_TAI\.3")
 _IDENTITY_TEXT_KEYS = (
     "DATE-OBS",
     "T_OBS",

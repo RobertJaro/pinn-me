@@ -6,6 +6,7 @@ from .atmosphere import (
     StratifiedAtmosphereModel,
 )
 from .atomic import AtomicDatabase, ElementData, SpectralLine
+from .eos import HybridSolarEOS
 from .geometry import (
     RayTraceResult,
     chart_height_to_position_m,
@@ -27,6 +28,7 @@ from .opacity import (
     integrated_line_opacity,
     planck_lambda,
 )
+from .plasma import SolarPlasmaState, SolarPlasmaTable, THOMSON_CROSS_SECTION_M2
 from .polarization import PolarizedLineOpacity, PropagationDiagnostics
 from .profiles import VoigtFaraday, voigt_faraday
 from .radiometry import (
@@ -60,6 +62,7 @@ __all__ = [
     "ContinuumOpacity",
     "ElementData",
     "GeometricHeightPath",
+    "HybridSolarEOS",
     "LTESynthesizer",
     "OpticalDepthPath",
     "PolarizedFormalSolver",
@@ -71,11 +74,14 @@ __all__ = [
     "HINODE_SOLAR_REFERENCE_RESOURCE",
     "STICLookupState",
     "STICSpectralState",
+    "SolarPlasmaState",
+    "SolarPlasmaTable",
     "SpectralLine",
     "StratifiedAtmosphere",
     "StratifiedAtmosphereModel",
     "SynthesisDiagnostics",
     "TransferPath",
+    "THOMSON_CROSS_SECTION_M2",
     "VoigtFaraday",
     "ZeemanComponent",
     "ZeemanPattern",

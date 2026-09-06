@@ -94,6 +94,10 @@ def test_runner_embeds_the_exact_observation_store(tmp_path, monkeypatch):
             output_directory=tmp_path / "runs",
             work_directory=tmp_path / "work",
         ),
+        runtime=replace(
+            loaded.runtime,
+            validation_check_interval_steps=None,
+        ),
     )
     resources = {
         "bundle_schema_version": 2,
@@ -152,6 +156,8 @@ def test_runner_embeds_the_exact_observation_store(tmp_path, monkeypatch):
 
     assert call["kwargs"]["rebuild"] is True
     assert _Trainer.latest.fit_call == (result.module, data)
+    assert _Trainer.latest.options["gradient_clip_val"] == 0.1
+    assert "val_check_interval" not in _Trainer.latest.options
     manifest = load_manifest(result.artifact_directory)
     assert manifest.observation["store"]["path"] == "observations"
     assert manifest.model["run_metadata"]["prepared_by"] == "runner-test"
@@ -162,3 +168,40 @@ def test_runner_embeds_the_exact_observation_store(tmp_path, monkeypatch):
     assert len(embedded) == 1
     assert names == ["raster_0000"]
     assert metadata["observation"] == spec.metadata()
+
+
+def test_extrapolation_builds_distinct_full_and_upper_physics_domains():
+    config = load_config(PROJECT_ROOT / "configs" / "hinode_lte_mhs_extrapolation.yaml")
+    atmosphere = runner._atmosphere_config(config)
+    physics = runner._physics_config(config)
+    data = SimpleNamespace(
+        observation_sampling_bounds={
+            "surface_longitude_center_rad": 0.2,
+            "surface_longitude_offset_rad": [-0.1, 0.1],
+            "surface_latitude_rad": [-0.05, 0.05],
+            "time_hours": [0.0, 0.0],
+            "solar_radius_m": 695_700_000.0,
+        }
+    )
+
+    metadata = runner._physics_sampling(physics, data, atmosphere)
+
+    assert physics["sampling_domain"]["height_Mm"] == [-0.1, 20.0]
+    assert physics["upper_sampling_domain"]["height_Mm"] == [1.5, 20.0]
+    assert metadata["line_formation_height_bounds_Mm"] == [1.5, -0.1]
+
+
+def test_visualization_outputs_are_kept_with_the_durable_run(tmp_path):
+    loaded = load_config(PROJECT_ROOT / "configs" / "hmi_lte_dynamic.yaml")
+    config = replace(
+        loaded,
+        solver=replace(
+            loaded.solver,
+            output_directory=tmp_path / "output",
+            work_directory=tmp_path / "scratch",
+        ),
+    )
+
+    callback = runner._visualization_callback(config)
+
+    assert callback.output_directory == (tmp_path / "output" / "diagnostics").resolve()

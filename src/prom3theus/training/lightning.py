@@ -19,7 +19,6 @@ from prom3theus.inversion.forward import (
 )
 from prom3theus.core import (
     CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
-    NormalizationModule,
     SPEED_OF_LIGHT,
 )
 from prom3theus.inversion.constraints.magnetofluid import (
@@ -60,7 +59,6 @@ class LTEInversionModule(LightningModule):
         atmosphere_config: Mapping,
         synthesizer_config: Mapping,
         instrument_config: Mapping,
-        normalization_config: Mapping,
         stokes_loss_config: Mapping,
         weight_config: Mapping,
         wavelength_weights,
@@ -73,7 +71,8 @@ class LTEInversionModule(LightningModule):
         run_metadata: Mapping,
         observation_id: str,
         velocity_synthesis_mode: str,
-        instrument_radial_velocity_correction_m_per_s: float,
+        instrument_line_of_sight_velocity_correction_m_per_s: float,
+        optimize_instrument_line_of_sight_velocity_correction: bool,
         vector_regularization_config: Mapping,
     ):
         super().__init__()
@@ -81,7 +80,6 @@ class LTEInversionModule(LightningModule):
             "atmosphere_config": atmosphere_config,
             "synthesizer_config": synthesizer_config,
             "instrument_config": instrument_config,
-            "normalization_config": normalization_config,
             "stokes_loss_config": stokes_loss_config,
             "weight_config": weight_config,
             "depth_sampling_config": depth_sampling_config,
@@ -115,31 +113,41 @@ class LTEInversionModule(LightningModule):
             **atmosphere_config,
         )
         if not isinstance(
-            instrument_radial_velocity_correction_m_per_s, Real
-        ) or isinstance(instrument_radial_velocity_correction_m_per_s, bool):
+            instrument_line_of_sight_velocity_correction_m_per_s, Real
+        ) or isinstance(instrument_line_of_sight_velocity_correction_m_per_s, bool):
             raise TypeError(
-                "instrument_radial_velocity_correction_m_per_s must be numeric."
+                "instrument_line_of_sight_velocity_correction_m_per_s must be numeric."
             )
-        initial_radial_velocity_correction = float(
-            instrument_radial_velocity_correction_m_per_s
+        initial_line_of_sight_velocity_correction = float(
+            instrument_line_of_sight_velocity_correction_m_per_s
         )
+        if type(optimize_instrument_line_of_sight_velocity_correction) is not bool:
+            raise TypeError(
+                "optimize_instrument_line_of_sight_velocity_correction must be boolean."
+            )
         if (
-            not math.isfinite(initial_radial_velocity_correction)
-            or abs(initial_radial_velocity_correction) >= SPEED_OF_LIGHT
+            not math.isfinite(initial_line_of_sight_velocity_correction)
+            or abs(initial_line_of_sight_velocity_correction) >= SPEED_OF_LIGHT
         ):
             raise ValueError(
-                "instrument_radial_velocity_correction_m_per_s must be finite "
+                "instrument_line_of_sight_velocity_correction_m_per_s must be finite "
                 "and subluminal."
             )
         # Optimize the instrument zero point in the atmosphere decoder's natural
         # velocity units.  This gives the scalar a gradient scale comparable to
         # the learned velocity field while exposing and applying it in m/s.
-        self.instrument_radial_velocity_correction_normalized = torch.nn.Parameter(
-            torch.tensor(
-                initial_radial_velocity_correction
-                / self.atmosphere_model.velocity_scale_m_per_s,
-                dtype=torch.float32,
+        self.instrument_line_of_sight_velocity_correction_normalized = (
+            torch.nn.Parameter(
+                torch.tensor(
+                    initial_line_of_sight_velocity_correction
+                    / self.atmosphere_model.velocity_scale_m_per_s,
+                    dtype=torch.float32,
+                ),
+                requires_grad=optimize_instrument_line_of_sight_velocity_correction,
             )
+        )
+        self.optimize_instrument_line_of_sight_velocity_correction = (
+            optimize_instrument_line_of_sight_velocity_correction
         )
         vector_regularization = resolve_vector_regularization(
             vector_regularization_config
@@ -183,7 +191,6 @@ class LTEInversionModule(LightningModule):
             wavelength_angstrom=wavelength_angstrom,
         )
         self.synthesizer = forward.synthesizer
-        continuum = forward.continuum_opacity
         self.instrument = forward.instrument
         self.register_buffer("wavelength_angstrom", wavelength_angstrom)
         self._forward_composition = forward.composition
@@ -210,10 +217,7 @@ class LTEInversionModule(LightningModule):
                 objective_weighting.atlas_continuum_radiance_w_m3_sr
             ),
         )
-        normalization_config = deepcopy(dict(normalization_config))
-        stokes_loss_config = deepcopy(dict(stokes_loss_config))
-        self.normalization = NormalizationModule(**normalization_config)
-        self.stokes_loss = StokesObjective(**stokes_loss_config)
+        self.stokes_loss = StokesObjective(**deepcopy(dict(stokes_loss_config)))
         self.stokes_weight_config = dict(objective_weighting.stokes_weight_config)
         self.register_buffer("stokes_weights", objective_weighting.stokes_weights)
         self.register_buffer(
@@ -231,19 +235,32 @@ class LTEInversionModule(LightningModule):
 
         self.run_metadata = deepcopy(dict(run_metadata))
 
-        reference_gravity = getattr(continuum, "reference_gravity_m_per_s2", None)
+        reference_gravity = (
+            self.atmosphere_model.thermodynamic_eos.reference_gravity_m_per_s2
+        )
         physics = build_physics_assembly(
             physics_config,
             reference_gravity_m_per_s2=reference_gravity,
         )
         self.physics = physics.constraints
         self.gravity_m_per_s2 = physics.gravity_m_per_s2
+        self.upper_boundary_current_free_ramp_steps = (
+            physics.upper_boundary_current_free_ramp_steps
+        )
         self.physics_volume_points_per_step = physics.volume_points_per_step
         self.physics_height_layers_per_step = physics.height_layers_per_step
+        self.physics_upper_volume_points_per_step = physics.upper_volume_points_per_step
+        self.physics_upper_height_layers_per_step = physics.upper_height_layers_per_step
         self.upper_boundary_points_per_step = physics.upper_boundary_points_per_step
+        self.side_boundary_points_per_step = physics.side_boundary_points_per_step
+        self.side_height_layers_per_step = physics.side_height_layers_per_step
         self.physics_validation_height_layers = physics.validation_height_layers
+        self.physics_validation_upper_height_layers = (
+            physics.validation_upper_height_layers
+        )
         self.physics_validation_points_per_height = physics.validation_points_per_height
         self.physics_sampling_domain = physics.sampling_domain
+        self.physics_upper_sampling_domain = physics.upper_sampling_domain
         self.register_buffer(
             "physics_validation_position_m",
             physics.validation_position_m,
@@ -251,6 +268,16 @@ class LTEInversionModule(LightningModule):
         self.register_buffer(
             "physics_validation_time_hours",
             physics.validation_time_hours,
+        )
+        self.register_buffer(
+            "physics_validation_upper_position_m",
+            physics.validation_upper_position_m,
+            persistent=False,
+        )
+        self.register_buffer(
+            "physics_validation_upper_time_hours",
+            physics.validation_upper_time_hours,
+            persistent=False,
         )
         self.register_buffer(
             "physics_validation_boundary_position_m",
@@ -262,6 +289,21 @@ class LTEInversionModule(LightningModule):
             physics.validation_boundary_time_hours,
             persistent=False,
         )
+        self.register_buffer(
+            "physics_validation_side_position_m",
+            physics.validation_side_position_m,
+            persistent=False,
+        )
+        self.register_buffer(
+            "physics_validation_side_time_hours",
+            physics.validation_side_time_hours,
+            persistent=False,
+        )
+        self.register_buffer(
+            "physics_validation_side_normal",
+            physics.validation_side_normal,
+            persistent=False,
+        )
         # Record the exact constructor inputs used by the tensor-artifact
         # manifest to reconstruct this module.
         self.save_hyperparameters(
@@ -271,7 +313,6 @@ class LTEInversionModule(LightningModule):
                 "atmosphere_config": atmosphere_config,
                 "synthesizer_config": synthesizer_config,
                 "instrument_config": instrument_config,
-                "normalization_config": normalization_config,
                 "stokes_loss_config": self.stokes_loss.configuration(),
                 "weight_config": deepcopy(self.stokes_weight_config),
                 "wavelength_weights": (
@@ -292,8 +333,11 @@ class LTEInversionModule(LightningModule):
                 "run_metadata": self.run_metadata,
                 "observation_id": self.observation_id,
                 "velocity_synthesis_mode": self.velocity_synthesis_mode,
-                "instrument_radial_velocity_correction_m_per_s": (
-                    initial_radial_velocity_correction
+                "instrument_line_of_sight_velocity_correction_m_per_s": (
+                    initial_line_of_sight_velocity_correction
+                ),
+                "optimize_instrument_line_of_sight_velocity_correction": (
+                    optimize_instrument_line_of_sight_velocity_correction
                 ),
                 "vector_regularization_config": deepcopy(vector_regularization_config),
             }
@@ -309,11 +353,11 @@ class LTEInversionModule(LightningModule):
         return self._synthesis_wavelength_base
 
     @property
-    def instrument_radial_velocity_correction_m_per_s(self) -> torch.Tensor:
-        """Trainable instrument wavelength zero point expressed as radial m/s."""
+    def instrument_line_of_sight_velocity_correction_m_per_s(self) -> torch.Tensor:
+        """Trainable wavelength zero point as positive-redshift LOS m/s."""
 
         return (
-            self.instrument_radial_velocity_correction_normalized
+            self.instrument_line_of_sight_velocity_correction_normalized
             * self.atmosphere_model.velocity_scale_m_per_s
         )
 
@@ -325,6 +369,18 @@ class LTEInversionModule(LightningModule):
         return max(
             0.0,
             1.0 - step / float(self.vector_regularization_decay_steps),
+        )
+
+    def _current_free_boundary_factor(self) -> float:
+        """Ramp top/side current-free losses, never thermodynamic boundaries."""
+
+        if self.upper_boundary_current_free_ramp_steps == 0:
+            return 1.0
+        trainer = getattr(self, "_trainer", None)
+        step = int(getattr(trainer, "global_step", 0))
+        return min(
+            1.0,
+            (step + 1) / self.upper_boundary_current_free_ramp_steps,
         )
 
     def _vector_regularization(self, atmosphere) -> tuple[torch.Tensor, float]:
@@ -394,6 +450,7 @@ class LTEInversionModule(LightningModule):
         removed_solar_los_velocity_m_per_s: torch.Tensor | None = None,
         randomize_depth: bool = False,
         depth_grid: torch.Tensor | None = None,
+        return_atmosphere: bool = False,
         return_details: bool = False,
         instrument_response: Mapping[str, torch.Tensor] | None = None,
     ) -> dict:
@@ -407,8 +464,8 @@ class LTEInversionModule(LightningModule):
                 carrington_angular_velocity_rad_per_s=(
                     self.carrington_angular_velocity_rad_per_s
                 ),
-                instrument_radial_velocity_correction_m_per_s=(
-                    self.instrument_radial_velocity_correction_m_per_s
+                instrument_line_of_sight_velocity_correction_m_per_s=(
+                    self.instrument_line_of_sight_velocity_correction_m_per_s
                 ),
             ),
             ray_direction=ray_direction,
@@ -417,6 +474,7 @@ class LTEInversionModule(LightningModule):
             removed_solar_los_velocity_m_per_s=(removed_solar_los_velocity_m_per_s),
             randomize_depth=randomize_depth,
             depth_grid=depth_grid,
+            return_atmosphere=return_atmosphere,
             return_details=return_details,
             instrument_response=instrument_response,
         )
@@ -450,31 +508,31 @@ class LTEInversionModule(LightningModule):
                 f"Observed batch contains {count} non-finite Stokes values."
             )
         spectral_weights = self.wavelength_weights.to(prediction)
-        transformed_squared_error = self.stokes_loss(
+        standardized_huber_error = self.stokes_loss(
             prediction,
             target,
-            self.normalization,
         )
-        weighted_squared_error = transformed_squared_error * spectral_weights
+        weighted_error = standardized_huber_error * spectral_weights
         # Average over every leading sample and normalize by the sum of active
-        # wavelength weights.  With unit weights this is exactly the original
-        # elementwise mean; excluded samples contribute neither numerator nor
+        # wavelength weights. Excluded samples contribute neither numerator nor
         # denominator.
         leading_dimensions = tuple(range(prediction.ndim - 2))
-        component_mse = weighted_squared_error.sum(
+        component_loss = weighted_error.sum(
             dim=(*leading_dimensions, prediction.ndim - 1)
         )
         leading_count = prediction.numel() // (
             prediction.shape[-2] * prediction.shape[-1]
         )
-        component_mse = component_mse / (leading_count * spectral_weights.sum())
-        total = torch.dot(component_mse, self.stokes_weights.to(component_mse))
-        return component_mse, total
+        component_loss = component_loss / (leading_count * spectral_weights.sum())
+        total = torch.dot(component_loss, self.stokes_weights.to(component_loss))
+        return component_loss, total
 
     def _physics_objective(
         self,
         volume_batch,
+        upper_volume_batch,
         upper_boundary_batch,
+        side_boundary_batch,
         *,
         create_graph: bool,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
@@ -485,15 +543,14 @@ class LTEInversionModule(LightningModule):
             if volume_batch is None:
                 raise KeyError("Active volume physics requires a 'volume' sample.")
             grouped_position = volume_batch["position_m"]
-            radial_group_shape = tuple(map(int, grouped_position.shape[:2]))
+            height_group_shape = tuple(map(int, grouped_position.shape[:2]))
             physics_result = self.physics.volume(
                 self.atmosphere_model,
-                self.synthesizer.continuum_opacity,
                 grouped_position.reshape(-1, 3),
                 volume_batch["time_hours"].reshape(-1, 1),
                 create_graph=create_graph,
                 return_state=False,
-                radial_group_shape=radial_group_shape,
+                height_group_shape=height_group_shape,
             )
         else:
             physics_result = PhysicsResult(
@@ -501,31 +558,89 @@ class LTEInversionModule(LightningModule):
                 weights=self.physics.loss_weights,
             )
 
+        upper_losses = {}
+        if self.physics.upper_volume_active:
+            if upper_volume_batch is None:
+                raise KeyError(
+                    "Active upper-domain physics requires an 'upper_volume' sample."
+                )
+            grouped_upper_position = upper_volume_batch["position_m"]
+            with torch.enable_grad():
+                upper_losses = self.physics.upper_domain(
+                    self.atmosphere_model,
+                    grouped_upper_position.reshape(-1, 3),
+                    upper_volume_batch["time_hours"].reshape(-1, 1),
+                    height_group_shape=tuple(
+                        map(int, grouped_upper_position.shape[:2])
+                    ),
+                    create_graph=create_graph,
+                ).losses
+
         boundary_losses = {}
-        pressure_prior_name = "upper_boundary_gas_pressure_prior"
-        if self.physics.is_active(pressure_prior_name):
+        if self.physics.upper_boundary_active:
             if upper_boundary_batch is None:
                 raise KeyError(
                     "Active upper-boundary physics requires an 'upper_boundary' sample."
                 )
-            with torch.set_grad_enabled(create_graph):
-                pressure_prior = self.physics.upper_boundary_gas_pressure_prior(
+            # First spatial derivatives are required even when validation does
+            # not retain a higher-order graph for parameter backpropagation.
+            # Lightning evaluates validation under no-grad, so tying gradient
+            # mode to ``create_graph=False`` makes the current-free boundary
+            # impossible to evaluate.
+            with torch.enable_grad():
+                boundary_losses = self.physics.upper_boundary(
                     self.atmosphere_model,
                     upper_boundary_batch["position_m"].reshape(-1, 3),
                     upper_boundary_batch["time_hours"].reshape(-1, 1),
-                )
-            boundary_losses[pressure_prior_name] = pressure_prior.losses[
-                pressure_prior_name
-            ]
+                    create_graph=create_graph,
+                ).losses
 
-        available = {**physics_result.losses, **boundary_losses}
+        side_losses = {}
+        if self.physics.side_boundary_active:
+            if side_boundary_batch is None:
+                raise KeyError(
+                    "Active side-boundary physics requires a 'side_boundary' sample."
+                )
+            grouped_side_position = side_boundary_batch["position_m"]
+            with torch.enable_grad():
+                side_losses = self.physics.side_boundary(
+                    self.atmosphere_model,
+                    grouped_side_position.reshape(-1, 3),
+                    side_boundary_batch["time_hours"].reshape(-1, 1),
+                    side_boundary_batch["normal"].reshape(-1, 3),
+                    height_group_shape=tuple(
+                        map(int, grouped_side_position.shape[:2])
+                    ),
+                    create_graph=create_graph,
+                ).losses
+
+        available = {
+            **physics_result.losses,
+            **upper_losses,
+            **boundary_losses,
+            **side_losses,
+        }
         losses = {
             name: available[name]
             for name in EQUATION_NAMES
             if self.physics.is_active(name)
         }
+        current_free_factor = self._current_free_boundary_factor()
         weighted = sum(
-            (losses[name] * physics_result.weights[name] for name in losses),
+            (
+                losses[name]
+                * physics_result.weights[name]
+                * (
+                    current_free_factor
+                    if name
+                    in {
+                        "upper_boundary_current_free",
+                        "side_boundary_current_free",
+                    }
+                    else 1.0
+                )
+                for name in losses
+            ),
             start=zero,
         )
         return losses, weighted
@@ -534,7 +649,7 @@ class LTEInversionModule(LightningModule):
         """Draw one grouped shell state directly on the model device."""
 
         if not self.physics.any_active:
-            return None, None
+            return None, None, None, None
         if self.physics_sampling_domain is None:
             raise RuntimeError(
                 "Active physics requires an initialized spherical sampling domain."
@@ -547,17 +662,35 @@ class LTEInversionModule(LightningModule):
                 self.physics_volume_points_per_step
                 // self.physics_height_layers_per_step,
                 device=parameter.device,
-                dtype=parameter.dtype,
+            )
+        upper_volume = None
+        if self.physics.upper_volume_active:
+            if self.physics_upper_sampling_domain is None:
+                raise RuntimeError(
+                    "Active upper-domain physics requires its sampling domain."
+                )
+            upper_volume = self.physics_upper_sampling_domain.random_grouped(
+                self.physics_upper_height_layers_per_step,
+                self.physics_upper_volume_points_per_step
+                // self.physics_upper_height_layers_per_step,
+                device=parameter.device,
             )
         upper_boundary = None
-        if self.physics.boundary_active:
+        if self.physics.upper_boundary_active:
             grouped = self.physics_sampling_domain.random_top(
                 self.upper_boundary_points_per_step,
                 device=parameter.device,
-                dtype=parameter.dtype,
             )
             upper_boundary = {name: value.squeeze(0) for name, value in grouped.items()}
-        return volume, upper_boundary
+        side_boundary = None
+        if self.physics.side_boundary_active:
+            side_boundary = self.physics_sampling_domain.random_sides(
+                self.side_height_layers_per_step,
+                self.side_boundary_points_per_step
+                // self.side_height_layers_per_step,
+                device=parameter.device,
+            )
+        return volume, upper_volume, upper_boundary, side_boundary
 
     def _shared_step(
         self,
@@ -592,10 +725,15 @@ class LTEInversionModule(LightningModule):
                 "LTE batch contains a velocity field from the wrong synthesis frame: "
                 f"{forbidden_velocity_field}."
             )
-        physics_volume_batch, upper_boundary_batch = (
+        (
+            physics_volume_batch,
+            physics_upper_volume_batch,
+            upper_boundary_batch,
+            side_boundary_batch,
+        ) = (
             self._sample_training_physics()
             if stage == "train" and self.physics.any_active
-            else (None, None)
+            else (None, None, None, None)
         )
         batch_observation = batch.get("observation_id")
         if batch_observation is not None:
@@ -625,21 +763,23 @@ class LTEInversionModule(LightningModule):
                 else None
             ),
             randomize_depth=stage == "train",
-            return_details=(stage == "train" and self.vector_regularization_enabled),
+            return_details=stage == "train" and self.vector_regularization_enabled,
             instrument_response=(
                 batch["instrument_response"]
                 if self.instrument_type == "hmi_filter_profiles"
                 else None
             ),
         )
-        component_mse, stokes_loss = self._stokes_objective(
+        component_loss, stokes_loss = self._stokes_objective(
             result["stokes"], batch["stokes"]
         )
         if stage == "train":
             if self.physics.any_active:
                 physics_losses, physics_loss = self._physics_objective(
                     physics_volume_batch,
+                    physics_upper_volume_batch,
                     upper_boundary_batch,
+                    side_boundary_batch,
                     create_graph=True,
                 )
                 loss = stokes_loss + physics_loss
@@ -663,14 +803,17 @@ class LTEInversionModule(LightningModule):
             # transformed objective for every Stokes component plus all
             # physical objectives on every optimizer step.
             step_metrics = {
-                f"train.{name}": component_mse[index]
+                f"train.{name}": component_loss[index]
                 for index, name in enumerate(self.stokes_names)
             }
             step_metrics["train.stokes_loss"] = stokes_loss
             step_metrics["train.loss"] = loss
-            step_metrics["train.instrument_radial_velocity_correction_km_s"] = (
-                self.instrument_radial_velocity_correction_m_per_s / 1_000.0
-            )
+            if self.physics.any_active:
+                step_metrics["train.physics_loss"] = physics_loss
+            if self.optimize_instrument_line_of_sight_velocity_correction:
+                step_metrics[
+                    "train.instrument_line_of_sight_velocity_correction_km_s"
+                ] = self.instrument_line_of_sight_velocity_correction_m_per_s / 1_000.0
             if self.vector_regularization_enabled:
                 step_metrics["train.vector_regularization"] = vector_regularization
             for name, value in physics_losses.items():
@@ -681,10 +824,11 @@ class LTEInversionModule(LightningModule):
                 on_epoch=False,
                 prog_bar=False,
                 batch_size=batch_size,
+                sync_dist=True,
             )
         else:
             validation_losses = {
-                f"valid.{name}": component_mse[index]
+                f"valid.{name}": component_loss[index]
                 for index, name in enumerate(self.stokes_names)
             }
             validation_losses.update(
@@ -746,6 +890,27 @@ class LTEInversionModule(LightningModule):
                 + (" ..." if len(invalid) > 12 else "")
             )
 
+    def on_before_optimizer_step(self, optimizer) -> None:
+        """Log the largest synchronized gradient before configured clipping."""
+
+        del optimizer
+        maxima = [
+            parameter.grad.detach().abs().amax()
+            for parameter in self.parameters()
+            if parameter.grad is not None
+        ]
+        if not maxima:
+            return
+        self.log(
+            "train.gradient_max_abs_unclipped",
+            torch.stack(maxima).amax(),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=True,
+            reduce_fx="max",
+        )
+
     def validation_step(self, batch, batch_idx):
         with torch.no_grad():
             result = self._shared_step(batch, "valid", return_callback_payload=True)
@@ -766,8 +931,18 @@ class LTEInversionModule(LightningModule):
                     "position_m": self.physics_validation_position_m,
                     "time_hours": self.physics_validation_time_hours,
                 }
+            upper_volume = None
+            if self.physics.upper_volume_active:
+                if self.physics_validation_upper_position_m.numel() == 0:
+                    raise RuntimeError(
+                        "Upper-domain validation requires an initialized domain."
+                    )
+                upper_volume = {
+                    "position_m": self.physics_validation_upper_position_m,
+                    "time_hours": self.physics_validation_upper_time_hours,
+                }
             upper_boundary = None
-            if self.physics.boundary_active:
+            if self.physics.upper_boundary_active:
                 if self.physics_validation_boundary_position_m.numel() == 0:
                     raise RuntimeError(
                         "Boundary physics validation requires an initialized shell domain."
@@ -776,10 +951,24 @@ class LTEInversionModule(LightningModule):
                     "position_m": self.physics_validation_boundary_position_m,
                     "time_hours": self.physics_validation_boundary_time_hours,
                 }
+            side_boundary = None
+            if self.physics.side_boundary_active:
+                if self.physics_validation_side_position_m.numel() == 0:
+                    raise RuntimeError(
+                        "Side-boundary physics validation requires initialized "
+                        "side samples."
+                    )
+                side_boundary = {
+                    "position_m": self.physics_validation_side_position_m,
+                    "time_hours": self.physics_validation_side_time_hours,
+                    "normal": self.physics_validation_side_normal,
+                }
             with torch.inference_mode(False), torch.enable_grad():
                 physics_losses, _ = self._physics_objective(
                     volume,
+                    upper_volume,
                     upper_boundary,
+                    side_boundary,
                     create_graph=False,
                 )
             self.log_dict(

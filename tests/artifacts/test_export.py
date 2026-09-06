@@ -28,7 +28,9 @@ from prom3theus.observations import (
 )
 
 
-def _raster(*, auxiliary=None, mode=CARRINGTON_REGISTERED_RELATIVE_VELOCITY):
+def _raster(
+    *, auxiliary=None, mode=CARRINGTON_REGISTERED_RELATIVE_VELOCITY, height=1
+):
     metadata = {
         "ray_geometry": {"scene_basis_rows": np.eye(3).tolist()},
         "stokes_order": ["I", "Q", "U", "V"],
@@ -44,15 +46,23 @@ def _raster(*, auxiliary=None, mode=CARRINGTON_REGISTERED_RELATIVE_VELOCITY):
             "removed_solar_los_velocity_m_per_s": [10.0, 20.0]
         }
     return ObservationRaster(
-        stokes=torch.zeros(1, 2, 4, 2),
+        stokes=torch.zeros(height, 2, 4, 2),
         wavelength_angstrom=torch.tensor([6301.0, 6302.0]),
-        coordinates=torch.tensor([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]),
-        ray_direction=torch.tensor([[[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]]),
-        surface_position_m=torch.tensor([[[6.96e8, 0.0, 0.0], [6.96e8, 0.0, 0.0]]]),
-        stokes_basis=torch.tensor(((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)))
-        .expand(1, 2, 3, 3)
+        coordinates=torch.tensor([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]])
+        .expand(height, -1, -1)
         .clone(),
-        valid_mask=torch.tensor([[True, True]]),
+        ray_direction=torch.tensor([[[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]])
+        .expand(height, -1, -1)
+        .clone(),
+        surface_position_m=torch.tensor(
+            [[[6.96e8, 0.0, 0.0], [6.96e8, 0.0, 0.0]]]
+        )
+        .expand(height, -1, -1)
+        .clone(),
+        stokes_basis=torch.tensor(((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)))
+        .expand(height, 2, 3, 3)
+        .clone(),
+        valid_mask=torch.ones(height, 2, dtype=torch.bool),
         metadata=metadata,
         auxiliary={} if auxiliary is None else auxiliary,
     )
@@ -79,7 +89,6 @@ def _model_config():
         "atmosphere_config": {},
         "synthesizer_config": {"line_ids": ["Fe_I_6301"]},
         "instrument_config": {"type": "hinode_sp"},
-        "normalization_config": {},
         "stokes_loss_config": {},
         "weight_config": {},
         "wavelength_weights": None,
@@ -92,7 +101,8 @@ def _model_config():
         "run_metadata": {},
         "observation_id": "hinode-test",
         "velocity_synthesis_mode": CARRINGTON_REGISTERED_RELATIVE_VELOCITY,
-        "instrument_radial_velocity_correction_m_per_s": 0.0,
+        "instrument_line_of_sight_velocity_correction_m_per_s": 0.0,
+        "optimize_instrument_line_of_sight_velocity_correction": True,
         "vector_regularization_config": None,
     }
 
@@ -115,12 +125,66 @@ class _FakeLTE(torch.nn.Module):
         self.atmosphere_model = _FakeAtmosphere(kwargs["log_tau500"])
         self.synthesizer = SimpleNamespace(continuum_opacity=object())
         self.velocity_synthesis_mode = kwargs["velocity_synthesis_mode"]
-        self.instrument_radial_velocity_correction_m_per_s = torch.tensor(0.0)
+        self.instrument_line_of_sight_velocity_correction_m_per_s = torch.tensor(0.0)
         self.loaded_strict = None
 
     def load_state_dict(self, state_dict, strict=True):
         self.loaded_strict = strict
         return super().load_state_dict(state_dict, strict=strict)
+
+
+class _EvaluationAtmosphere(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(1.0))
+        self.thermodynamic_eos = SimpleNamespace(
+            mass_density=lambda temperature, gas_pressure: torch.ones_like(temperature)
+        )
+
+    def trace_rays(self, coordinates, ray_direction, depth_grid):
+        del ray_direction
+        batch_size = coordinates.shape[0]
+        depth = depth_grid.numel()
+        shape = (batch_size, depth)
+        scalar = torch.ones(shape, dtype=self.scale.dtype, device=self.scale.device)
+        zeros = torch.zeros(
+            (*shape, 3), dtype=self.scale.dtype, device=self.scale.device
+        )
+        velocity = zeros.clone()
+        velocity[..., 0] = 100.0
+        position = zeros.clone()
+        position[..., 0] = 6.96e8
+        atmosphere = SimpleNamespace(
+            temperature=5_000.0 * scalar,
+            microturbulence=1_000.0 * scalar,
+            gas_pressure=1_000.0 * scalar,
+            magnetic_field=zeros,
+            velocity_field=velocity,
+            geometric_height_m=torch.linspace(
+                1_000.0,
+                0.0,
+                depth,
+                dtype=self.scale.dtype,
+                device=self.scale.device,
+            ).expand(shape),
+        )
+        return atmosphere, SimpleNamespace(position_m=position)
+
+
+class _EvaluationContinuumOpacity:
+    @staticmethod
+    def volume_extinction_at_5000(temperature, gas_pressure):
+        del gas_pressure
+        return torch.full_like(temperature, 1.0e-5)
+
+
+def _evaluation_module(mode):
+    return SimpleNamespace(
+        atmosphere_model=_EvaluationAtmosphere(),
+        synthesizer=SimpleNamespace(continuum_opacity=_EvaluationContinuumOpacity()),
+        velocity_synthesis_mode=mode,
+        instrument_line_of_sight_velocity_correction_m_per_s=torch.tensor(5.0),
+    )
 
 
 def _write_artifact(tmp_path, *, observation=None, signature=None):
@@ -131,7 +195,7 @@ def _write_artifact(tmp_path, *, observation=None, signature=None):
     }
     observation_config = {"type": "hinode_sp", "directory": "/source"}
     resolved_config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "observation": observation_config,
         "resources": {"bundle": "packaged"},
     }
@@ -370,15 +434,159 @@ def test_hmi_stokes_requires_stored_per_pixel_response():
         )
 
 
-def test_registered_los_export_uses_the_forward_solver_sign():
-    base_los = np.asarray([[[-100.0, -101.0]]])
-    removed_from_toward = np.asarray([[30.0]])
-
-    restored = artifact_evaluation._apply_positive_redshift_los_offset(
-        base_los, removed_from_toward
+def _evaluate_velocity_export(raster, mode):
+    return artifact_evaluation.evaluate_atmosphere(
+        _evaluation_module(mode),
+        raster,
+        depth_grid=torch.tensor([-5.0, 1.0]),
+        batch_size=2,
+        storage_dtype="float32",
     )
 
-    np.testing.assert_array_equal(restored, [[[-70.0, -71.0]]])
+
+def _assert_velocity_export(result, expected_observation_los):
+    np.testing.assert_allclose(result["v_los_solar_inertial_m_per_s"], -100.0)
+    np.testing.assert_allclose(
+        result["v_los_instrument_corrected_m_per_s"], -95.0
+    )
+    np.testing.assert_allclose(result["v_los_m_per_s"], expected_observation_los)
+    np.testing.assert_allclose(
+        result["v_los_m_per_s"],
+        -result["velocity_field_observer_m_per_s"][..., 2],
+    )
+    np.testing.assert_allclose(
+        result["v_los_instrument_corrected_m_per_s"],
+        -result["velocity_field_synthesis_observer_m_per_s"][..., 2],
+    )
+
+
+def test_registered_atmosphere_export_broadcasts_metadata_offset_once():
+    raster = _raster(height=2)
+
+    result = _evaluate_velocity_export(
+        raster, CARRINGTON_REGISTERED_RELATIVE_VELOCITY
+    )
+
+    expected = np.asarray(
+        [
+            [[-85.0, -85.0], [-75.0, -75.0]],
+            [[-85.0, -85.0], [-75.0, -75.0]],
+        ]
+    )
+    _assert_velocity_export(result, expected)
+    np.testing.assert_array_equal(
+        result["removed_solar_los_velocity_m_per_s"],
+        [[10.0, 20.0], [10.0, 20.0]],
+    )
+
+
+def test_registered_atmosphere_export_accepts_matching_duplicate_auxiliary():
+    duplicate = torch.tensor([[10.0, 20.0], [10.0, 20.0]])
+    raster = _raster(
+        auxiliary={"removed_solar_los_velocity_m_per_s": duplicate},
+        height=2,
+    )
+
+    result = _evaluate_velocity_export(
+        raster, CARRINGTON_REGISTERED_RELATIVE_VELOCITY
+    )
+
+    np.testing.assert_allclose(
+        result["v_los_m_per_s"],
+        [[[-85.0, -85.0], [-75.0, -75.0]]] * 2,
+    )
+
+
+def test_registered_atmosphere_export_rejects_mismatched_duplicate_auxiliary():
+    duplicate = torch.tensor([[10.0, 20.0], [10.0, 21.0]])
+    raster = _raster(
+        auxiliary={"removed_solar_los_velocity_m_per_s": duplicate},
+        height=2,
+    )
+
+    with pytest.raises(
+        exporter.ArtifactExportError, match="does not match the authoritative"
+    ):
+        _evaluate_velocity_export(raster, CARRINGTON_REGISTERED_RELATIVE_VELOCITY)
+
+
+def test_observer_atmosphere_export_accepts_trailing_singleton_los_offset():
+    observer_los = torch.tensor(
+        [[[10.0], [20.0]], [[30.0], [40.0]]]
+    )
+    raster = _raster(
+        auxiliary={"observer_los_velocity_m_per_s": observer_los},
+        mode=CARRINGTON_OBSERVER_RELATIVE_VELOCITY,
+        height=2,
+    )
+
+    result = _evaluate_velocity_export(raster, CARRINGTON_OBSERVER_RELATIVE_VELOCITY)
+
+    expected = np.asarray(
+        [
+            [[-85.0, -85.0], [-75.0, -75.0]],
+            [[-65.0, -65.0], [-55.0, -55.0]],
+        ]
+    )
+    _assert_velocity_export(result, expected)
+    np.testing.assert_array_equal(
+        result["observer_los_velocity_m_per_s"],
+        [[10.0, 20.0], [30.0, 40.0]],
+    )
+
+
+def test_full_shell_export_is_opt_in_and_self_described(tmp_path, monkeypatch):
+    artifact, resources, config, _ = _write_artifact(tmp_path)
+    _patch_external_contracts(monkeypatch, resources, config)
+    monkeypatch.setattr(
+        exporter,
+        "evaluate_atmosphere",
+        lambda module, raster, **kwargs: {
+            "temperature_k": np.zeros((1, 2, 2), dtype=np.float32),
+            "valid_mask": raster.valid_mask.numpy(),
+        },
+    )
+    requested_samples = []
+
+    def shell_grid(module, samples):
+        requested_samples.append(samples)
+        return torch.tensor([20.0e6, -0.1e6])
+
+    monkeypatch.setattr(exporter, "full_shell_height_grid", shell_grid)
+    monkeypatch.setattr(
+        exporter,
+        "evaluate_full_shell_atmosphere",
+        lambda module, raster, **kwargs: {
+            "full_shell_geometric_height_m": np.asarray(
+                [20.0e6, -0.1e6], dtype=np.float32
+            ),
+            "full_shell_temperature_k": np.zeros((1, 2, 2), dtype=np.float32),
+        },
+    )
+
+    output = exporter.export_artifact(
+        artifact,
+        tmp_path / "full-shell.npz",
+        depth_samples=2,
+        include_full_shell=True,
+        full_shell_samples=2,
+        device="cpu",
+    )
+
+    assert requested_samples == [2]
+    with np.load(output, allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"]))
+        assert "full_shell_temperature_k" in archive
+        assert metadata["evaluation"]["full_shell"]["coordinate"] == (
+            "geometric_height_m"
+        )
+        assert metadata["evaluation"]["full_shell"]["height_bounds_m"] == [
+            20.0e6,
+            -0.1e6,
+        ]
+        assert metadata["evaluation"]["full_shell"]["spatial_sampling"] == (
+            "radial_carrington_columns"
+        )
 
 
 def test_export_facade_exposes_the_current_api():

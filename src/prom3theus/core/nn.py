@@ -207,44 +207,4 @@ class MLPModel(nn.Module):
         return self.out_layer(value)
 
 
-class NormalizationModule(nn.Module):
-    """Apply optional asinh compression to Stokes Q, U, and V."""
-
-    def __init__(self, asinh_alphas=None):
-        super().__init__()
-        if isinstance(asinh_alphas, Mapping):
-            asinh_alphas = [asinh_alphas[key] for key in ("Q", "U", "V")]
-        elif isinstance(asinh_alphas, (float, int)):
-            asinh_alphas = [asinh_alphas] * 3
-        if asinh_alphas is not None:
-            if len(asinh_alphas) != 3:
-                raise ValueError("asinh_alphas must contain Q, U, and V scales.")
-            if any(
-                isinstance(alpha, bool)
-                or not isinstance(alpha, Real)
-                or not math.isfinite(float(alpha))
-                or alpha <= 0
-                for alpha in asinh_alphas
-            ):
-                raise ValueError(
-                    "asinh_alphas must be finite, strictly positive numbers."
-                )
-            asinh_alphas = torch.tensor(asinh_alphas, dtype=torch.float32).reshape(
-                1, 3, 1
-            )
-        self.register_buffer("asinh_alphas", asinh_alphas)
-
-    def forward(self, stokes: torch.Tensor) -> torch.Tensor:
-        if stokes.shape[-2] != 4:
-            raise ValueError("Stokes tensors must use the penultimate [I,Q,U,V] axis.")
-        intensity = stokes[..., 0:1, :]
-        polarization = stokes[..., 1:4, :]
-        if self.asinh_alphas is not None:
-            alphas = self.asinh_alphas.to(stokes)
-            polarization = torch.asinh(polarization / alphas) / torch.asinh(
-                torch.ones_like(alphas) / alphas
-            )
-        return torch.cat((intensity, polarization), dim=-2)
-
-
-__all__ = ["FourierEncoding", "MLPModel", "NormalizationModule"]
+__all__ = ["FourierEncoding", "MLPModel"]

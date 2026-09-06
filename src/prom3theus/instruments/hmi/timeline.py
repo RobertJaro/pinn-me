@@ -75,6 +75,26 @@ def _validation_index(groups, selected: int | str) -> int:
     return index
 
 
+def _selected_acquisition_indices(
+    acquisition_count: int,
+    selected: tuple[int, ...] | list[int] | None,
+) -> tuple[int, ...]:
+    """Resolve configured source-sequence indices without changing their order."""
+
+    if selected is None:
+        return tuple(range(acquisition_count))
+    if not isinstance(selected, (tuple, list)) or not selected:
+        raise TypeError("acquisition_indices must be null or a non-empty sequence.")
+    indices = tuple(selected)
+    if any(type(index) is not int for index in indices):
+        raise TypeError("acquisition_indices must contain only integers.")
+    if tuple(sorted(set(indices))) != indices:
+        raise ValueError("acquisition_indices must be unique and increasing.")
+    if indices[0] < 0 or indices[-1] >= acquisition_count:
+        raise IndexError("acquisition_indices lie outside the HMI sequence.")
+    return indices
+
+
 def _response_samplers(response_directory: Path, acquisitions):
     manifest = load_response_manifest(response_directory)
     archives: dict[Path, HMIResponseArchive] = {}
@@ -118,6 +138,7 @@ class HMIDataModule(ObservationDataModule):
         files=None,
         directory=None,
         transmission_profile_directory,
+        acquisition_indices: tuple[int, ...] | list[int] | None = None,
         validation_raster: int | str = 0,
         batch_size: int = 4,
         validation_batch_size: int | None = None,
@@ -133,6 +154,7 @@ class HMIDataModule(ObservationDataModule):
         calibration_sample_limit: int = 4096,
     ) -> None:
         self.transmission_profile_directory = transmission_profile_directory
+        self.acquisition_indices = acquisition_indices
         self.raster_options = {
             "require_quality_zero": require_quality_zero,
             "quiet_sun_max_fractional_polarization": (
@@ -163,13 +185,24 @@ class HMIDataModule(ObservationDataModule):
         del stage
         if self.raster is not None:
             return
-        groups = resolve_acquisition_groups(self.files, self.directory)
+        all_groups = resolve_acquisition_groups(self.files, self.directory)
+        validation_source_index = _validation_index(
+            all_groups, self.validation_raster
+        )
+        source_indices = _selected_acquisition_indices(
+            len(all_groups), self.acquisition_indices
+        )
+        if validation_source_index not in source_indices:
+            raise ValueError(
+                "validation_raster must identify one of the selected HMI acquisitions."
+            )
+        groups = [all_groups[index] for index in source_indices]
+        validation_index = source_indices.index(validation_source_index)
         self._progress(
-            f"discovered {len(groups)} HMI acquisitions containing "
+            f"selected {len(groups)} of {len(all_groups)} HMI acquisitions containing "
             f"{sum(len(paths) for _, paths in groups):,} FITS segments; "
             "loading one complete acquisition per timeline worker"
         )
-        validation_index = _validation_index(groups, self.validation_raster)
 
         reference_files = [
             next(path for path in paths if path.name.endswith(".I0.fits"))
@@ -271,6 +304,8 @@ class HMIDataModule(ObservationDataModule):
             "segment_count_per_acquisition": 24,
             "observer_velocity_keywords_complete_and_consistent": True,
             "acquisition_count": len(loaded),
+            "source_acquisition_count": len(all_groups),
+            "source_acquisition_indices": list(source_indices),
             "single_pass_segment_validation_and_data_read": True,
             "timeline_loading": {
                 "unit": "complete HMI acquisition dataset",

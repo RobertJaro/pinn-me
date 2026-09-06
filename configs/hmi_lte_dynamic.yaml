@@ -1,0 +1,211 @@
+# Dynamic ideal-MHD LTE inversion with a 50 Mm atmospheric extrapolation.
+#
+# One PINN covers -0.1--50.0 Mm. HMI line formation stops at 1.5 Mm, while
+# momentum, induction, continuity, and divB act throughout the full shell.
+# Quiet thermodynamic priors constrain the invisible upper domain, while
+# transmissive velocity, current-free, and external-pressure conditions anchor
+# the top.
+schema_version: 2
+
+solver:
+  kind: lte
+  output_directory: /glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v04
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v04
+
+resources:
+  # The wheel includes the checksum-pinned LTE tables for both instruments.
+  bundle: packaged
+
+# HMI Stokes ingestion and the phase-map filter-profile operator are explicit.
+observation:
+  type: hmi_stokes
+  directory: /glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe
+  selection:
+    # Null selects the complete prepared acquisition sequence.
+    acquisition_indices: null
+    # Use the middle acquisition for deterministic validation; all train.
+    validation_raster: 10
+  loader:
+    batch_size: 256
+    validation_batch_size: 64
+    validation_stride: 16
+    preparation_workers: 8
+    workers: 8
+    pin_memory: true
+    progress: true
+  calibration:
+    transmission_profile_directory: /glade/work/rjarolim/data/hmi_calibration/20240323
+    require_quality_zero: true
+    quiet_sun_max_fractional_polarization: 1.0e-2
+    quiet_sun_trim_quantiles: [0.05, 0.95]
+    minimum_quiet_sun_pixels: 128
+    calibration_sample_limit: 4096
+
+atmosphere:
+  depth_grid:
+    coordinate: log_tau500
+    minimum: -5.0
+    maximum: 1.0
+    count: 51
+  geometry:
+    type: spherical_shell
+    time_dependent: true
+    # Scale the full radial input to an order-unity network coordinate.
+    height_input_scale_m: 1.0e+7
+    # Full dynamic PINN/physics domain top.
+    outer_height_megameter: 50.0
+    # HMI synthesis remains restricted to the contribution-relevant atmosphere.
+    line_formation_outer_height_megameter: 1.5
+    inner_height_megameter: -0.1
+    tangent_margin_m: 1000.0
+  reference_atmosphere: falc_82
+  upper_atmosphere:
+    type: hydrostatic_corona
+    transition_region_top_megameter: 2.5
+    coronal_temperature_k: 1.0e+6
+    reference_grid_points: 2048
+  parameters:
+    temperature:
+      log_scale: 0.1
+    velocity:
+      scale_m_per_s: 1000.0
+      maximum_m_per_s: 100000.0
+    magnetic_field:
+      scale_gauss: 100.0
+    microturbulence:
+      log_scale: 0.2
+    gas_pressure:
+      # The hydrostatic coronal profile is the zero-residual reference;
+      # the learned natural-log pressure residual is unbounded.
+      log_scale: 0.5
+  network:
+    type: mlp
+    hidden_dimension: 256
+    hidden_layers: 8
+    activation: silu
+    encoding:
+      type: fourier
+      # Carrington X/Y, radial height, normalized observation time.
+      num_frequencies: [64, 64, 64, 8]
+      max_frequencies: [2, 2, 2, 2]
+      include_input: true
+
+synthesis:
+  line_ids: [FeI_6173.3352]
+  excluded_wavelength_windows_angstrom: []
+
+instrument:
+  # Uses each acquisition's prepared phase-map response rather than a Gaussian.
+  type: hmi_filter_profiles
+  # Explicit initial global line-zero-point correction; optimized during fitting.
+  line_of_sight_velocity_correction_m_per_s: 0.0
+  # Own the absolute Doppler zero point outside the physical velocity field.
+  optimize_line_of_sight_velocity_correction: true
+
+training:
+  depth_sampling:
+    sample_count: 25
+    coarse_to_fine:
+      enabled: true
+      fine_sample_count: 16
+      uniform_weight_floor: 0.05
+  # Explicitly disabled instead of inheriting an instrument-dependent default.
+  vector_regularization:
+    enabled: false
+    magnetic_weight: 0.0
+    velocity_weight: 0.0
+    decay_steps: 0
+  physics:
+    vector_basis_matches_spatial_coordinates: true
+    adiabatic_index: 1.6666666666666667
+    # Delay the current-free top constraint while the lower atmosphere starts
+    # resolving the Stokes azimuth branches. The same factor gates side J=0.
+    upper_boundary_current_free_ramp_steps: 10000
+    collocation:
+      # Dynamic equations and divB span the complete -0.1--50.0 Mm shell.
+      volume_points_per_step: 2048
+      height_layers_per_step: 64
+      # Upper-domain priors use a separate 1.5--50.0 Mm height sampler.
+      upper_volume_points_per_step: 1024
+      upper_height_layers_per_step: 32
+      # J=0 and a fixed external pressure apply at the 50 Mm surface.
+      upper_boundary_points_per_step: 256
+      # Balanced longitude/latitude-face samples: 4 points per face and height.
+      side_boundary_points_per_step: 512
+      side_height_layers_per_step: 32
+      validation_height_layers: 12
+      validation_upper_height_layers: 6
+      validation_points_per_height: 32
+    normalization:
+      length_m: 1.0e+6
+      time_s: 3600.0
+      # Relative field scales; transport uses 1 / T + V0 / L.
+      magnetic_field_floor_gauss: 1.0
+      velocity_scale_m_per_s: 1000.0
+    equations:
+      hydrostatic_equilibrium: {enabled: false, weight: 0.0}
+      magnetohydrostatic_equilibrium: {enabled: false, weight: 0.0}
+      momentum: {enabled: true, weight: 3.0e-3}
+      magnetic_divergence: {enabled: true, weight: 1.0}
+      radial_magnetic_energy_gradient: {enabled: false, weight: 0.0}
+      induction: {enabled: true, weight: 3.0e-2}
+      continuity: {enabled: true, weight: 1.0e-2}
+      adiabatic_pressure: {enabled: false, weight: 0.0}
+      upper_boundary_open_velocity: {enabled: true, weight: 1.0e-2}
+      side_boundary_open_velocity: {enabled: true, weight: 1.0e-3}
+      upper_domain_microturbulence_prior: {enabled: true, weight: 1.0e-3}
+      upper_domain_temperature_prior: {enabled: true, weight: 1.0e-3}
+      upper_boundary_current_free: {enabled: true, weight: 1.0}
+      side_boundary_current_free: {enabled: true, weight: 1.0}
+      upper_boundary_gas_pressure_prior: {enabled: true, weight: 1.0e-2}
+  learning_rate:
+    start: 1.0e-3
+    end: 1.0e-4
+    iterations: auto
+
+loss:
+  type: huber
+  # Effective errors in the stored disk-center atlas-continuum units. Stokes I
+  # includes unresolved structure/model discrepancy; Q/U/V use the measured
+  # quiet-Sun polarization floor of roughly 7e-4--8e-4.
+  stokes_sigmas: {i: 5.0e-3, q: 8.0e-4, u: 8.0e-4, v: 8.0e-4}
+  huber_delta: 1.0
+  # Relative preferences are normalized to sum to one at runtime.
+  stokes_weights: {i: 1.0, q: 5.0, u: 5.0, v: 5.0}
+
+diagnostics:
+  validation_every_n_epochs: 1
+  visualization:
+    enabled: true
+    every_n_validations: 1
+    ray_sampling:
+      batch_size: 512
+      max_pixels: 4096
+      max_profile_samples: 2048
+    slice_sampling:
+      batch_size: 512
+      layer_count: 6
+      longitude_points: 128
+      latitude_points: 128
+      radial_points: 256
+    dpi: 180
+    meridional_slice:
+      enabled: true
+      longitude_deg: 215.0
+    include_initial: true
+
+runtime:
+  max_epochs: 500
+  log_every_n_steps: 10
+  validation_check_interval_steps: 1000
+  # Physics uses higher-order derivatives and stochastic collocation; prevent a
+  # rare but finite outlier from corrupting both the model and Adam moments.
+  gradient_clip_norm: 0.1
+
+logging:
+  type: wandb
+  project: PROM3THEUS
+  tags:
+    [hmi, sdo, fe6173, lte, dynamic-mhd, extrapolation, current-free-top,
+     spherical-shell, phase-map-response]
+  run_name: HMI LTE dynamic 50 Mm extrapolation 2024-03-23/24

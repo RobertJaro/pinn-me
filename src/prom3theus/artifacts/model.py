@@ -180,8 +180,8 @@ def save_artifact(
         raise ValueError(
             "Artifact resources must not contain an installation-specific directory."
         )
-    if manifest.resolved_config.get("schema_version") != 1:
-        raise ValueError("Artifact resolved_config must use schema version 1.")
+    if manifest.resolved_config.get("schema_version") != 2:
+        raise ValueError("Artifact resolved_config must use schema version 2.")
     if manifest.resolved_config.get("resources") != {"bundle": "packaged"}:
         raise ValueError(
             "Artifact resolved_config must use the packaged production resources."

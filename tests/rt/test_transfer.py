@@ -104,9 +104,7 @@ def test_physical_paths_keep_reversed_intervals_signed_and_differentiable():
     solver = PolarizedFormalSolver()
     extinction = torch.ones(2, dtype=matrix.dtype)
 
-    reversed_height = torch.tensor(
-        [0.0, 1.0], dtype=matrix.dtype, requires_grad=True
-    )
+    reversed_height = torch.tensor([0.0, 1.0], dtype=matrix.dtype, requires_grad=True)
     geometric = solver(
         matrix,
         source,
@@ -115,9 +113,7 @@ def test_physical_paths_keep_reversed_intervals_signed_and_differentiable():
         bottom_boundary=bottom,
         reference_extinction_m1=extinction,
     )
-    reversed_distance = torch.tensor(
-        [1.0, 0.0], dtype=matrix.dtype, requires_grad=True
-    )
+    reversed_distance = torch.tensor([1.0, 0.0], dtype=matrix.dtype, requires_grad=True)
     ray = solver(
         matrix,
         source,

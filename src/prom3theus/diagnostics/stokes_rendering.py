@@ -160,6 +160,7 @@ class StokesPlotter(DiagnosticPlotter):
                 map_image,
                 map_axes[:, component],
                 rf"fit-window $|{name}|$ integral [$\AA$]",
+                scientific_notation=False,
             )
             profile_axis = profile_axes[component]
             reference_percentiles = np.nanpercentile(

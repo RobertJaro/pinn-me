@@ -40,7 +40,10 @@ from prom3theus.instruments.hmi.response import (
     HMIResponseArchive,
     MANIFEST_FORMAT,
 )
-from prom3theus.instruments.hmi.timeline import HMIDataModule
+from prom3theus.instruments.hmi.timeline import (
+    HMIDataModule,
+    _selected_acquisition_indices,
+)
 from prom3theus.inversion.runner import _inject_coordinate_contract
 from prom3theus.observations import describe_observation_data
 from prom3theus.training.lightning import LTEInversionModule
@@ -325,6 +328,30 @@ def test_acquisition_grouping_rejects_incomplete_sets(tmp_path):
         resolve_acquisition_groups(directory=tmp_path)
 
 
+def test_hmi_acquisition_selection_uses_source_sequence_indices():
+    assert _selected_acquisition_indices(4, None) == (0, 1, 2, 3)
+    assert _selected_acquisition_indices(4, (1, 3)) == (1, 3)
+    with pytest.raises(ValueError, match="unique and increasing"):
+        _selected_acquisition_indices(4, (3, 1))
+    with pytest.raises(IndexError, match="outside"):
+        _selected_acquisition_indices(4, (4,))
+
+
+def test_acquisition_grouping_accepts_jsoc_lowercase_series_filename(tmp_path):
+    for component in "IQUV":
+        for filter_index in range(6):
+            (
+                tmp_path
+                / f"hmi.s_720s.20240323_221200_TAI.3.{component}{filter_index}.fits"
+            ).touch()
+
+    groups = resolve_acquisition_groups(directory=tmp_path)
+
+    assert len(groups) == 1
+    assert groups[0][0] == "hmi.s_720s.20240323_221200_TAI.3"
+    assert len(groups[0][1]) == 24
+
+
 def test_acquisition_grouping_rejects_non_camera_three_filenames(tmp_path):
     for component in "IQUV":
         for filter_index in range(6):
@@ -462,6 +489,7 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         json.dumps(
             {
                 "format": MANIFEST_FORMAT,
+                "phase_map_assignment_series": "hmi.B_720s",
                 "profiles": {
                     "INVPHMAP=1|HCAMID=3": {
                         "file": response_file.name,
@@ -476,12 +504,16 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
                         "record_time": "2024.03.24_01:00:00_TAI",
                         "observation_time": "2024.03.24_01:00:00_TAI",
                         "hcamid": 3,
+                        "phase_map_fsn": 1,
+                        "assignment_record": "hmi.B_720s[2024.03.24_01:00:00_TAI]",
                         "profile": "INVPHMAP=1|HCAMID=3",
                     },
                     second_key: {
                         "record_time": "2024.03.24_01:12:00_TAI",
                         "observation_time": "2024.03.24_01:12:00_TAI",
                         "hcamid": 3,
+                        "phase_map_fsn": 1,
+                        "assignment_record": "hmi.B_720s[2024.03.24_01:12:00_TAI]",
                         "profile": "INVPHMAP=1|HCAMID=3",
                     },
                 },
@@ -540,14 +572,11 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         "shell_height_bounds_Mm": [1.5, -0.1],
         "tangent_margin_m": 1_000.0,
         "reference_atmosphere_config": "falc_82",
-        "temperature_log10_bounds": [3.4, 4.0],
         "temperature_log_scale": 0.1,
         "velocity_scale_m_per_s": 1_000.0,
         "velocity_max_m_per_s": 100_000.0,
         "magnetic_scale_gauss": 100.0,
-        "microturbulence_log10_bounds": [1.0, 4.0],
         "microturbulence_log_scale": 0.2,
-        "gas_pressure_log10_bounds": [-1.5, 6.0],
         "gas_pressure_log_scale": 0.5,
         "model_config": {
             "type": "mlp",
@@ -567,6 +596,14 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
             "magnetic_divergence",
             "induction",
             "continuity",
+            "adiabatic_pressure",
+            "upper_boundary_open_velocity",
+            "side_boundary_open_velocity",
+            "side_boundary_current_free",
+            "upper_domain_microturbulence_prior",
+            "upper_domain_temperature_prior",
+            "radial_magnetic_energy_gradient",
+            "upper_boundary_current_free",
             "upper_boundary_gas_pressure_prior",
         )
     }
@@ -579,8 +616,11 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
             "type": observation.instrument_type,
             **dict(observation.instrument_options),
         },
-        normalization_config={"asinh_alphas": {"Q": 1.0e-2, "U": 1.0e-2, "V": 1.0e-2}},
-        stokes_loss_config={"type": "mse"},
+        stokes_loss_config={
+            "type": "huber",
+            "stokes_sigmas": {"I": 5.0e-3, "Q": 8.0e-4, "U": 8.0e-4, "V": 8.0e-4},
+            "huber_delta": 1.0,
+        },
         weight_config={"I": 1.0, "Q": 1.0, "U": 1.0, "V": 1.0},
         wavelength_weights=None,
         wavelength_exclude_windows_angstrom=[],
@@ -597,12 +637,20 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         physics_config={
             "equations": equations,
             "gravity_m_per_s2": None,
+            "adiabatic_index": 5.0 / 3.0,
+            "upper_boundary_current_free_ramp_steps": 0,
             "volume_points_per_step": 0,
             "height_layers_per_step": 0,
+            "upper_volume_points_per_step": 0,
+            "upper_height_layers_per_step": 0,
             "upper_boundary_points_per_step": 0,
+            "side_boundary_points_per_step": 0,
+            "side_height_layers_per_step": 0,
             "validation_height_layers": 0,
+            "validation_upper_height_layers": 0,
             "validation_points_per_height": 0,
             "sampling_domain": None,
+            "upper_sampling_domain": None,
             "vector_basis_matches_spatial_coordinates": True,
             "normalization": {"length_m": 1.0e6, "time_s": 3_600.0},
         },
@@ -610,7 +658,8 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         run_metadata={},
         observation_id=observation.observation_id,
         velocity_synthesis_mode=observation.velocity_synthesis_mode.value,
-        instrument_radial_velocity_correction_m_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
+        optimize_instrument_line_of_sight_velocity_correction=True,
         vector_regularization_config={
             "enabled": False,
             "magnetic_weight": 0.0,

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from prom3theus.core import FourierEncoding, MLPModel, NormalizationModule
+from prom3theus.core import FourierEncoding, MLPModel
 
 
 def test_fourier_encoding_is_deterministic_and_differentiable():
@@ -52,18 +52,3 @@ def test_mlp_accepts_only_canonical_encoding_and_activation_names():
         MLPModel(2, 1, dim=8.5)
     with pytest.raises(TypeError, match="must be a mapping"):
         MLPModel(2, 1, encoding_config=[])
-
-
-def test_stokes_normalization_preserves_intensity_and_compresses_polarization():
-    stokes = torch.tensor([[[1.0, 0.8], [1.0, -1.0], [1.0, -1.0], [1.0, -1.0]]])
-    normalized = NormalizationModule({"Q": 0.1, "U": 0.2, "V": 0.4})(stokes)
-    torch.testing.assert_close(normalized[..., 0:1, :], stokes[..., 0:1, :])
-    torch.testing.assert_close(
-        normalized[..., 1:, :].abs(), torch.ones_like(normalized[..., 1:, :])
-    )
-
-
-@pytest.mark.parametrize("alpha", [float("nan"), float("inf"), float("-inf")])
-def test_stokes_normalization_rejects_nonfinite_scales(alpha):
-    with pytest.raises(ValueError, match="finite, strictly positive"):
-        NormalizationModule([alpha, 0.2, 0.4])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -16,6 +17,8 @@ from prom3theus.instruments import (
     resolve_instrument_config,
 )
 from prom3theus.observations import get_observation_adapter
+from prom3theus.training.assembly import build_forward_assembly
+from prom3theus.training.configuration import DepthSamplingSettings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -87,6 +90,58 @@ def test_hmi_operator_integrates_batch_local_profiles_and_preserves_gradients():
         )
 
 
+def test_hmi_production_quadrature_has_distinct_float32_continuum_endpoints():
+    half_width = 0.65
+    reference = 6173.3433
+    nodes, _ = np.polynomial.legendre.leggauss(81)
+    quadrature = reference + half_width * nodes
+    operator = HMIFilterProfiles(
+        quadrature_wavelength_angstrom=quadrature,
+        inner_half_width_angstrom=half_width,
+    )
+
+    observed = torch.linspace(6173.1, 6173.5, 6, dtype=torch.float32)
+    synthesis = operator.synthesis_grid(observed)
+
+    assert synthesis.dtype == torch.float32
+    assert torch.all(synthesis[1:] > synthesis[:-1])
+    assert synthesis[0] == torch.nextafter(
+        synthesis[1], synthesis.new_tensor(-torch.inf)
+    )
+    assert synthesis[-1] == torch.nextafter(
+        synthesis[-2], synthesis.new_tensor(torch.inf)
+    )
+
+
+def test_hmi_production_grid_prepares_the_assembled_float32_lte_forward_model():
+    half_width = 0.65
+    reference = 6173.3433
+    nodes, _ = np.polynomial.legendre.leggauss(81)
+    quadrature = reference + half_width * nodes
+
+    assembly = build_forward_assembly(
+        atmosphere_model=torch.nn.Identity(),
+        synthesizer_config={"line_ids": ["FeI_6173.3352"]},
+        instrument_config={
+            "type": "hmi_filter_profiles",
+            "quadrature_wavelength_angstrom": quadrature,
+            "inner_half_width_angstrom": half_width,
+        },
+        velocity_synthesis_mode="carrington_observer_relative",
+        depth_sampling=DepthSamplingSettings(3, False, 1, 0.0),
+        wavelength_angstrom=torch.linspace(
+            6173.1713, 6173.5153, 6, dtype=torch.float32
+        ),
+    )
+    assembly.synthesizer.float()
+    assembly.instrument.float()
+    synthesis = assembly.synthesis_wavelength_angstrom.float()
+
+    assert assembly.synthesizer.wavelength_grid_prepared
+    assert synthesis.numel() == 83
+    assert torch.all(synthesis[1:] > synthesis[:-1])
+
+
 def test_public_factory_requires_an_exact_discriminator():
     config = {
         "type": "hinode_sp",
@@ -109,7 +164,9 @@ def test_public_factory_requires_an_exact_discriminator():
     ("filename", "data_module_name"),
     [
         ("hinode_lte_mhs.yaml", "HinodeDataModule"),
-        ("hmi_lte_subframe.yaml", "HMIDataModule"),
+        ("hinode_lte_mhs_extrapolation.yaml", "HinodeDataModule"),
+        ("hmi_lte_mhs.yaml", "HMIDataModule"),
+        ("hmi_lte_dynamic.yaml", "HMIDataModule"),
     ],
 )
 def test_shipped_observation_sections_construct_their_exact_adapter(

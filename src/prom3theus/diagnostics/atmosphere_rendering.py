@@ -25,7 +25,6 @@ class AtmospherePlotter(DiagnosticPlotter):
         """Show selected fields on ordered optical-depth or shell-height layers."""
 
         depth_axis = evaluated["shell_height_levels_m"]
-        solar_radius_m = float(evaluated["solar_radius_m"])
         depth_indices = sorted(
             depth_indices,
             key=lambda index: float(depth_axis[index]),
@@ -60,7 +59,9 @@ class AtmospherePlotter(DiagnosticPlotter):
             for column, name in enumerate(field_names):
                 style = FIELD_STYLES[name]
                 axis = axes[row, column]
-                values = evaluated["map_fields"][name][..., depth_index]
+                values = self._display_values(
+                    evaluated["map_fields"][name][..., depth_index], style
+                )
                 layer_longitude_deg = (
                     map_longitude_deg[..., depth_index]
                     if map_longitude_deg.ndim == 3
@@ -92,9 +93,9 @@ class AtmospherePlotter(DiagnosticPlotter):
                 column_images[column] = image
                 axis.set_aspect("equal", adjustable="box")
                 if column == 0:
-                    radius_Rsun = 1.0 + depth_value / solar_radius_m
+                    height_Mm = depth_value / 1.0e6
                     axis.annotate(
-                        rf"$r={radius_Rsun:.6f}\,R_\odot$",
+                        rf"$h=r-R_\odot={height_Mm:g}\,\mathrm{{Mm}}$",
                         xy=(0.01, 0.98),
                         xycoords="axes fraction",
                         ha="left",
@@ -129,9 +130,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         tau = evaluated["profile_fields"]["tau500_ray"]
         tiny = np.finfo(tau.dtype).tiny
         log_tau = np.log10(np.clip(tau, tiny, None))
-        radius_Rsun = 1.0 + (
-            evaluated["shell_height_levels_m"] / evaluated["solar_radius_m"]
-        )
+        height_Mm = evaluated["shell_height_levels_m"] / 1.0e6
         # The outer boundary is defined to have tau=0 and therefore has no
         # finite logarithm. Exclude only that endpoint from the profile panel.
         profile_slice = slice(1, None)
@@ -143,7 +142,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         FigureCanvasAgg(figure)
         profile_axis, map_axis = figure.subplots(1, 2)
         profile_axis.fill_betweenx(
-            radius_Rsun[profile_slice],
+            height_Mm[profile_slice],
             lower,
             upper,
             color="tab:blue",
@@ -152,14 +151,14 @@ class AtmospherePlotter(DiagnosticPlotter):
         )
         profile_axis.plot(
             median,
-            radius_Rsun[profile_slice],
+            height_Mm[profile_slice],
             color="tab:blue",
             linewidth=1.6,
             label="validation-ray median",
         )
         profile_axis.plot(
             evaluated["log_tau500"][profile_slice],
-            radius_Rsun[profile_slice],
+            height_Mm[profile_slice],
             color="black",
             linestyle="--",
             linewidth=1.0,
@@ -167,7 +166,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         )
         profile_axis.axvline(0.0, color="0.45", linewidth=0.8, linestyle=":")
         profile_axis.set_xlabel(r"$\log_{10}\tau_{500}$")
-        profile_axis.set_ylabel(r"radius $r/R_\odot$")
+        profile_axis.set_ylabel(r"height $h=r-R_\odot$ [Mm]")
         profile_axis.set_title(r"derived $\tau_{500}=\int\alpha_{500}\,ds$")
         profile_axis.grid(alpha=0.2)
         profile_axis.legend(loc="best", fontsize=8)
@@ -198,10 +197,10 @@ class AtmospherePlotter(DiagnosticPlotter):
         map_axis.set_aspect("equal", adjustable="box")
         map_axis.set_xlabel("Carrington longitude [deg]")
         map_axis.set_ylabel("Carrington latitude [deg]")
-        bottom_radius_Rsun = radius_Rsun[bottom_index]
+        bottom_height_Mm = height_Mm[bottom_index]
         map_axis.set_title(
             rf"bottom layer: $\log_{{10}}\tau_{{500}}$ at "
-            rf"$r={bottom_radius_Rsun:.6f}\,R_\odot$"
+            rf"$h=r-R_\odot={bottom_height_Mm:g}\,\mathrm{{Mm}}$"
         )
         colorbar = figure.colorbar(image, ax=map_axis, location="right", shrink=0.86)
         colorbar.set_label(r"$\log_{10}\tau_{500}$")
@@ -231,13 +230,9 @@ class AtmospherePlotter(DiagnosticPlotter):
         )[0]
         map_latitude = evaluated["map_latitude_deg"][:, 0]
         latitude_deg = map_latitude if map_latitude.ndim == 2 else map_latitude[:, None]
-        vertical = 1.0 + (
-            evaluated["map_fields"]["geometric_height"][:, 0, :]
-            * 1.0e6
-            / evaluated["solar_radius_m"]
-        )
-        vertical_label = r"radius $r/R_\odot$"
-        depth_plane = "physical Carrington latitude-radius"
+        vertical = evaluated["map_fields"]["geometric_height"][:, 0, :]
+        vertical_label = r"height $h=r-R_\odot$ [Mm]"
+        depth_plane = "physical Carrington latitude-height"
         latitude_grid_deg = (
             latitude_deg
             if latitude_deg.shape == vertical.shape
@@ -250,11 +245,12 @@ class AtmospherePlotter(DiagnosticPlotter):
         images = []
         for axis, name in zip(axes, field_names, strict=True):
             style = FIELD_STYLES[name]
-            values = evaluated["map_fields"][name][:, 0, :]
+            raw_values = evaluated["map_fields"][name][:, 0, :]
+            values = self._display_values(raw_values, style)
             norm_values = (
                 norm_evaluated["map_fields"][name]
                 if norm_evaluated is not None
-                else values
+                else raw_values
             )
             image = axis.pcolormesh(
                 latitude_corners_deg,

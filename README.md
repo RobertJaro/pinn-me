@@ -109,14 +109,19 @@ committed production bundle.
 Manifests and runtime consumers use these complete relative paths. There is no
 fallback lookup into the former flat resource directory.
 
-## The two run configurations
+## Run configurations
 
-The maintained source and distribution contain exactly two public YAML run files:
+The maintained source and distribution contain four public YAML run files:
 
 - [`configs/hinode_lte_mhs.yaml`](configs/hinode_lte_mhs.yaml)
-- [`configs/hmi_lte_subframe.yaml`](configs/hmi_lte_subframe.yaml)
+- [`configs/hinode_lte_mhs_extrapolation.yaml`](configs/hinode_lte_mhs_extrapolation.yaml)
+- [`configs/hmi_lte_mhs.yaml`](configs/hmi_lte_mhs.yaml)
+- [`configs/hmi_lte_dynamic.yaml`](configs/hmi_lte_dynamic.yaml)
 
-They share one strict schema and the same readable section order:
+They share one strict schema and the same readable section order. The current
+inversion configuration schema is version 2. Version 1 encoded finite
+thermodynamic decoder bounds and is intentionally rejected rather than silently
+loading its weights under the unbounded decoder:
 
 ```text
 schema_version
@@ -137,16 +142,111 @@ Unknown or duplicate keys are errors. The solver and instrument are always
 explicit. Relative paths are resolved from the configuration file, so commands
 behave the same from every working directory.
 
-Both maintained YAML files hard-code their preserved GLade input/output paths
-and Derecho scratch paths. Ambient environment variables do not redirect
-either workflow.
+The `loss` section defines effective `stokes_sigmas` in the stored
+disk-center atlas-continuum units and applies a noise-standardized Huber
+objective. Relative Stokes weights are normalized to sum to one; changing all
+four by the same factor therefore does not alter the data-versus-physics scale.
+
+All maintained YAML files hard-code their GLade input/output paths and Derecho
+scratch paths. Ambient environment variables do not redirect these workflows.
 
 Inspect the fully resolved, typed configuration before a run:
 
 ```bash
 prom3theus validate-config configs/hinode_lte_mhs.yaml
-prom3theus validate-config configs/hmi_lte_subframe.yaml
+prom3theus validate-config configs/hinode_lte_mhs_extrapolation.yaml
+prom3theus validate-config configs/hmi_lte_mhs.yaml
+prom3theus validate-config configs/hmi_lte_dynamic.yaml
 ```
+
+### Hinode MHS extrapolation
+
+The extrapolation configuration uses one atmospheric PINN over the complete
+physical shell. LTE synthesis and opacity-guided ray refinement stop at the
+configured line-formation top, while independent collocation batches apply MHS
+and `div B` throughout the full shell, microturbulence and hydrostatic-coronal
+temperature priors only above the line-formation domain, and transmissive-flow
+and current-free conditions at the outer boundary. The transmissive velocity
+condition drives its normal derivative to zero without selecting inward or
+outward flow. The maintained extrapolation configuration reaches 20 Mm while
+retaining one PINN for both domains.
+
+### HMI static and dynamic inversions
+
+`hmi_lte_mhs.yaml` fits every selected acquisition with one time-independent
+atmosphere constrained by MHS, `div B`, and the top-pressure prior.
+`hmi_lte_dynamic.yaml` represents the observed time sequence explicitly over a
+single -0.1--50 Mm PINN. HMI line formation remains below 1.5 Mm. The three
+Cartesian magnetic components are decoded directly; ideal induction, momentum,
+continuity, and a soft `div B` constraint act throughout the full shell. The
+maintained run disables the adiabatic-pressure and radial magnetic-energy
+heuristics and has no potential- or NLFFF-volume loss. A weak prescribed
+temperature stabilization acts only in the invisible upper domain. A
+transmissive velocity condition, `J = 0`, and an external-pressure condition
+apply at the 50 Mm boundary. Independent grouped samples cover the four angular
+side faces at matched height layers. Those faces use zero normal velocity
+gradient and `J = 0`; no zero-field or zero-normal-flux condition is imposed.
+
+HMI acquisition selection is explicit in `observation.selection`.
+`acquisition_indices: null` uses the complete source sequence; a zero-based
+list such as `[10]` loads only those source frames. `validation_raster` uses the
+same source-sequence index and must belong to the selected set.
+
+```text
+D ln(rho)/Dt + div(v) = 0,
+dB/dt - curl(v cross B) = 0,
+div(B) = 0.
+```
+
+No resistive term is used. Because a complete coronal energy equation is not
+yet implemented, the upper-temperature prior is an explicit prescribed
+temperature stabilization rather than a conservation equation. The upper
+temperature prediction remains trainable, but its log-space target is the fixed
+hydrostatic-coronal reference. The top-pressure target is likewise a fixed
+external-pressure boundary value; it is not inferred from a magnetic model.
+Both targets are detached while the model predictions remain attached.
+
+Physics normalizers are evaluated separately at each sampled height and
+detached before division; all predicted fields and residual derivatives remain
+attached. `div B` and the current-free top condition use the detached magnetic
+scale `B_*/L`, induction uses `B_* (1/T + V0/L)`, and continuity uses the fixed
+transport rate. Vector residuals are averaged over components. The top
+`upper_boundary_open_velocity` loss penalizes `(r_hat dot grad) v` normalized
+by `V0/L`; unlike the previous one-sided no-inflow term, it permits either sign
+of radial flow. The analogous side loss uses the outward longitude/latitude-face
+normal. Side `curl B` uses the same detached per-height magnetic normalization
+as the top current-free condition.
+
+The top gas pressure is not a YAML tuning parameter. The bundled reference keeps
+the existing 25-point STiC FALC_82 line-formation mapping on
+`-5 <= log10(tau500) <= 1` unchanged, then restores all 37 native FALC samples
+with `log10(tau500) < -5` for the physical-height thermodynamic reference. The
+true native top is 2.073502459 Mm, where `T = 100 kK` and
+`p = 0.0319344213 Pa`. Above that point, a quintic smootherstep in `log(T)`
+reaches the configured 1 MK corona at 2.5 Mm and remains isothermal. Pressure is
+integrated hydrostatically to the configured outer height using inverse-square
+gravity and the same combined plasma closure used by synthesis.
+
+`SolarPlasmaTable` is the single runtime provider for radiative and
+thermodynamic plasma quantities. It reproduces the packaged STiC values exactly
+from 2512 K through 10 kK. Between 10 kK and 31.6 kK, a quintic C1 window fades
+the neutral-H and Fe I reservoirs and true continuum absorption to zero, while
+continuum scattering transitions to analytic Thomson extinction, `n_e sigma_T`.
+The thermodynamic branch joins the STiC state to a compact CHIANTI 11.0.2
+default-coronal-equilibrium electron mapping, remains exact through 10 MK,
+blends to the fully ionized ideal STiC mixture over 10--20 MK, and is exactly
+ideal at and above 20 MK. Density, electron density, and mean particle mass use
+one composition closure throughout.
+
+Temperature, gas pressure, and microturbulence are decoded as unbounded linear
+residuals around their references in natural-log space. The provider evaluates
+those actual positive model values; it does not clip the model state or add a
+table-support loss. Outside the STiC pressure axis, radiative reservoirs are
+continued using the hybrid-EoS density ratio: one power for populations and
+scattering and two powers for true absorption. This gives the expected linear
+and quadratic pressure tails while keeping gradients back to the unrestricted
+model outputs. Below the cold STiC edge, composition is frozen but the actual
+ideal-gas `P/T` density scaling is retained.
 
 ## Preparing HMI responses
 
@@ -161,13 +261,15 @@ required for this preparation step):
 ```bash
 export JSOC_EMAIL=you@example.org
 prom3theus prepare hmi-responses /path/to/hmi/*.fits \
-  --output /path/to/calibration/hmi/2024-03-23 \
-  --phase-map-fsn 123456789
+  --output /path/to/calibration/hmi/2024-03-23
 ```
 
-The phase-map FSN is explicit: obtain the authoritative record identifier for
-the acquisitions being prepared, then pass it directly. Preparation queries
-`hmi.phasemaps_extended`; it does not depend on an inversion-product series.
+No phase-map identifier is supplied by the user. For every input `T_REC`,
+preparation queries the matching definitive `hmi.B_720s` record for its
+authoritative `INVPHMAP` assignment, then resolves and downloads that exact
+camera record from `hmi.phasemaps_extended`. The manifest records the assignment
+record, phase-map FSN, calibration record, and archive checksum for every
+acquisition.
 
 The HMI YAML points `observation.calibration.transmission_profile_directory` to
 that directory. The preparation manifest binds every response archive by
@@ -195,10 +297,16 @@ export JSOC_EMAIL=you@example.org
 The defaults reproduce the retained 2024-03-23/24 HMI workflow using 20 native
 12-minute slots in the half-open interval 22:12--02:12 TAI (last slot 02:00),
 Carrington longitude 215 degrees, latitude -12 degrees, and a 1024 by 512 pixel
-cutout. The preparation script pins the verified
-`hmi.phasemaps_extended` calibration FSN `230562565`. Delete or move an existing
-prepared directory before intentionally rebuilding it; the scripts never
-overwrite data.
+cutout. Response preparation resolves the calibration assigned to each
+acquisition directly from JSOC. Delete or move an existing prepared directory
+before intentionally rebuilding it; the scripts never overwrite data.
+
+The 1024 by 512 cutout is exact: preparation does not append, reflect, or fill
+extra pixels, and the inversion has no separate science-FOV mask or numerical
+padding width. Physics longitude/latitude bounds are the extrema of valid
+observed surface pixels across the selected timeline. Consequently, any guard
+region is contextual margin chosen when making the large cutout; side boundary
+samples lie on that cutout's valid angular envelope.
 
 Hinode acquisition and SolarSoft `sp_prep` calibration remain external because
 there is no equivalent trustworthy Python preparation in this package. Place
@@ -220,7 +328,9 @@ email, or removed namespace assumptions.
 
 ```bash
 prom3theus invert configs/hinode_lte_mhs.yaml
-prom3theus invert configs/hmi_lte_subframe.yaml
+prom3theus invert configs/hinode_lte_mhs_extrapolation.yaml
+prom3theus invert configs/hmi_lte_mhs.yaml
+prom3theus invert configs/hmi_lte_dynamic.yaml
 ```
 
 Each run validates configuration, resource checksums, observation geometry,
@@ -229,6 +339,12 @@ training. Observation cache identities include complete-content hashes of the
 selected FITS inputs and external calibration manifest, so changing source data
 cannot silently reuse stale arrays. There are no implicit instrument defaults
 hidden in the runner.
+
+Validation figures are written to the durable
+`solver.output_directory/diagnostics` directory. Each scheduled validation
+creates a `*_stokes_validation.png` comparison containing reference and
+predicted I, Q, U, and V maps, ensemble line profiles, and integrated-fit
+scatter panels.
 
 The durable output is a schema-v1 artifact containing:
 
@@ -260,6 +376,27 @@ the observation store and resource signatures, loads weights with PyTorch's
 restricted tensor loader, and evaluates the requested depth grid. For a
 multi-raster sequence, the spatial export is evaluated on the validation raster
 named by the immutable observation-store manifest.
+
+The default atmosphere arrays follow those observer rays only through the LTE
+line-formation domain. To export the upper solution from an extrapolation run,
+request the separate full-shell product explicitly:
+
+```bash
+prom3theus export /path/to/run/artifact /path/to/atmosphere.npz \
+  --include-full-shell \
+  --full-shell-samples 161
+```
+
+The additional `full_shell_*` arrays sample outer-to-inner geometric height on
+radial Carrington columns rooted at every valid validation-raster chart/time
+coordinate. Their Cartesian vectors use the heliocentric Carrington frame and
+their velocities are co-rotating. They include position, temperature, gas
+pressure, mass density, microturbulence, magnetic field, and velocity in
+Cartesian and local spherical components. This product does not assign optical
+depth or synthesize Stokes profiles above the line-formation domain; its NPZ
+metadata records the physical height bounds, sampling convention, and vector
+frames. Cost scales with valid pixels times `--full-shell-samples`; lower
+`--batch-size` when device memory is limited.
 
 ## Numerical API
 
@@ -293,7 +430,7 @@ Run the focused suite from the source tree:
 pytest
 ```
 
-The suite covers the strict two-file configuration, coordinates and neural
+The suite covers the strict maintained configurations, coordinates and neural
 primitives, LTE opacity and polarized transfer, ray geometry, both instruments,
 safe observation/artifact persistence, inversion constraints, training
 orchestration, CLI behavior, package boundaries, and wheel contents.

@@ -11,6 +11,7 @@ from matplotlib.figure import Figure
 from .atmosphere_rendering import AtmospherePlotter
 from .evaluation import (
     AtmosphereEvaluator,
+    CURRENT_DENSITY_FIELDS,
     MAGNETIC_FIELDS,
     THERMODYNAMIC_FIELDS,
     VELOCITY_FIELDS,
@@ -90,11 +91,10 @@ class AtmosphereRenderer:
         outer_height_Mm, inner_height_Mm = (
             pl_module.atmosphere_model.shell_height_bounds_Mm
         )
-        slice_heights = np.linspace(
-            outer_height_Mm * 1.0e6,
+        slice_heights = self.log_spaced_slice_heights(
             inner_height_Mm * 1.0e6,
+            outer_height_Mm * 1.0e6,
             self.evaluator.slice_layer_count,
-            dtype=np.float32,
         )
         evaluated = self.evaluator.evaluate_shell_layers(
             pl_module, raster, slice_heights
@@ -112,15 +112,21 @@ class AtmosphereRenderer:
             ),
             (
                 MAGNETIC_FIELDS,
-                r"Depth-stratified magnetic field components",
+                r"Depth-stratified magnetic field — spherical components and observer-frame angles",
                 "magnetic_field",
                 "Magnetic field",
             ),
             (
                 VELOCITY_FIELDS,
-                r"Depth-stratified velocity components",
+                r"Depth-stratified velocity — spherical components and observer LOS",
                 "velocity",
                 "Velocity",
+            ),
+            (
+                CURRENT_DENSITY_FIELDS,
+                r"Current-density magnitude $\|\mathbf{J}\|$",
+                "current_density",
+                "Current density",
             ),
         )
         for field_names, title, filename_suffix, log_key in panels:
@@ -161,15 +167,21 @@ class AtmosphereRenderer:
                 ),
                 (
                     MAGNETIC_FIELDS,
-                    r"Magnetic field components",
+                    r"Magnetic field — spherical components and observer-frame angles",
                     "meridional_magnetic_field",
                     "Magnetic field",
                 ),
                 (
                     VELOCITY_FIELDS,
-                    r"Velocity components",
+                    r"Velocity — spherical components and observer LOS",
                     "meridional_velocity",
                     "Velocity",
+                ),
+                (
+                    CURRENT_DENSITY_FIELDS,
+                    r"Current-density magnitude $\|\mathbf{J}\|$",
+                    "meridional_current_density",
+                    "Current density",
                 ),
             )
             for field_names, title, filename_suffix, log_key in meridional_panels:
@@ -188,6 +200,27 @@ class AtmosphereRenderer:
                     )
                 )
         return paths
+
+    @staticmethod
+    def log_spaced_slice_heights(
+        inner_height_m: float,
+        outer_height_m: float,
+        count: int,
+    ) -> np.ndarray:
+        """Sample the lower boundary, then reference-to-top layers logarithmically."""
+
+        if not inner_height_m < 0.0 < outer_height_m or count < 3:
+            raise ValueError(
+                "Log-spaced shell slices require inner < 0 < outer and count >= 3."
+            )
+        # The first layer is the exact lower boundary. The remaining layers
+        # start exactly at r=R_sun (h=0) and use a 100-km shifted logarithmic
+        # scale so both zero and the exact upper boundary can be included.
+        offset_m = 1.0e5
+        above_reference = (
+            np.geomspace(offset_m, outer_height_m + offset_m, count - 1) - offset_m
+        )
+        return np.concatenate(([inner_height_m], above_reference)).astype(np.float32)
 
     def render_stokes_validation(
         self,
@@ -217,7 +250,7 @@ class AtmosphereRenderer:
                 line_centers_angstrom=line_centers_angstrom,
             ),
             f"{label}_stokes_validation.png",
-            "Validation/Stokes comparison",
+            "Stokes comparison",
         )
 
 

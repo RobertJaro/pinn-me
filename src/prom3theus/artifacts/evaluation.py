@@ -35,13 +35,57 @@ _STORAGE_DTYPES = {
 }
 
 
-def _apply_positive_redshift_los_offset(
-    base_los_velocity: np.ndarray,
-    toward_observer_offset: np.ndarray,
-) -> np.ndarray:
-    """Apply an offset subtracted from ``v_toward`` to ``v_los=-v_toward``."""
+def _spatial_los_offset(
+    value: object,
+    spatial_shape: tuple[int, int],
+    *,
+    name: str,
+) -> torch.Tensor:
+    """Normalize one observation LOS offset to a CPU ``[Y, X]`` tensor."""
 
-    return base_los_velocity + toward_observer_offset[..., None]
+    offset = torch.as_tensor(value).detach().cpu()
+    if tuple(offset.shape) == (*spatial_shape, 1):
+        offset = offset[..., 0]
+    if tuple(offset.shape) != spatial_shape:
+        raise ArtifactExportError(
+            f"{name} must have shape {spatial_shape} or {(*spatial_shape, 1)}."
+        )
+    return offset
+
+
+def _observation_los_offset(
+    raster: ObservationRaster,
+    velocity_synthesis_mode: str,
+) -> torch.Tensor:
+    """Resolve the authoritative per-pixel LOS offset used by synthesis."""
+
+    if velocity_synthesis_mode == CARRINGTON_OBSERVER_RELATIVE_VELOCITY:
+        return _spatial_los_offset(
+            raster.auxiliary["observer_los_velocity_m_per_s"],
+            raster.spatial_shape,
+            name="observer_los_velocity_m_per_s",
+        )
+
+    removed_per_column = torch.as_tensor(
+        removed_solar_los_velocity(raster), dtype=torch.float64
+    )
+    authoritative = removed_per_column.unsqueeze(0).expand(raster.spatial_shape)
+    duplicate = raster.auxiliary.get("removed_solar_los_velocity_m_per_s")
+    if duplicate is not None:
+        duplicate = _spatial_los_offset(
+            duplicate,
+            raster.spatial_shape,
+            name="removed_solar_los_velocity_m_per_s auxiliary",
+        )
+        if not torch.equal(
+            duplicate,
+            authoritative.to(dtype=duplicate.dtype),
+        ):
+            raise ArtifactExportError(
+                "The removed_solar_los_velocity_m_per_s auxiliary does not match "
+                "the authoritative observer_velocity_correction metadata."
+            )
+    return authoritative
 
 
 def resolve_storage_dtype(name: str) -> tuple[torch.dtype, np.dtype]:
@@ -128,12 +172,12 @@ def evaluate_atmosphere(
     parameter = next(model.parameters())
     mode = resolve_velocity_synthesis_mode(module.velocity_synthesis_mode).value
     validate_raster_velocity_contract(raster, mode)
-    radial_velocity_correction = float(
-        module.instrument_radial_velocity_correction_m_per_s.detach().cpu()
+    line_of_sight_velocity_correction = float(
+        module.instrument_line_of_sight_velocity_correction_m_per_s.detach().cpu()
     )
-    if not math.isfinite(radial_velocity_correction):
+    if not math.isfinite(line_of_sight_velocity_correction):
         raise ArtifactExportError(
-            "The trained instrument radial-velocity correction is not finite."
+            "The trained instrument LOS-velocity correction is not finite."
         )
 
     valid_flat = raster.valid_mask.reshape(-1)
@@ -144,6 +188,8 @@ def evaluate_atmosphere(
     rays = raster.ray_direction.reshape(-1, 3).index_select(0, flat_indices)
     bases = raster.stokes_basis.reshape(-1, 3, 3).index_select(0, flat_indices)
     spatial_shape = raster.spatial_shape
+    observation_los_offset = _observation_los_offset(raster, mode)
+    flat_observation_los_offset = observation_los_offset.reshape(-1)
     depth = int(depth_grid.numel())
     flat_size = int(valid_flat.numel())
 
@@ -170,9 +216,9 @@ def evaluate_atmosphere(
             "rotation",
             "inertial_velocity",
             "inertial_velocity_spherical",
-            "instrument_velocity",
-            "radial_correction",
             "magnetic_observer",
+            "corotating_velocity_observer",
+            "synthesis_velocity_observer",
             "velocity_observer",
             "inertial_velocity_observer",
         )
@@ -223,7 +269,7 @@ def evaluate_atmosphere(
             store_scalar("tau500_radial", tau500_radial)
             store_scalar(
                 "mass_density",
-                continuum_opacity.reference_mass_density(
+                model.thermodynamic_eos.mass_density(
                     atmosphere.temperature,
                     atmosphere.gas_pressure,
                 ),
@@ -248,14 +294,6 @@ def evaluate_atmosphere(
             inertial_spherical = project_cartesian_to_spherical(
                 inertial_velocity, spherical, torch
             )
-            radial_unit = trace.position_m / torch.linalg.vector_norm(
-                trace.position_m, dim=-1, keepdim=True
-            )
-            radial_correction = radial_unit * radial_velocity_correction
-            instrument_velocity = inertial_velocity + radial_correction
-            instrument_spherical = project_cartesian_to_spherical(
-                instrument_velocity, spherical, torch
-            )
             observer_basis = bases[start:stop].to(parameter)
             store_vector("magnetic", atmosphere.magnetic_field)
             store_vector("velocity", atmosphere.velocity_field)
@@ -265,26 +303,31 @@ def evaluate_atmosphere(
             store_vector("rotation", rotation)
             store_vector("inertial_velocity", inertial_velocity)
             store_vector("inertial_velocity_spherical", inertial_spherical)
-            store_vector("instrument_velocity", instrument_velocity)
-            store_vector("radial_correction", radial_correction)
             store_vector(
                 "magnetic_observer",
                 project_spherical_to_observer(
                     magnetic_spherical, spherical, observer_basis, torch
                 ),
             )
-            store_vector(
-                "inertial_velocity_observer",
-                project_spherical_to_observer(
-                    inertial_spherical, spherical, observer_basis, torch
-                ),
+            corotating_observer = project_spherical_to_observer(
+                velocity_spherical, spherical, observer_basis, torch
             )
-            store_vector(
-                "velocity_observer",
-                project_spherical_to_observer(
-                    instrument_spherical, spherical, observer_basis, torch
-                ),
+            inertial_observer = project_spherical_to_observer(
+                inertial_spherical, spherical, observer_basis, torch
             )
+            store_vector("inertial_velocity_observer", inertial_observer)
+            synthesis_observer = inertial_observer.clone()
+            # Positive correction is positive-redshift v_los, opposite the
+            # third Stokes-basis axis that points toward the observer.
+            synthesis_observer[..., 2] -= line_of_sight_velocity_correction
+            observation_observer = synthesis_observer.clone()
+            batch_los_offset = flat_observation_los_offset.index_select(
+                0, flat_indices[start:stop].cpu()
+            )
+            observation_observer[..., 2] -= batch_los_offset.to(parameter)[:, None]
+            store_vector("corotating_velocity_observer", corotating_observer)
+            store_vector("synthesis_velocity_observer", synthesis_observer)
+            store_vector("velocity_observer", observation_observer)
     finally:
         model.train(was_training)
 
@@ -302,8 +345,12 @@ def evaluate_atmosphere(
     inertial_observer_velocity = vector_fields["inertial_velocity_observer"].reshape(
         vector_shape
     )
+    synthesis_observer_velocity = vector_fields[
+        "synthesis_velocity_observer"
+    ].reshape(vector_shape)
     solar_inertial_los = -inertial_observer_velocity[..., 2]
-    instrument_corrected_los = -observer_velocity[..., 2]
+    instrument_corrected_los = -synthesis_observer_velocity[..., 2]
+    observation_los = -observer_velocity[..., 2]
     result = {
         "log_tau500": depth_grid.detach().to(torch_dtype).cpu().numpy(),
         "depth_coordinate": depth_grid.detach().to(torch_dtype).cpu().numpy(),
@@ -328,19 +375,19 @@ def evaluate_atmosphere(
         "velocity_field_inertial_spherical_m_per_s": vector_fields[
             "inertial_velocity_spherical"
         ].reshape(vector_shape),
-        "instrument_radial_velocity_correction_m_per_s": np.asarray(
-            radial_velocity_correction, dtype=numpy_dtype
+        "instrument_line_of_sight_velocity_correction_m_per_s": np.asarray(
+            line_of_sight_velocity_correction, dtype=numpy_dtype
         ),
-        "instrument_radial_velocity_correction_cartesian_m_per_s": vector_fields[
-            "radial_correction"
+        "velocity_field_corotating_observer_m_per_s": vector_fields[
+            "corotating_velocity_observer"
         ].reshape(vector_shape),
-        "velocity_field_synthesis_m_per_s": vector_fields[
-            "instrument_velocity"
+        "velocity_field_synthesis_observer_m_per_s": vector_fields[
+            "synthesis_velocity_observer"
         ].reshape(vector_shape),
         "velocity_field_observer_m_per_s": observer_velocity,
         "v_los_solar_inertial_m_per_s": solar_inertial_los,
         "v_los_instrument_corrected_m_per_s": instrument_corrected_los,
-        "v_los_m_per_s": instrument_corrected_los.copy(),
+        "v_los_m_per_s": observation_los,
         "magnetic_field_gauss": vector_fields["magnetic"].reshape(vector_shape),
         "magnetic_field_scene_gauss": magnetic_scene.reshape(vector_shape),
         "magnetic_field_spherical_gauss": vector_fields["magnetic_spherical"].reshape(
@@ -366,32 +413,17 @@ def evaluate_atmosphere(
         "time_hours": coordinates_grid[..., 2].astype(numpy_dtype, copy=False),
     }
     if mode == CARRINGTON_OBSERVER_RELATIVE_VELOCITY:
-        observer_los = (
-            torch.as_tensor(raster.auxiliary["observer_los_velocity_m_per_s"])
-            .detach()
-            .to(torch_dtype)
-            .cpu()
-            .numpy()
+        observer_los = observation_los_offset.to(torch_dtype).numpy().astype(
+            numpy_dtype, copy=True
         )
-        if observer_los.shape == (*spatial_shape, 1):
-            observer_los = observer_los[..., 0]
-        observer_los = observer_los.astype(numpy_dtype, copy=True)
         observer_los[~result["valid_mask"]] = np.nan
         result["observer_los_velocity_m_per_s"] = observer_los
-        result["v_los_m_per_s"] = _apply_positive_redshift_los_offset(
-            instrument_corrected_los, observer_los
-        )
     elif mode == CARRINGTON_REGISTERED_RELATIVE_VELOCITY:
-        removed = np.asarray(
-            removed_solar_los_velocity(raster),
-            dtype=numpy_dtype,
+        removed = observation_los_offset.to(torch_dtype).numpy().astype(
+            numpy_dtype, copy=True
         )
-        removed = np.broadcast_to(removed[None, :], spatial_shape).copy()
         removed[~result["valid_mask"]] = np.nan
         result["removed_solar_los_velocity_m_per_s"] = removed
-        result["v_los_m_per_s"] = _apply_positive_redshift_los_offset(
-            instrument_corrected_los, removed
-        )
     return result
 
 

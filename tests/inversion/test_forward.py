@@ -19,6 +19,7 @@ from prom3theus.rt import (
     RayDistancePath,
     RayTraceResult,
     StratifiedAtmosphere,
+    THOMSON_CROSS_SECTION_M2,
 )
 from prom3theus.training.lightning import LTEInversionModule
 
@@ -153,6 +154,39 @@ def test_lte_backend_calls_current_synthesizer_contract():
     assert torch.isfinite(stokes).all()
 
 
+def test_lte_backend_reference_extinction_uses_combined_plasma_state():
+    depth = torch.tensor([-4.0, -2.0, 0.0], dtype=torch.float64)
+    backend = LTESynthesisBackend(
+        LTESynthesizer(log_tau500=None, line_ids=("FeI_6173.3352",)).to(
+            dtype=torch.float64
+        )
+    )
+    temperature = torch.tensor([[5_500.0, 2.0e4, 1.0e6]], dtype=torch.float64)
+    pressure = torch.tensor([[1.0e-3, 1.0e2, 1.0e7]], dtype=torch.float64)
+    base = {
+        "log_tau500": depth,
+        "velocity_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+        "microturbulence": torch.full((1, 3), 1_000.0, dtype=torch.float64),
+        "magnetic_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+    }
+    atmosphere = StratifiedAtmosphere(
+        temperature=temperature,
+        gas_pressure=pressure,
+        **base,
+    )
+    extinction = backend.reference_extinction(atmosphere)
+    assert torch.isfinite(extinction).all()
+    assert torch.all(extinction > 0.0)
+    electron_density = backend.synthesizer.continuum_opacity.electron_density(
+        temperature,
+        pressure,
+    )
+    torch.testing.assert_close(
+        extinction[0, -1],
+        electron_density[0, -1] * THOMSON_CROSS_SECTION_M2,
+    )
+
+
 def test_forward_import_does_not_load_lightning():
     code = (
         "import sys; import prom3theus.inversion.forward; "
@@ -176,7 +210,7 @@ def test_forward_composition_owns_velocity_path_and_instrument_application():
         synthesis_wavelength_angstrom=synthesis,
         radiance_scale=torch.tensor(3.0),
         carrington_angular_velocity_rad_per_s=torch.tensor(0.0),
-        instrument_radial_velocity_correction_m_per_s=torch.tensor(10.0),
+        instrument_line_of_sight_velocity_correction_m_per_s=torch.tensor(10.0),
     )
 
     result = composition.synthesize(
@@ -195,7 +229,9 @@ def test_forward_composition_owns_velocity_path_and_instrument_application():
         backend.synthesis_call["path"].distance_m,
         result["ray_trace"].distance_m,
     )
-    expected_velocity = torch.tensor([11.0, 2.0, -4.0]).expand(1, 2, 3)
+    # +10 m/s is a positive-redshift LOS correction, hence -10 in the
+    # toward-observer basis component, followed by the +7 m/s observer offset.
+    expected_velocity = torch.tensor([1.0, 2.0, -14.0]).expand(1, 2, 3)
     torch.testing.assert_close(
         backend.synthesis_call["atmosphere"].velocity_field,
         expected_velocity,
@@ -208,6 +244,49 @@ def test_forward_composition_owns_velocity_path_and_instrument_application():
         result["atmosphere"].velocity_field,
         torch.tensor([1.0, 2.0, 3.0]).expand(1, 2, 3),
     )
+
+
+def test_line_of_sight_velocity_correction_has_a_spectral_gradient():
+    class VelocitySensitiveBackend(_Backend):
+        def synthesize(self, atmosphere, wavelength_angstrom, *, radiance_scale, path):
+            del radiance_scale, path
+            los_velocity = atmosphere.velocity_field[..., 2].mean(dim=-1)
+            return los_velocity[:, None, None].expand(
+                -1, 4, wavelength_angstrom.numel()
+            )
+
+    model = _AtmosphereModel()
+    backend = VelocitySensitiveBackend()
+    composition = LTEForwardComposition(
+        atmosphere_model=model,
+        backend=backend,
+        instrument=_Instrument(),
+        velocity_synthesis_mode="carrington_observer_relative",
+        depth_refinement=DepthRefinement(False, 1, 0.0),
+    )
+    wavelength = torch.tensor([1.0, 2.0])
+    correction = torch.tensor(0.0, requires_grad=True)
+    runtime = ForwardRuntime(
+        coarse_depth_grid=torch.tensor([-5.0, 1.0]),
+        observed_wavelength_angstrom=wavelength,
+        synthesis_wavelength_angstrom=wavelength,
+        radiance_scale=1.0,
+        carrington_angular_velocity_rad_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=correction,
+    )
+    stokes_basis = torch.tensor([[[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]])
+
+    result = composition.synthesize(
+        torch.zeros(1, 3),
+        runtime=runtime,
+        ray_direction=torch.tensor([[-1.0, 0.0, 0.0]]),
+        stokes_basis=stokes_basis,
+        observer_los_velocity_m_per_s=torch.zeros(1),
+        instrument_response={"gain": torch.ones(1)},
+    )
+    result["stokes"].sum().backward()
+
+    torch.testing.assert_close(correction.grad, torch.tensor(-8.0))
 
 
 def test_refinement_retains_coarse_gradients_and_evaluates_only_new_points():
@@ -330,7 +409,7 @@ def test_velocity_gauge_rejects_missing_observer_input():
         synthesis_wavelength_angstrom=torch.tensor([1.0, 2.0]),
         radiance_scale=1.0,
         carrington_angular_velocity_rad_per_s=0.0,
-        instrument_radial_velocity_correction_m_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
     )
 
     with pytest.raises(ValueError, match="requires observer_los_velocity"):

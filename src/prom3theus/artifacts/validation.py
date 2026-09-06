@@ -1,7 +1,7 @@
 """Strict validation and reconstruction for self-contained LTE artifacts.
 
 This module owns the complete trust boundary used by export: manifest fields,
-the resolved schema-v1 configuration, checksum-pinned packaged resources, the
+the resolved schema-v2 configuration, checksum-pinned packaged resources, the
 embedded observation store, its scientific contracts, and tensor-only model
 reconstruction all have to agree before evaluation starts.
 """
@@ -71,7 +71,6 @@ _MODEL_FIELDS = frozenset(
         "atmosphere_config",
         "synthesizer_config",
         "instrument_config",
-        "normalization_config",
         "stokes_loss_config",
         "weight_config",
         "wavelength_weights",
@@ -84,7 +83,8 @@ _MODEL_FIELDS = frozenset(
         "run_metadata",
         "observation_id",
         "velocity_synthesis_mode",
-        "instrument_radial_velocity_correction_m_per_s",
+        "instrument_line_of_sight_velocity_correction_m_per_s",
+        "optimize_instrument_line_of_sight_velocity_correction",
         "vector_regularization_config",
     }
 )
@@ -248,7 +248,7 @@ def _validated_config(manifest: ArtifactManifest, artifact_directory: Path) -> A
         )
     except (TypeError, ValueError) as error:
         raise ArtifactExportError(
-            f"manifest.resolved_config does not satisfy schema version 1: {error}"
+            f"manifest.resolved_config does not satisfy schema version 2: {error}"
         ) from error
 
 
@@ -256,7 +256,7 @@ def _validated_resources(manifest: ArtifactManifest, config: Any) -> dict[str, A
     recorded = _require_mapping(manifest.resources, "manifest.resources")
     if config.resources.bundle != "packaged":
         raise ArtifactExportError(
-            "Schema-v1 export requires resolved_config.resources.bundle='packaged'."
+            "Schema-v2 export requires resolved_config.resources.bundle='packaged'."
         )
     if "directory" in recorded:
         raise ArtifactExportError(

@@ -11,7 +11,6 @@ PYTHONPATH=src python -m prom3theus.cli.main prepare hmi-subframes data/hmi/2024
   --width-pixels 1024 \
   --height-pixels 512
 
-PYTHONPATH=src python -m prom3theus.cli.main prepare hmi-responses data/hmi/2024-03-23/subframe \
-  --output data/calibration/hmi/2024-03-23 \
-  --email "${JSOC_EMAIL:?Set JSOC_EMAIL to your registered JSOC email address}" \
-  --phase-map-fsn 230562565
+PYTHONPATH=src python -m prom3theus.cli.main prepare hmi-responses /glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe \
+  --output /glade/work/rjarolim/data/hmi_calibration/20240323 \
+  --email "robert.jarolim@uni-graz.at"

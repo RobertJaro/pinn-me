@@ -3,6 +3,9 @@
 from .magnetofluid import (
     BOUNDARY_EQUATIONS,
     EQUATION_NAMES,
+    SIDE_BOUNDARY_EQUATIONS,
+    UPPER_BOUNDARY_EQUATIONS,
+    UPPER_VOLUME_EQUATIONS,
     VOLUME_EQUATIONS,
     MagnetofluidConstraints,
     PhysicsResult,
@@ -11,6 +14,9 @@ from .magnetofluid import (
 __all__ = [
     "BOUNDARY_EQUATIONS",
     "EQUATION_NAMES",
+    "SIDE_BOUNDARY_EQUATIONS",
+    "UPPER_BOUNDARY_EQUATIONS",
+    "UPPER_VOLUME_EQUATIONS",
     "VOLUME_EQUATIONS",
     "MagnetofluidConstraints",
     "PhysicsResult",

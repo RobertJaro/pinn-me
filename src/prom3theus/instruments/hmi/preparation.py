@@ -32,6 +32,7 @@ from .response import (
     DEFAULT_PROFILE_HALF_WIDTH,
     MANIFEST_FORMAT,
     MANIFEST_NAME,
+    PHASE_MAP_ASSIGNMENT_SERIES,
     load_response_manifest,
 )
 
@@ -60,6 +61,7 @@ PHASE_QUERY_KEYS = (
     "FSRNB,FSRWB,FSRE1,FSRE2,FSRE3,FSRE4,FSRE5,CBLOCKER,"
     "PHASENBM,PHASEWBM,PHASELYO,COMMENT"
 )
+PHASE_ASSIGNMENT_QUERY_KEYS = "T_REC,INVPHMAP"
 
 
 def _single_row(frame, description: str):
@@ -90,6 +92,42 @@ def _validate_phase_map_time(metadata: Mapping[str, Any]) -> None:
             "HMI phase-map detune timestamps must satisfy "
             "T_START <= T_REC <= T_STOP with T_START < T_STOP."
         )
+
+
+def resolve_hmi_phase_map_assignment(
+    client: drms.Client,
+    record_time: str | datetime,
+) -> dict[str, Any]:
+    """Read the phase-map FSN assigned by the definitive HMI data product."""
+
+    jsoc_time = format_jsoc_time(record_time)
+    assignment_record = f"{PHASE_MAP_ASSIGNMENT_SERIES}[{jsoc_time}]"
+    result = client.query(
+        assignment_record,
+        key=PHASE_ASSIGNMENT_QUERY_KEYS,
+    )
+    keys = result[0] if isinstance(result, tuple) else result
+    row = _single_row(keys, f"phase-map assignment for {jsoc_time}")
+    try:
+        returned_time = format_jsoc_time(str(row["T_REC"]))
+        phase_map_fsn = int(row["INVPHMAP"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"HMI phase-map assignment is invalid for {assignment_record}."
+        ) from error
+    if returned_time != jsoc_time:
+        raise ValueError(
+            f"HMI phase-map assignment returned {returned_time}, expected {jsoc_time}."
+        )
+    if phase_map_fsn < 0:
+        raise ValueError(
+            f"HMI phase-map assignment has invalid INVPHMAP={phase_map_fsn}."
+        )
+    return {
+        "record": assignment_record,
+        "record_time": jsoc_time,
+        "phase_map_fsn": phase_map_fsn,
+    }
 
 
 def resolve_hmi_phase_map(
@@ -520,7 +558,6 @@ def prepare_hmi_response_directory(
     inputs: Iterable[str | os.PathLike[str]],
     output_directory: str | os.PathLike[str],
     email: str,
-    phase_map_fsn: int,
     samples: int = DEFAULT_PROFILE_SAMPLES,
     half_width: float = DEFAULT_PROFILE_HALF_WIDTH,
     blocker_fwhm: float = DEFAULT_BLOCKER_FWHM,
@@ -533,8 +570,6 @@ def prepare_hmi_response_directory(
     """Atomically prepare one exact response directory for the selected inputs."""
     if not email:
         raise ValueError("A registered JSOC email address is required for DRMS export.")
-    if type(phase_map_fsn) is not int or phase_map_fsn < 0:
-        raise ValueError("phase_map_fsn must be a non-negative integer.")
     output_directory = Path(output_directory).expanduser().resolve(strict=False)
     if os.path.lexists(output_directory) and not output_directory.is_dir():
         raise NotADirectoryError(
@@ -574,8 +609,17 @@ def prepare_hmi_response_directory(
 
         client = drms.Client(email=email)
 
+    assignments_by_time = {
+        record_time: resolve_hmi_phase_map_assignment(client, record_time)
+        for record_time in sorted(
+            {acquisition["record_time"] for acquisition in acquisitions}
+        )
+    }
     identities = {
-        acquisition["acquisition_key"]: (phase_map_fsn, int(acquisition["hcamid"]))
+        acquisition["acquisition_key"]: (
+            assignments_by_time[acquisition["record_time"]]["phase_map_fsn"],
+            int(acquisition["hcamid"]),
+        )
         for acquisition in acquisitions
     }
 
@@ -633,11 +677,16 @@ def prepare_hmi_response_directory(
                 "record_time": acquisition["record_time"],
                 "observation_time": acquisition["observation_time"],
                 "hcamid": acquisition["hcamid"],
+                "phase_map_fsn": identity[0],
+                "assignment_record": assignments_by_time[
+                    acquisition["record_time"]
+                ]["record"],
                 "profile": profile_key,
             }
 
         manifest = {
             "format": MANIFEST_FORMAT,
+            "phase_map_assignment_series": PHASE_MAP_ASSIGNMENT_SERIES,
             "profiles": profiles,
             "acquisitions": acquisition_entries,
         }
@@ -666,5 +715,6 @@ __all__ = [
     "download_phase_map",
     "prepare_hmi_response_directory",
     "resolve_hmi_phase_map",
+    "resolve_hmi_phase_map_assignment",
     "write_transmission_file",
 ]

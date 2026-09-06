@@ -401,7 +401,7 @@ def prepare_hmi_subframes(
     plans: list[_CropPlan] = []
     destination_offset = 0
     for acquisition_name, acquisition_paths in groups:
-        if not acquisition_name.startswith("hmi.S_720s."):
+        if not acquisition_name.startswith(("hmi.S_720s.", "hmi.s_720s.")):
             raise ValueError(
                 "HMI subframe preparation supports only hmi.S_720s acquisitions; "
                 f"received {acquisition_name!r}."

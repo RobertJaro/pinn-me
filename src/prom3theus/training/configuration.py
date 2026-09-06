@@ -310,6 +310,10 @@ def resolve_objective_weighting(
         raise ValueError("Stokes weights must be finite and non-negative.")
     if not torch.any(stokes_weights > 0):
         raise ValueError("At least one Stokes weight must be nonzero.")
+    # Component weights express relative scientific preference only. Keeping
+    # their sum fixed prevents a global rescaling from silently changing the
+    # balance between the data likelihood and the physical objectives.
+    stokes_weights = stokes_weights / stokes_weights.sum()
 
     if wavelength_weights is None:
         spectral_weights = torch.ones_like(wavelength_angstrom)

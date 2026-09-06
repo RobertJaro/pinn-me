@@ -93,10 +93,10 @@ def expected_hinode_wavelength():
 
 @pytest.fixture
 def real_hinode_files():
-    pattern = os.environ.get("PINN_LTE_HINODE_GLOB")
+    pattern = os.environ.get("PROM3THEUS_HINODE_GLOB")
     if not pattern:
-        pytest.skip("set PINN_LTE_HINODE_GLOB to run the real-data integration test")
+        pytest.skip("set PROM3THEUS_HINODE_GLOB to run the real-data integration test")
     paths = sorted(glob.glob(pattern))
     if not paths:
-        pytest.fail(f"PINN_LTE_HINODE_GLOB matched no files: {pattern!r}")
+        pytest.fail(f"PROM3THEUS_HINODE_GLOB matched no files: {pattern!r}")
     return paths

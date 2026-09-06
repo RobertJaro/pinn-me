@@ -6,6 +6,7 @@ from prom3theus.rt import (
     LTESynthesizer,
     OpticalDepthPath,
     StratifiedAtmosphere,
+    THOMSON_CROSS_SECTION_M2,
 )
 
 
@@ -39,6 +40,62 @@ def test_lte_synthesizer_runs_from_packaged_stic_resources():
     assert torch.isfinite(stokes).all()
     assert diagnostics.alpha500.shape == (1, 3)
     assert diagnostics.cumulative_tau500_along_path is None
+
+
+def test_lte_synthesizer_uses_unrestricted_combined_plasma_state():
+    grid = torch.tensor([-4.0, -2.0, 0.0], dtype=torch.float64)
+    temperature = torch.tensor(
+        [[1.0e6, 2.0e4, 5_500.0]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    gas_pressure = torch.tensor(
+        [[1.0e-3, 1.0e2, 1.0e7]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    base = {
+        "log_tau500": grid,
+        "velocity_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+        "microturbulence": torch.full((1, 3), 1_000.0, dtype=torch.float64),
+        "magnetic_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+    }
+    atmosphere = StratifiedAtmosphere(
+        temperature=temperature,
+        gas_pressure=gas_pressure,
+        **base,
+    )
+    synthesizer = LTESynthesizer(
+        log_tau500=grid,
+        line_ids=("FeI_6302.4932",),
+    ).to(dtype=torch.float64)
+    wavelength = torch.linspace(6302.3, 6302.7, 7, dtype=torch.float64)
+
+    stokes, diagnostics = synthesizer(
+        atmosphere,
+        wavelength,
+        path=OpticalDepthPath(),
+        return_diagnostics=True,
+    )
+    assert torch.isfinite(stokes).all()
+    assert torch.isfinite(diagnostics.alpha500).all()
+    assert torch.all(diagnostics.alpha500 > 0.0)
+    torch.testing.assert_close(diagnostics.model_temperature, temperature)
+    torch.testing.assert_close(diagnostics.gas_pressure, gas_pressure)
+    torch.testing.assert_close(diagnostics.lte_temperature, temperature)
+    torch.testing.assert_close(diagnostics.lte_gas_pressure, gas_pressure)
+
+    electron_density = diagnostics.reference_thermodynamics["electron_density"]
+    torch.testing.assert_close(
+        diagnostics.alpha500[0, 0],
+        electron_density[0, 0] * THOMSON_CROSS_SECTION_M2,
+    )
+
+    diagnostics.alpha500.sum().backward()
+    assert torch.isfinite(temperature.grad).all()
+    assert torch.isfinite(gas_pressure.grad).all()
+    assert torch.all(temperature.grad != 0.0)
+    assert torch.all(gas_pressure.grad != 0.0)
 
 
 def test_lte_synthesizer_rejects_unordered_wavelengths_and_superluminal_los():

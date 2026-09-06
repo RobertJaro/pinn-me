@@ -81,7 +81,7 @@ def test_version_has_program_name(capsys):
     assert capsys.readouterr().out.strip().startswith("prom3theus ")
 
 
-def test_hmi_preparation_requires_an_explicit_phase_map_identity():
+def test_hmi_preparation_resolves_phase_map_without_an_fsn_argument():
     parser = _build_parser()
     arguments = parser.parse_args(
         [
@@ -90,11 +90,11 @@ def test_hmi_preparation_requires_an_explicit_phase_map_identity():
             "input.I0.fits",
             "--output",
             "responses",
-            "--phase-map-fsn",
-            "4242",
+            "--email",
+            "scientist@example.org",
         ]
     )
-    assert arguments.phase_map_fsn == 4242
+    assert not hasattr(arguments, "phase_map_fsn")
 
     with pytest.raises(SystemExit, match="2"):
         parser.parse_args(
@@ -104,6 +104,8 @@ def test_hmi_preparation_requires_an_explicit_phase_map_identity():
                 "input.I0.fits",
                 "--output",
                 "responses",
+                "--phase-map-fsn",
+                "4242",
             ]
         )
 
@@ -138,11 +140,11 @@ def test_validate_config_prints_resolved_schema(capsys):
     main(
         [
             "validate-config",
-            str(PROJECT_ROOT / "configs" / "hmi_lte_subframe.yaml"),
+            str(PROJECT_ROOT / "configs" / "hmi_lte_dynamic.yaml"),
         ]
     )
     document = json.loads(capsys.readouterr().out)
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert document["solver"]["kind"] == "lte"
     assert document["resources"] == {"bundle": "packaged"}
     assert document["observation"]["type"] == "hmi_stokes"

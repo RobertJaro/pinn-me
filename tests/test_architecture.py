@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src" / "prom3theus"
 
 
-def test_repository_contains_only_the_two_public_yaml_runs():
+def test_repository_contains_only_the_public_yaml_runs():
     runtime_roots = {".git", ".idea", "data", "runs"}
     yaml_paths = sorted(
         path.relative_to(PROJECT_ROOT).as_posix()
@@ -23,7 +23,9 @@ def test_repository_contains_only_the_two_public_yaml_runs():
     )
     assert yaml_paths == [
         "configs/hinode_lte_mhs.yaml",
-        "configs/hmi_lte_subframe.yaml",
+        "configs/hinode_lte_mhs_extrapolation.yaml",
+        "configs/hmi_lte_dynamic.yaml",
+        "configs/hmi_lte_mhs.yaml",
     ]
 
 
@@ -66,9 +68,7 @@ def test_packaging_exposes_one_new_command_and_only_the_new_namespace():
     )
     assert project["project"]["name"] == "PROM3THEUS"
     assert project["project"]["requires-python"] == ">=3.11"
-    assert project["project"]["scripts"] == {
-        "prom3theus": "prom3theus.cli.main:main"
-    }
+    assert project["project"]["scripts"] == {"prom3theus": "prom3theus.cli.main:main"}
     assert project["tool"]["setuptools"]["packages"]["find"] == {
         "where": ["src"],
         "include": ["prom3theus*"],
@@ -85,7 +85,9 @@ def test_packaging_exposes_one_new_command_and_only_the_new_namespace():
     assert project["tool"]["setuptools"]["data-files"] == {
         "share/prom3theus/configs": [
             "configs/hinode_lte_mhs.yaml",
-            "configs/hmi_lte_subframe.yaml",
+            "configs/hinode_lte_mhs_extrapolation.yaml",
+            "configs/hmi_lte_mhs.yaml",
+            "configs/hmi_lte_dynamic.yaml",
         ]
     }
     assert (

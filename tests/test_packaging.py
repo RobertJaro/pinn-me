@@ -16,11 +16,15 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_CONFIGS = {
     "hinode_lte_mhs.yaml",
-    "hmi_lte_subframe.yaml",
+    "hinode_lte_mhs_extrapolation.yaml",
+    "hmi_lte_mhs.yaml",
+    "hmi_lte_dynamic.yaml",
 }
 RESOURCE_FILES = {
     "bundle.json",
     "common/abundances.json",
+    "common/chianti_thermodynamic_table.json",
+    "common/falc_reference_atmosphere.json",
     "common/lines.json",
     "common/stic_continuum_table.json",
     "hinode_sp/blend_inventory.json",
@@ -43,9 +47,7 @@ def built_distributions(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path,
     shutil.copytree(PROJECT_ROOT / "docs", root / "docs")
     shutil.copytree(PROJECT_ROOT / "resource_builder", root / "resource_builder")
     shutil.copytree(PROJECT_ROOT / "scripts", root / "scripts")
-    shutil.copytree(
-        PROJECT_ROOT / "src" / "prom3theus", root / "src" / "prom3theus"
-    )
+    shutil.copytree(PROJECT_ROOT / "src" / "prom3theus", root / "src" / "prom3theus")
 
     output = root / "dist"
     subprocess.run(
@@ -199,8 +201,7 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
     assert {
         name.removeprefix("src/prom3theus/resources/data/")
         for name in members
-        if name.startswith("src/prom3theus/resources/data/")
-        and name.endswith(".json")
+        if name.startswith("src/prom3theus/resources/data/") and name.endswith(".json")
     } == RESOURCE_FILES
 
 
@@ -251,7 +252,10 @@ for module in [prom3theus, *modules]:
     assert all(hasattr(module, name) for name in getattr(module, "__all__", ()))
 configs = installation / "share" / "prom3theus" / "configs"
 assert {path.name for path in configs.glob("*.yaml")} == {
-    "hinode_lte_mhs.yaml", "hmi_lte_subframe.yaml"
+    "hinode_lte_mhs.yaml",
+    "hinode_lte_mhs_extrapolation.yaml",
+    "hmi_lte_mhs.yaml",
+    "hmi_lte_dynamic.yaml",
 }
 assert {load_config(path).solver.kind for path in configs.glob("*.yaml")} == {"lte"}
 resources = validate_resource_bundle()

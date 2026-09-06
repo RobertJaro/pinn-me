@@ -1,8 +1,8 @@
 """Smooth neural representation of a spherical LTE atmosphere.
 
 The operational representation is a heliocentric Carrington atmosphere
-``F(x, y, r - R_sun, t)``. Thermodynamics are learned as bounded logarithmic
-perturbations of a radial reference stratification. Observer rays are sampled
+``F(x, y, r - R_sun, t)``. Thermodynamics are learned as unbounded linear
+residuals in natural-log space around a radial reference. Observer rays are sampled
 inside a fixed spherical shell and optical depth is obtained by integrating
 absolute opacity along those physical paths. Static runs omit the time channel;
 time-dependent runs use each HMI acquisition or Hinode scan ``DATE_OBS``.
@@ -11,130 +11,62 @@ time-dependent runs use each HMI acquisition or Hinode scan ``DATE_OBS``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from typing import Mapping
 
 import torch
 from torch import nn
 
-from prom3theus.core import MLPModel, SPEED_OF_LIGHT
+from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN, MLPModel, SPEED_OF_LIGHT
+from prom3theus.resources import verify_manifest_resource
+from .atomic import AtomicDatabase
+from .plasma import SolarPlasmaTable
 from .geometry import (
     RayTraceResult,
     validate_scene_basis,
 )
 
-# Pinned STiC FALC_82 reference reduced to 25 points over log(tau500)=-5..1.
-# Heights follow dm=-rho dz and are shifted so tau500=1 is z=0; pressure is
-# g times column mass. Source provenance/checksums live in the LTE bundle.
-FALC_REFERENCE_LOG_TAU500 = tuple(-5.0 + 0.25 * index for index in range(25))
-FALC_REFERENCE_HEIGHT_M = (
-    1694040.720,
-    1482004.879,
-    1228647.068,
-    906105.577,
-    659652.144,
-    566986.638,
-    515665.796,
-    473754.974,
-    434954.627,
-    397259.443,
-    360316.540,
-    323389.396,
-    286344.876,
-    249055.839,
-    211220.854,
-    173545.194,
-    135342.068,
-    96734.772,
-    59431.618,
-    26488.648,
-    0.0,
-    -20849.247,
-    -37954.699,
-    -53546.012,
-    -68815.437,
-)
-FALC_REFERENCE_TEMPERATURE_K = (
-    7456.570,
-    7023.570,
-    6524.910,
-    5735.543,
-    4707.653,
-    4524.964,
-    4503.208,
-    4523.450,
-    4562.799,
-    4615.340,
-    4673.397,
-    4736.631,
-    4804.665,
-    4878.092,
-    4960.151,
-    5057.491,
-    5211.207,
-    5423.944,
-    5708.676,
-    6105.000,
-    6558.360,
-    7089.503,
-    7636.435,
-    8148.910,
-    8659.479,
-)
-FALC_REFERENCE_GAS_PRESSURE_PA = (
-    0.0903679136,
-    0.207198031,
-    0.769446443,
-    6.12251408,
-    42.8947702,
-    98.7395337,
-    159.142071,
-    234.861013,
-    334.998783,
-    470.775912,
-    654.134411,
-    905.246499,
-    1249.59409,
-    1721.82404,
-    2368.86264,
-    3256.22303,
-    4466.93582,
-    6087.39481,
-    8096.31031,
-    10283.9793,
-    12305.3506,
-    14025.0095,
-    15489.1232,
-    16847.1586,
-    18194.6094,
-)
-FALC_REFERENCE_MICROTURBULENCE_M_PER_S = (
-    5999.580,
-    5173.763,
-    3945.847,
-    2221.887,
-    1193.338,
-    902.770,
-    778.128,
-    691.655,
-    621.713,
-    553.325,
-    528.791,
-    548.213,
-    586.271,
-    626.370,
-    756.351,
-    889.794,
-    1045.084,
-    1203.432,
-    1355.503,
-    1484.954,
-    1587.349,
-    1661.127,
-    1699.278,
-    1729.933,
-    1751.808,
-)
+
+def _open_text(resource):
+    return (
+        resource.open("r", encoding="utf-8")
+        if hasattr(resource, "open")
+        else open(resource, encoding="utf-8")
+    )
+
+
+def _load_falc_reference_document(atomic: AtomicDatabase) -> tuple[dict, str]:
+    """Load the checksum-pinned complete FALC reference atmosphere."""
+
+    resource = atomic.data_root.joinpath("falc_reference_atmosphere.json")
+    digest = verify_manifest_resource(
+        resource,
+        atomic.source_manifest,
+        resource_name="common/falc_reference_atmosphere.json",
+        kind="radial-reference",
+    )
+    with _open_text(resource) as handle:
+        document = json.load(handle)
+    if not isinstance(document, Mapping):
+        raise RuntimeError("Invalid pinned FALC radial-reference resource.")
+    source = document.get("source")
+    if not isinstance(source, Mapping) or not isinstance(
+        source.get("source_sha256"), Mapping
+    ):
+        raise RuntimeError("Invalid pinned FALC radial-reference resource.")
+    if (
+        document.get("schema_version") != 1
+        or document.get("model") != "FALC_82"
+        or document.get("native_depth_count") != 82
+        or source.get("commit") != "18cda77d038a97f007a783dcb61ea9a9a1244bf7"
+        or source["source_sha256"].get("stic_falc_82")
+        != atomic.source_manifest.get("sources", {})
+        .get("stic_falc_82", {})
+        .get("sha256")
+    ):
+        raise RuntimeError("Invalid pinned FALC radial-reference resource.")
+    return document, digest
 
 
 def _linear_interpolate(
@@ -161,21 +93,37 @@ def _linear_interpolate(
 class RadialReferenceAtmosphere(nn.Module):
     """One-dimensional atmosphere supplying a physical radial baseline."""
 
-    def __init__(self, config: str | Mapping = "falc_82"):
+    def __init__(
+        self,
+        config: str | Mapping = "falc_82",
+        *,
+        upper_atmosphere_config: Mapping | None = None,
+        maximum_height_m: float | None = None,
+        solar_radius_m: float | None = None,
+        thermodynamic_eos: SolarPlasmaTable | None = None,
+        atomic_database: AtomicDatabase | None = None,
+    ):
         super().__init__()
+        native_falc = None
+        self.falc_resource_sha256 = None
         if isinstance(config, str):
             if config.lower() != "falc_82":
                 raise ValueError(
                     "reference_atmosphere_config must be 'falc_82' or a mapping."
                 )
+            atomic = atomic_database or AtomicDatabase()
+            native_falc, self.falc_resource_sha256 = _load_falc_reference_document(
+                atomic
+            )
+            line_reference = native_falc["line_formation_reference"]
             data = {
-                "log_tau500": FALC_REFERENCE_LOG_TAU500,
-                "height_m": FALC_REFERENCE_HEIGHT_M,
-                "temperature_k": FALC_REFERENCE_TEMPERATURE_K,
-                "gas_pressure_pa": FALC_REFERENCE_GAS_PRESSURE_PA,
-                "microturbulence_m_per_s": FALC_REFERENCE_MICROTURBULENCE_M_PER_S,
+                "log_tau500": line_reference["log10_tau500"],
+                "height_m": line_reference["height_m"],
+                "temperature_k": line_reference["temperature_k"],
+                "gas_pressure_pa": line_reference["gas_pressure_pa"],
+                "microturbulence_m_per_s": line_reference["microturbulence_m_per_s"],
             }
-            self.name = "STiC FALC_82"
+            self.name = "complete pinned STiC FALC_82"
         else:
             data = dict(config)
             self.name = str(data.pop("name", "configured radial reference"))
@@ -192,15 +140,15 @@ class RadialReferenceAtmosphere(nn.Module):
                 f"Invalid radial-reference fields; missing={sorted(missing)}, "
                 f"unknown={sorted(unknown)}."
             )
-        q = _as_float_tensor(data["log_tau500"], name="reference log_tau500")
-        height = _as_float_tensor(data["height_m"], name="reference height_m")
-        temperature = _as_float_tensor(
+        q = _as_reference_tensor(data["log_tau500"], name="reference log_tau500")
+        height = _as_reference_tensor(data["height_m"], name="reference height_m")
+        temperature = _as_reference_tensor(
             data["temperature_k"], name="reference temperature_k"
         )
-        pressure = _as_float_tensor(
+        pressure = _as_reference_tensor(
             data["gas_pressure_pa"], name="reference gas_pressure_pa"
         )
-        micro = _as_float_tensor(
+        micro = _as_reference_tensor(
             data["microturbulence_m_per_s"], name="reference microturbulence_m_per_s"
         )
         if not all(
@@ -221,30 +169,262 @@ class RadialReferenceAtmosphere(nn.Module):
             or torch.any(micro <= 0)
         ):
             raise ValueError("Reference thermodynamic quantities must be positive.")
+        thermodynamic_height = height.flip(0)
+        thermodynamic_logs = torch.stack(
+            (
+                torch.log(temperature.flip(0)),
+                torch.log(pressure.flip(0)),
+                torch.log(micro.flip(0)),
+            ),
+            dim=-1,
+        )
+        native_depth_count = int(q.numel())
+        if native_falc is not None:
+            native_coordinates = native_falc["coordinates"]
+            native_log_tau500 = _as_reference_tensor(
+                native_coordinates["log10_tau500"],
+                name="native FALC log10_tau500",
+            )
+            native_height = _as_reference_tensor(
+                native_coordinates["height_m"], name="native FALC height_m"
+            )
+            native_temperature = _as_reference_tensor(
+                native_falc["temperature_k"], name="native FALC temperature_k"
+            )
+            native_pressure = _as_reference_tensor(
+                native_falc["gas_pressure_pa"], name="native FALC gas_pressure_pa"
+            )
+            native_micro = _as_reference_tensor(
+                native_falc["microturbulence_m_per_s"],
+                name="native FALC microturbulence_m_per_s",
+            )
+            if not all(
+                value.shape == native_log_tau500.shape
+                for value in (
+                    native_height,
+                    native_temperature,
+                    native_pressure,
+                    native_micro,
+                )
+            ) or native_log_tau500.shape != (82,):
+                raise RuntimeError("Invalid complete native FALC reference arrays.")
+            restored = native_log_tau500 < q[0]
+            if int(restored.sum()) != 37:
+                raise RuntimeError(
+                    "The pinned FALC reference must restore 37 nodes above logtau=-5."
+                )
+            restored_height = native_height[restored].flip(0)
+            restored_logs = torch.stack(
+                (
+                    torch.log(native_temperature[restored].flip(0)),
+                    torch.log(native_pressure[restored].flip(0)),
+                    torch.log(native_micro[restored].flip(0)),
+                ),
+                dim=-1,
+            )
+            if restored_height[0] <= thermodynamic_height[-1] or not torch.all(
+                restored_height[1:] > restored_height[:-1]
+            ):
+                raise RuntimeError("The restored native FALC heights are not monotone.")
+            thermodynamic_height = torch.cat((thermodynamic_height, restored_height))
+            thermodynamic_logs = torch.cat((thermodynamic_logs, restored_logs))
+            native_depth_count = int(native_log_tau500.numel())
+
+        self.native_atmosphere_top_m = float(thermodynamic_height[-1])
+        self.native_atmosphere_top_temperature_k = (
+            float(native_temperature[0])
+            if native_falc is not None
+            else float(torch.exp(thermodynamic_logs[-1, 0]))
+        )
+        self.upper_atmosphere_metadata = None
+        if upper_atmosphere_config is not None:
+            options = dict(upper_atmosphere_config)
+            expected = {
+                "type",
+                "transition_region_top_megameter",
+                "coronal_temperature_k",
+                "reference_grid_points",
+            }
+            if set(options) != expected:
+                raise TypeError(
+                    f"upper_atmosphere_config must contain exactly {sorted(expected)}."
+                )
+            if options["type"] != "hydrostatic_corona":
+                raise ValueError(
+                    "Only a hydrostatic_corona upper atmosphere is supported."
+                )
+            if (
+                maximum_height_m is None
+                or solar_radius_m is None
+                or thermodynamic_eos is None
+            ):
+                raise ValueError(
+                    "A hydrostatic upper atmosphere requires its maximum height, "
+                    "solar radius, and thermodynamic EoS."
+                )
+            base_top_m = float(thermodynamic_height[-1])
+            maximum_height_m = float(maximum_height_m)
+            transition_top_m = float(options["transition_region_top_megameter"]) * 1.0e6
+            coronal_temperature_k = float(options["coronal_temperature_k"])
+            point_count = options["reference_grid_points"]
+            if isinstance(point_count, bool) or not isinstance(point_count, int):
+                raise TypeError("reference_grid_points must be an integer.")
+            if point_count < 2:
+                raise ValueError("reference_grid_points must be at least 2.")
+            if not maximum_height_m >= transition_top_m > base_top_m:
+                raise ValueError(
+                    "The transition-region top must be above the FALC top and below "
+                    "the full-domain top."
+                )
+            if not math.isfinite(coronal_temperature_k) or (
+                coronal_temperature_k < self.native_atmosphere_top_temperature_k
+            ):
+                raise ValueError(
+                    "The coronal temperature must not be below the native FALC-top "
+                    "temperature and must be finite."
+                )
+            if maximum_height_m == transition_top_m:
+                transition_intervals = point_count
+            else:
+                transition_fraction_of_domain = (transition_top_m - base_top_m) / (
+                    maximum_height_m - base_top_m
+                )
+                transition_intervals = min(
+                    point_count - 1,
+                    max(1, round(point_count * transition_fraction_of_domain)),
+                )
+            transition_height = torch.linspace(
+                base_top_m,
+                transition_top_m,
+                transition_intervals + 1,
+                dtype=height.dtype,
+            )[1:]
+            coronal_intervals = point_count - transition_intervals
+            coronal_height = torch.linspace(
+                transition_top_m,
+                maximum_height_m,
+                coronal_intervals + 1,
+                dtype=height.dtype,
+            )[1:]
+            upper_height = torch.cat((transition_height, coronal_height))
+            transition_fraction = (
+                (upper_height - base_top_m) / (transition_top_m - base_top_m)
+            ).clamp(0.0, 1.0)
+            smooth = transition_fraction.pow(3) * (
+                transition_fraction * (transition_fraction * 6.0 - 15.0) + 10.0
+            )
+            base_log_temperature = thermodynamic_logs[-1, 0]
+            upper_log_temperature = torch.lerp(
+                base_log_temperature,
+                upper_height.new_tensor(math.log(coronal_temperature_k)),
+                smooth,
+            )
+            upper_temperature = torch.exp(upper_log_temperature)
+            upper_log_pressure_values = []
+            previous_height = thermodynamic_height[-1]
+            previous_temperature = torch.exp(base_log_temperature)
+            previous_log_pressure = thermodynamic_logs[-1, 1]
+            reference_gravity = thermodynamic_eos.reference_gravity_m_per_s2
+            solar_radius = float(solar_radius_m)
+            for next_height, next_temperature in zip(
+                upper_height, upper_temperature, strict=True
+            ):
+                midpoint_height = 0.5 * (previous_height + next_height)
+                midpoint_temperature = torch.sqrt(
+                    previous_temperature * next_temperature
+                )
+                gravity = (
+                    reference_gravity
+                    * (solar_radius / (solar_radius + float(midpoint_height))) ** 2
+                )
+                previous_pressure = torch.exp(previous_log_pressure)
+                mean_particle_mass_u = thermodynamic_eos.mean_molecular_weight(
+                    midpoint_temperature, previous_pressure
+                )
+                predicted_delta_log_pressure = -(
+                    mean_particle_mass_u
+                    * ATOMIC_MASS_UNIT
+                    * gravity
+                    * (next_height - previous_height)
+                    / (K_BOLTZMANN * midpoint_temperature)
+                )
+                midpoint_pressure = torch.exp(
+                    previous_log_pressure + 0.5 * predicted_delta_log_pressure
+                )
+                mean_particle_mass_u = thermodynamic_eos.mean_molecular_weight(
+                    midpoint_temperature, midpoint_pressure
+                )
+                delta_log_pressure = -(
+                    mean_particle_mass_u
+                    * ATOMIC_MASS_UNIT
+                    * gravity
+                    * (next_height - previous_height)
+                    / (K_BOLTZMANN * midpoint_temperature)
+                )
+                next_log_pressure = previous_log_pressure + delta_log_pressure
+                upper_log_pressure_values.append(next_log_pressure)
+                previous_height = next_height
+                previous_temperature = next_temperature
+                previous_log_pressure = next_log_pressure
+            upper_log_pressure = torch.stack(upper_log_pressure_values)
+            upper_log_micro = thermodynamic_logs[-1, 2].expand_as(upper_height)
+            thermodynamic_height = torch.cat((thermodynamic_height, upper_height))
+            thermodynamic_logs = torch.cat(
+                (
+                    thermodynamic_logs,
+                    torch.stack(
+                        (upper_log_temperature, upper_log_pressure, upper_log_micro),
+                        dim=-1,
+                    ),
+                )
+            )
+            self.upper_atmosphere_metadata = {
+                "type": "hydrostatic_corona",
+                "native_atmosphere_top_m": base_top_m,
+                "native_atmosphere_top_temperature_k": (
+                    self.native_atmosphere_top_temperature_k
+                ),
+                "transition_region_top_m": transition_top_m,
+                "coronal_temperature_k": coronal_temperature_k,
+                "maximum_height_m": maximum_height_m,
+                "reference_grid_points": point_count,
+                "temperature": (
+                    "log-temperature smootherstep from the native atmosphere top "
+                    "to the configured isothermal corona"
+                ),
+                "gravity": "spherical inverse-square",
+                "pressure": "hydrostatic integral using the hybrid solar EoS",
+                "microturbulence": "native FALC-top value held constant",
+            }
         self.register_buffer("log_tau500", q)
         self.register_buffer("height_descending_m", height)
         self.register_buffer("height_ascending_m", height.flip(0))
+        self.register_buffer("thermodynamic_height_ascending_m", thermodynamic_height)
         self.register_buffer(
             "thermodynamic_logs_ascending",
-            torch.stack(
-                (
-                    torch.log(temperature.flip(0)),
-                    torch.log(pressure.flip(0)),
-                    torch.log(micro.flip(0)),
-                ),
-                dim=-1,
-            ),
+            thermodynamic_logs,
         )
+        self.native_depth_count = native_depth_count
 
     def height_from_log_tau(self, q: torch.Tensor) -> torch.Tensor:
         return _linear_interpolate(
             self.log_tau500.to(q), self.height_descending_m.to(q), q
         )
 
+    def log_tau_from_height(self, height_m: torch.Tensor) -> torch.Tensor:
+        """Invert the reference height relation, including its top extrapolation."""
+
+        return _linear_interpolate(
+            self.height_ascending_m.to(height_m),
+            self.log_tau500.flip(0).to(height_m),
+            height_m,
+            extrapolate=True,
+        )
+
     def logs_at_height(
         self, height_m: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        nodes = self.height_ascending_m.to(height_m)
+        nodes = self.thermodynamic_height_ascending_m.to(height_m)
         interpolated = _linear_interpolate(
             nodes,
             self.thermodynamic_logs_ascending.to(height_m),
@@ -259,10 +439,17 @@ class RadialReferenceAtmosphere(nn.Module):
             "coordinate": "radius minus solar radius in metres",
             "tau_one_height_m": 0.0,
             "height_bounds_m": [
-                float(self.height_descending_m[0]),
-                float(self.height_descending_m[-1]),
+                float(self.thermodynamic_height_ascending_m[0]),
+                float(self.thermodynamic_height_ascending_m[-1]),
             ],
-            "parameterization": "bounded log perturbations around the radial reference",
+            "parameterization": "tabulated natural-log thermodynamic reference",
+            "native_depth_count": self.native_depth_count,
+            "native_atmosphere_top_m": self.native_atmosphere_top_m,
+            "native_atmosphere_top_temperature_k": (
+                self.native_atmosphere_top_temperature_k
+            ),
+            "falc_resource_sha256": self.falc_resource_sha256,
+            "upper_atmosphere": self.upper_atmosphere_metadata,
         }
 
 
@@ -305,6 +492,15 @@ def _initialize_smooth_coordinate_mlp(model: MLPModel, activation: str) -> None:
 
 def _as_float_tensor(value, *, name: str) -> torch.Tensor:
     tensor = torch.as_tensor(value, dtype=torch.float32)
+    if not torch.isfinite(tensor).all():
+        raise ValueError(f"{name} must contain only finite values.")
+    return tensor
+
+
+def _as_reference_tensor(value, *, name: str) -> torch.Tensor:
+    """Keep checksum-pinned reference coordinates in generation precision."""
+
+    tensor = torch.as_tensor(value, dtype=torch.float64)
     if not torch.isfinite(tensor).all():
         raise ValueError(f"{name} must contain only finite values.")
     return tensor
@@ -449,11 +645,12 @@ class StratifiedAtmosphere:
 class StratifiedAtmosphereModel(nn.Module):
     """Coordinate MLP producing a smooth stratified atmosphere.
 
-    The MLP uses activation-aware variance-preserving random initialization:
-    neither output weights nor output biases are zeroed, and no fixed
-    temperature stratification or magnetic vector is added.
-    Positive thermodynamic variables use smooth natural-log decoders bounded
-    by the calibrated STiC lookup domain.
+    The MLP uses activation-aware variance-preserving random initialization.
+    Thermodynamic readout rows start at zero so the initial state equals the
+    radial reference; vector readout rows remain random.
+    Positive thermodynamic variables use unbounded, reference-anchored linear
+    residuals in natural-log space.  Finite-domain radiative-transfer tables
+    validate their own inputs independently of this primary atmosphere model.
     Cartesian magnetic vectors use a direct unit-scaled linear decoder.
     Velocity components use a smooth arctangent bound with the configured
     local linear scale, preventing invalid relativistic Doppler factors while
@@ -475,13 +672,10 @@ class StratifiedAtmosphereModel(nn.Module):
     def __init__(
         self,
         log_tau500,
-        temperature_log10_bounds=(3.4, 4.0),
         temperature_log_scale: float = 0.2,
         velocity_scale_m_per_s: float = 1_000.0,
         velocity_max_m_per_s: float = 100_000.0,
         magnetic_scale_gauss: float = 100.0,
-        microturbulence_log10_bounds=(1.0, 4.0),
-        gas_pressure_log10_bounds=(-1.5, 6.0),
         gas_pressure_log_scale: float = 1.0,
         spatial_coordinate_center_mm=(0.0, 0.0),
         spatial_coordinate_scale_mm=(1.0, 1.0),
@@ -490,8 +684,10 @@ class StratifiedAtmosphereModel(nn.Module):
         time_coordinate_center_hours: float = 0.0,
         time_coordinate_scale_hours: float = 1.0,
         shell_height_bounds_Mm: tuple[float, float] | None = None,
+        line_formation_height_bounds_Mm: tuple[float, float] | None = None,
         tangent_margin_m: float = 1_000.0,
         reference_atmosphere_config: str | Mapping | None = "falc_82",
+        upper_atmosphere_config: Mapping | None = None,
         microturbulence_log_scale: float = 0.2,
         scene_geometry_config: Mapping | None = None,
         model_config: Mapping | None = None,
@@ -505,23 +701,6 @@ class StratifiedAtmosphereModel(nn.Module):
         if not torch.all(log_tau500[1:] > log_tau500[:-1]):
             raise ValueError("log_tau500 must increase strictly from top to bottom.")
 
-        temperature_log10_bounds = tuple(map(float, temperature_log10_bounds))
-        microturbulence_log10_bounds = tuple(map(float, microturbulence_log10_bounds))
-        gas_pressure_log10_bounds = tuple(map(float, gas_pressure_log10_bounds))
-        if len(temperature_log10_bounds) != 2 or not (
-            temperature_log10_bounds[0] < temperature_log10_bounds[1]
-        ):
-            raise ValueError("temperature_log10_bounds must be an increasing pair.")
-        if len(microturbulence_log10_bounds) != 2 or not (
-            0 <= microturbulence_log10_bounds[0] < microturbulence_log10_bounds[1]
-        ):
-            raise ValueError(
-                "microturbulence_log10_bounds must be a non-negative increasing pair."
-            )
-        if len(gas_pressure_log10_bounds) != 2 or not (
-            gas_pressure_log10_bounds[0] < gas_pressure_log10_bounds[1]
-        ):
-            raise ValueError("gas_pressure_log10_bounds must be an increasing pair.")
         scales = {
             "temperature_log_scale": temperature_log_scale,
             "velocity_scale_m_per_s": velocity_scale_m_per_s,
@@ -544,13 +723,10 @@ class StratifiedAtmosphereModel(nn.Module):
             )
 
         self.register_buffer("log_tau500", log_tau500)
-        self.temperature_log10_bounds = temperature_log10_bounds
         self.temperature_log_scale = float(temperature_log_scale)
         self.velocity_scale_m_per_s = float(velocity_scale_m_per_s)
         self.velocity_max_m_per_s = float(velocity_max_m_per_s)
         self.magnetic_scale_gauss = float(magnetic_scale_gauss)
-        self.microturbulence_log10_bounds = microturbulence_log10_bounds
-        self.gas_pressure_log10_bounds = gas_pressure_log10_bounds
         self.gas_pressure_log_scale = float(gas_pressure_log_scale)
         self.microturbulence_log_scale = float(microturbulence_log_scale)
         self.register_buffer(
@@ -588,8 +764,11 @@ class StratifiedAtmosphereModel(nn.Module):
             raise ValueError(
                 "The spherical LTE atmosphere requires a radial reference."
             )
+        atomic_database = AtomicDatabase()
+        self.thermodynamic_eos = SolarPlasmaTable(atomic_database)
         self.reference_atmosphere = RadialReferenceAtmosphere(
-            reference_atmosphere_config
+            reference_atmosphere_config,
+            atomic_database=atomic_database,
         )
         tangent_margin_m = float(tangent_margin_m)
         if not math.isfinite(tangent_margin_m) or tangent_margin_m <= 0:
@@ -634,11 +813,68 @@ class StratifiedAtmosphereModel(nn.Module):
                 "outer height and negative inner height."
             )
         self.shell_height_bounds_Mm = shell_height_bounds_Mm
+        if line_formation_height_bounds_Mm is None:
+            line_formation_height_bounds_Mm = shell_height_bounds_Mm
+        line_formation_height_bounds_Mm = tuple(
+            map(float, line_formation_height_bounds_Mm)
+        )
+        if len(line_formation_height_bounds_Mm) != 2 or not (
+            line_formation_height_bounds_Mm[1] == shell_height_bounds_Mm[1]
+            and shell_height_bounds_Mm[1]
+            < line_formation_height_bounds_Mm[0]
+            <= shell_height_bounds_Mm[0]
+        ):
+            raise ValueError(
+                "line_formation_height_bounds_Mm must share the shell inner "
+                "height and end at or below the full-domain outer height."
+            )
+        self.line_formation_height_bounds_Mm = line_formation_height_bounds_Mm
+        self.extrapolation_enabled = (
+            line_formation_height_bounds_Mm[0] < shell_height_bounds_Mm[0]
+        )
+        if self.extrapolation_enabled:
+            if upper_atmosphere_config is None:
+                raise ValueError(
+                    "An extrapolated shell requires upper_atmosphere_config."
+                )
+            self.reference_atmosphere = RadialReferenceAtmosphere(
+                reference_atmosphere_config,
+                upper_atmosphere_config=upper_atmosphere_config,
+                maximum_height_m=shell_height_bounds_Mm[0] * 1.0e6,
+                solar_radius_m=solar_radius_m,
+                thermodynamic_eos=self.thermodynamic_eos,
+                atomic_database=atomic_database,
+            )
+            self.transition_region_top_m = (
+                float(upper_atmosphere_config["transition_region_top_megameter"])
+                * 1.0e6
+            )
+        else:
+            if upper_atmosphere_config is not None:
+                raise ValueError(
+                    "upper_atmosphere_config requires an extrapolated shell."
+                )
+            self.transition_region_top_m = None
         reference_outer_m, reference_inner_m = (
             float(value) * 1.0e6 for value in reference_height_bounds_Mm
         )
-        self.outer_height_scale = shell_height_bounds_Mm[0] * 1.0e6 / reference_outer_m
-        self.inner_height_scale = shell_height_bounds_Mm[1] * 1.0e6 / reference_inner_m
+        self.outer_height_scale = (
+            line_formation_height_bounds_Mm[0] * 1.0e6 / reference_outer_m
+        )
+        self.inner_height_scale = (
+            line_formation_height_bounds_Mm[1] * 1.0e6 / reference_inner_m
+        )
+        top_height = log_tau500.new_tensor(shell_height_bounds_Mm[0] * 1.0e6)
+        top_reference_logs = self.reference_atmosphere.logs_at_height(top_height)
+        if top_reference_logs[1] <= math.log(torch.finfo(log_tau500.dtype).tiny):
+            raise ValueError(
+                "The FALC pressure at the configured domain top is not "
+                "representable in the atmosphere dtype."
+            )
+        self.register_buffer(
+            "top_boundary_reference_log_pressure",
+            top_reference_logs[1].detach().clone(),
+        )
         self.scene_basis_values = tuple(
             tuple(float(component) for component in row)
             for row in scene_config["scene_basis"]
@@ -819,37 +1055,12 @@ class StratifiedAtmosphereModel(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Decode network channels into physical quantities."""
 
-        def bounded_reference_perturbation(
-            value: torch.Tensor,
-            reference_log: torch.Tensor,
-            log10_bounds: tuple[float, float],
-            local_log_scale: float,
-        ) -> torch.Tensor:
-            """Apply a bounded perturbation with raw=0 exactly at reference."""
-
-            lower = value.new_tensor(math.log(10.0) * log10_bounds[0])
-            upper = value.new_tensor(math.log(10.0) * log10_bounds[1])
-            eps = 32.0 * torch.finfo(value.dtype).eps
-            fraction = ((reference_log - lower) / (upper - lower)).clamp(eps, 1.0 - eps)
-            logit = torch.log(fraction) - torch.log1p(-fraction)
-            raw_scale = local_log_scale / (
-                (upper - lower) * fraction * (1.0 - fraction)
-            )
-            return torch.exp(
-                lower + (upper - lower) * torch.sigmoid(logit + raw_scale * value)
-            )
-
         if geometric_height_m is None:
             raise RuntimeError("Radial-reference decoding requires geometric height.")
         reference_logs = self.reference_atmosphere.logs_at_height(
             geometric_height_m.to(raw)
         )
-        temperature = bounded_reference_perturbation(
-            raw[..., 0],
-            reference_logs[0],
-            self.temperature_log10_bounds,
-            self.temperature_log_scale,
-        )
+        temperature_log = reference_logs[0] + (self.temperature_log_scale * raw[..., 0])
         velocity_argument = raw[..., 1:4] * (
             0.5 * math.pi * self.velocity_scale_m_per_s / self.velocity_max_m_per_s
         )
@@ -857,24 +1068,18 @@ class StratifiedAtmosphereModel(nn.Module):
             self.velocity_max_m_per_s * (2.0 / math.pi) * torch.atan(velocity_argument)
         )
         magnetic_field = self.magnetic_scale_gauss * raw[..., 4:7]
-        microturbulence = bounded_reference_perturbation(
-            raw[..., 7],
-            reference_logs[2],
-            self.microturbulence_log10_bounds,
-            self.microturbulence_log_scale,
+        microturbulence_log = reference_logs[2] + (
+            self.microturbulence_log_scale * raw[..., 7]
         )
-        gas_pressure = bounded_reference_perturbation(
-            raw[..., 8],
-            reference_logs[1],
-            self.gas_pressure_log10_bounds,
-            self.gas_pressure_log_scale,
+        gas_pressure_log = reference_logs[1] + (
+            self.gas_pressure_log_scale * raw[..., 8]
         )
         return {
-            "temperature": temperature,
+            "temperature": torch.exp(temperature_log),
             "velocity_field": velocity_field,
-            "microturbulence": microturbulence,
+            "microturbulence": torch.exp(microturbulence_log),
             "magnetic_field": magnetic_field,
-            "gas_pressure": gas_pressure,
+            "gas_pressure": torch.exp(gas_pressure_log),
         }
 
     def evaluate_at_height(
@@ -1107,13 +1312,33 @@ class StratifiedAtmosphereModel(nn.Module):
                 "zero thermodynamic perturbation readouts and random vector readouts"
             ),
             "log_tau500": self.log_tau500.detach().cpu().tolist(),
-            "temperature_log10_bounds": list(self.temperature_log10_bounds),
             "temperature_log_scale": self.temperature_log_scale,
-            "temperature_parameterization": "smooth bounded log perturbation around radial reference",
-            "microturbulence_log10_bounds": list(self.microturbulence_log10_bounds),
-            "gas_pressure_log10_bounds": list(self.gas_pressure_log10_bounds),
+            "temperature_parameterization": (
+                "unbounded linear natural-log residual around radial reference"
+            ),
+            "thermodynamic_eos": self.thermodynamic_eos.metadata(),
+            "microturbulence_log_scale": self.microturbulence_log_scale,
+            "microturbulence_parameterization": (
+                "unbounded linear natural-log residual around radial reference"
+            ),
             "gas_pressure_log_scale": self.gas_pressure_log_scale,
-            "gas_pressure_parameterization": "smooth bounded log perturbation around radial reference",
+            "gas_pressure_parameterization": (
+                "unbounded linear natural-log residual around radial reference"
+            ),
+            "line_formation_height_bounds_Mm": list(
+                self.line_formation_height_bounds_Mm
+            ),
+            "full_domain_height_bounds_Mm": list(self.shell_height_bounds_Mm),
+            "top_boundary_reference": {
+                "source": (
+                    "hydrostatic FALC-to-corona reference"
+                    if self.extrapolation_enabled
+                    else "FALC radial reference"
+                ),
+                "gas_pressure_pa": float(
+                    torch.exp(self.top_boundary_reference_log_pressure)
+                ),
+            },
             "velocity_scale_m_per_s": self.velocity_scale_m_per_s,
             "velocity_max_m_per_s": self.velocity_max_m_per_s,
             "magnetic_scale_gauss": self.magnetic_scale_gauss,

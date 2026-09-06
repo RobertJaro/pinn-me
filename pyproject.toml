@@ -75,7 +75,9 @@ version = {attr = "prom3theus.__version__"}
 [tool.setuptools.data-files]
 "share/prom3theus/configs" = [
   "configs/hinode_lte_mhs.yaml",
-  "configs/hmi_lte_subframe.yaml",
+  "configs/hinode_lte_mhs_extrapolation.yaml",
+  "configs/hmi_lte_mhs.yaml",
+  "configs/hmi_lte_dynamic.yaml",
 ]
 
 [tool.pytest.ini_options]

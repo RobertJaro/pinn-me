@@ -31,10 +31,31 @@ def build_export_metadata(
     *,
     depth_samples: int,
     include_stokes: bool,
+    full_shell: Mapping[str, Any] | None = None,
     storage_dtype: str,
     device: torch.device,
 ) -> dict[str, Any]:
     """Describe the validated inputs and every exported array."""
+
+    evaluation = {
+        "depth_coordinate": "log_tau500",
+        "depth_samples": depth_samples,
+        "include_stokes": include_stokes,
+        "storage_dtype": storage_dtype,
+        "device": str(device),
+        "raster_role": "validation",
+        "raster_name": raster_selection.name,
+        "raster_index": raster_selection.index,
+        "raster_count": raster_selection.raster_count,
+        "carrington_sidereal_rotation_period_days": (
+            CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS
+        ),
+        "carrington_angular_velocity_rad_per_s": (
+            CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S
+        ),
+    }
+    if full_shell is not None:
+        evaluation["full_shell"] = dict(full_shell)
 
     return {
         "schema_version": 1,
@@ -50,23 +71,7 @@ def build_export_metadata(
         "velocity_synthesis": velocity_synthesis_contract(
             contract.spec.velocity_synthesis_mode
         ),
-        "evaluation": {
-            "depth_coordinate": "log_tau500",
-            "depth_samples": depth_samples,
-            "include_stokes": include_stokes,
-            "storage_dtype": storage_dtype,
-            "device": str(device),
-            "raster_role": "validation",
-            "raster_name": raster_selection.name,
-            "raster_index": raster_selection.index,
-            "raster_count": raster_selection.raster_count,
-            "carrington_sidereal_rotation_period_days": (
-                CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS
-            ),
-            "carrington_angular_velocity_rad_per_s": (
-                CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S
-            ),
-        },
+        "evaluation": evaluation,
         "arrays": {
             name: {"dtype": str(value.dtype), "shape": list(value.shape)}
             for name, value in sorted(arrays.items())

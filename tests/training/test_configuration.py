@@ -74,16 +74,32 @@ def test_physics_collocation_counts_are_strict_integers():
                 "magnetic_divergence",
                 "induction",
                 "continuity",
+                "adiabatic_pressure",
+                "upper_boundary_open_velocity",
+                "side_boundary_open_velocity",
+                "side_boundary_current_free",
+                "upper_domain_microturbulence_prior",
+                "upper_domain_temperature_prior",
+                "radial_magnetic_energy_gradient",
+                "upper_boundary_current_free",
                 "upper_boundary_gas_pressure_prior",
             )
         },
         "gravity_m_per_s2": None,
+        "adiabatic_index": 5.0 / 3.0,
+        "upper_boundary_current_free_ramp_steps": 0,
         "volume_points_per_step": 16.5,
         "height_layers_per_step": 4,
+        "upper_volume_points_per_step": 0,
+        "upper_height_layers_per_step": 0,
         "upper_boundary_points_per_step": 4,
+        "side_boundary_points_per_step": 0,
+        "side_height_layers_per_step": 0,
         "validation_height_layers": 2,
+        "validation_upper_height_layers": 0,
         "validation_points_per_height": 4,
         "sampling_domain": None,
+        "upper_sampling_domain": None,
         "vector_basis_matches_spatial_coordinates": True,
         "normalization": {"length_m": 1.0e6, "time_s": 3600.0},
     }
@@ -106,12 +122,22 @@ def test_objective_weighting_applies_exclusions_and_preserves_component_order():
     )
 
     torch.testing.assert_close(
-        weighting.stokes_weights, torch.tensor([1.0, 2.0, 3.0, 4.0])
+        weighting.stokes_weights, torch.tensor([0.1, 0.2, 0.3, 0.4])
     )
     torch.testing.assert_close(
         weighting.wavelength_weights, torch.tensor([1.0, 0.0, 3.0])
     )
     assert weighting.wavelength_exclude_windows_angstrom == [[6301.4, 6301.6]]
+
+    rescaled = resolve_objective_weighting(
+        wavelength,
+        weight_config={"I": 10.0, "Q": 20.0, "U": 30.0, "V": 40.0},
+        wavelength_weights=None,
+        wavelength_exclude_windows_angstrom=[],
+        continuum_indices=[0, 2],
+        atlas_continuum_radiance_w_m3_sr=3.06e13,
+    )
+    torch.testing.assert_close(rescaled.stokes_weights, weighting.stokes_weights)
     with pytest.raises(KeyError, match="Stokes weights must contain exactly"):
         resolve_objective_weighting(
             wavelength,

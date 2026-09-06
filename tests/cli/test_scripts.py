@@ -161,20 +161,18 @@ def test_hmi_preparation_commands_are_fixed(tmp_path):
             "prom3theus.cli.main",
             "prepare",
             "hmi-responses",
-            "data/hmi/2024-03-23/subframe",
+            "/glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe",
             "--output",
-            "data/calibration/hmi/2024-03-23",
+            "/glade/work/rjarolim/data/hmi_calibration/20240323",
             "--email",
-            "scientist@example.test",
-            "--phase-map-fsn",
-            "230562565",
+            "robert.jarolim@uni-graz.at",
         ],
     ]
 
 
 def test_run_commands_are_separate_and_fixed(tmp_path):
     assert _run(HMI_RUN, tmp_path / "hmi") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_lte_subframe.yaml"]
+        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_lte_dynamic.yaml"]
     ]
     assert _run(HINODE_RUN, tmp_path / "hinode") == [
         [
@@ -182,7 +180,13 @@ def test_run_commands_are_separate_and_fixed(tmp_path):
             "prom3theus.cli.main",
             "invert",
             "configs/hinode_lte_mhs.yaml",
-        ]
+        ],
+        [
+            "-m",
+            "prom3theus.cli.main",
+            "invert",
+            "configs/hinode_lte_mhs_extrapolation.yaml",
+        ],
     ]
 
 
