@@ -447,10 +447,16 @@ class HinodeInstrumentConfig(ConfigNode):
 @dataclass(frozen=True, slots=True)
 class HMIInstrumentConfig(ConfigNode):
     type: Literal["hmi_filter_profiles"]
+    magnetic_azimuth_offset_deg: float
     line_of_sight_velocity_correction_m_per_s: float = 0.0
     optimize_line_of_sight_velocity_correction: bool = False
 
     def __post_init__(self) -> None:
+        _finite(self.magnetic_azimuth_offset_deg, "magnetic_azimuth_offset_deg")
+        if float(self.magnetic_azimuth_offset_deg) != 90.0:
+            raise ValueError(
+                "HMI magnetic_azimuth_offset_deg must be exactly 90 degrees"
+            )
         if type(self.optimize_line_of_sight_velocity_correction) is not bool:
             raise TypeError(
                 "optimize_line_of_sight_velocity_correction must be boolean"

@@ -4,30 +4,76 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
 from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 
 from prom3theus import __version__
-from prom3theus.artifacts.model import (
-    OBSERVATION_DIRECTORY_NAME,
-    ArtifactManifest,
-    save_artifact,
-)
+from prom3theus.artifacts.checkpoint import p3s_context
 from prom3theus.config import InversionConfig
 from prom3theus.instruments import resolve_instrument_config
 from prom3theus.inversion.constraints import BOUNDARY_EQUATIONS
 from prom3theus.inversion.sampling import SphericalShellDomain
-from prom3theus.observations import (
-    OBSERVATION_STORE_FORMAT,
-    OBSERVATION_STORE_VERSION,
-    ObservationStore,
-    load_or_prepare_observation,
-)
+from prom3theus.observations import ObservationStore, load_or_prepare_observation
 from prom3theus.resources import validate_resource_bundle
-from prom3theus.training.lightning import LTEInversionModule
+from prom3theus.training.lightning import LTEInversionModule, P3S_CONTEXT_KEY
+
+
+class P3SSaveStateCallback(Callback):
+    """Write one compact, atomic post-validation PROM3THEUS save state."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path).expanduser().resolve()
+        self._last_saved_step: int | None = None
+
+    def _save(self, trainer: Trainer, module: LTEInversionModule) -> None:
+        if trainer.is_global_zero:
+            context = module.save_state_context
+            if context is None:
+                raise RuntimeError("P3S saving requires a configured context.")
+            parameters = {
+                name: parameter.detach()
+                for name, parameter in module.named_parameters()
+            }
+            nonfinite = [
+                name
+                for name, value in parameters.items()
+                if (value.is_floating_point() or value.is_complex())
+                and not torch.isfinite(value).all()
+            ]
+            if nonfinite:
+                raise RuntimeError(
+                    "Refusing to save non-finite P3S parameters: "
+                    + ", ".join(nonfinite[:12])
+                )
+            payload = {
+                P3S_CONTEXT_KEY: deepcopy(context),
+                "parameters": parameters,
+                "epoch": int(trainer.current_epoch),
+                "global_step": int(trainer.global_step),
+            }
+            temporary = self.path.with_name(f".{self.path.name}.tmp")
+            try:
+                torch.save(payload, temporary)
+                os.replace(temporary, self.path)
+                self._last_saved_step = int(trainer.global_step)
+            finally:
+                temporary.unlink(missing_ok=True)
+        trainer.strategy.barrier()
+
+    def on_validation_end(
+        self, trainer: Trainer, pl_module: LTEInversionModule
+    ) -> None:
+        if not trainer.sanity_checking:
+            self._save(trainer, pl_module)
+
+    def on_train_end(self, trainer: Trainer, pl_module: LTEInversionModule) -> None:
+        if self._last_saved_step != int(trainer.global_step):
+            self._save(trainer, pl_module)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +83,8 @@ class InversionRun:
     module: LTEInversionModule
     data_module: Any
     trainer: Trainer
-    artifact_directory: Path
+    save_state_path: Path
+    lightning_checkpoint_path: Path
 
 
 def _depth_grid(config: InversionConfig) -> list[float]:
@@ -289,6 +336,29 @@ def _instrument_config(
     )
 
 
+def _observation_times(data_module: Any) -> list[dict[str, Any]]:
+    """Extract only the time-selection metadata required by P3SLoader."""
+
+    records = []
+    for raster in data_module.rasters:
+        times = raster.metadata.get("times")
+        coordinates = raster.metadata.get("coordinates")
+        if (
+            not isinstance(times, list)
+            or not times
+            or any(not isinstance(value, str) or not value for value in times)
+            or not isinstance(coordinates, Mapping)
+        ):
+            raise ValueError("Every observation raster must declare explicit times.")
+        # Hinode DATE_OBS values are UTC and predate the explicit time_scale
+        # metadata added for HMI TAI observations.
+        scale = str(coordinates.get("time_scale", "utc")).lower()
+        if scale not in {"tai", "utc"}:
+            raise ValueError("Every observation raster time_scale must be TAI or UTC.")
+        records.append({"values": list(times), "scale": scale})
+    return records
+
+
 def run_inversion(
     config: InversionConfig,
     *,
@@ -305,13 +375,6 @@ def run_inversion(
     work_directory = config.solver.work_directory
     output_directory.mkdir(parents=True, exist_ok=True)
     work_directory.mkdir(parents=True, exist_ok=True)
-    artifact_directory = output_directory / "artifact"
-    if artifact_directory.exists():
-        raise FileExistsError(
-            f"Artifact directory already exists: {artifact_directory}. "
-            "Choose a fresh solver.output_directory."
-        )
-
     resources = validate_resource_bundle()
     resource_contract = deepcopy(resources)
     data_module, observation, adapter = load_or_prepare_observation(
@@ -410,7 +473,41 @@ def run_inversion(
                 f"{line.wavelength_air_angstrom} Angstrom."
             )
 
-    callbacks: list[Any] = []
+    observation_store = Path(data_module.observation_store_path).resolve()
+    store_manifest = ObservationStore.manifest(observation_store)
+    save_state_path = (output_directory / "state.p3s").resolve()
+    lightning_checkpoint_path = (output_directory / "last.ckpt").resolve()
+    module.set_save_state_context(
+        p3s_context(
+            package_version=__version__,
+            resolved_config=config.to_dict(),
+            resources=resource_contract,
+            observation_spec=observation.metadata(),
+            source_signature=store_manifest["source_signature"],
+            raster_names=data_module.raster_names,
+            validation_raster_index=data_module.validation_raster_index,
+            times=_observation_times(data_module),
+            bounds=data_module.observation_sampling_bounds,
+            model=dict(module.hparams),
+        )
+    )
+
+    callbacks: list[Any] = [
+        ModelCheckpoint(
+            dirpath=output_directory,
+            filename="last",
+            monitor=None,
+            save_top_k=1,
+            save_last=False,
+            save_on_exception=True,
+            save_weights_only=False,
+            every_n_epochs=1,
+            save_on_train_epoch_end=False,
+            auto_insert_metric_name=False,
+            enable_version_counter=False,
+        ),
+        P3SSaveStateCallback(save_state_path),
+    ]
     visualization = _visualization_callback(config)
     if visualization is not None:
         callbacks.append(visualization)
@@ -431,42 +528,22 @@ def run_inversion(
         log_every_n_steps=runtime.log_every_n_steps,
         check_val_every_n_epoch=config.diagnostics.validation_every_n_epochs,
         inference_mode=False,
-        enable_checkpointing=False,
+        enable_checkpointing=True,
     )
     if runtime.validation_check_interval_steps is not None:
         trainer_options["val_check_interval"] = runtime.validation_check_interval_steps
     trainer = Trainer(**trainer_options)
-    trainer.fit(module, datamodule=data_module)
+    fit_options = {"datamodule": data_module}
+    if lightning_checkpoint_path.is_file():
+        fit_options["ckpt_path"] = lightning_checkpoint_path
+    trainer.fit(module, **fit_options)
 
-    observation_store = Path(data_module.observation_store_path).resolve()
-    store_manifest = ObservationStore.manifest(observation_store)
-    manifest = ArtifactManifest.create(
-        package_version=__version__,
-        resolved_config=config.to_dict(),
-        resources=resource_contract,
-        observation={
-            "store": {
-                "path": OBSERVATION_DIRECTORY_NAME,
-                "format": OBSERVATION_STORE_FORMAT,
-                "version": OBSERVATION_STORE_VERSION,
-                "source_signature": store_manifest["source_signature"],
-            },
-            "spec": observation.metadata(),
-        },
-        model=dict(module.hparams),
-        provenance={"training_runtime": "pytorch_lightning"},
-    )
-    save_artifact(
-        artifact_directory,
-        model=module,
-        manifest=manifest,
-        observation_store=observation_store,
-    )
     return InversionRun(
         module=module,
         data_module=data_module,
         trainer=trainer,
-        artifact_directory=artifact_directory,
+        save_state_path=save_state_path,
+        lightning_checkpoint_path=lightning_checkpoint_path,
     )
 
 

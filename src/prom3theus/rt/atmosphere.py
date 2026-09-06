@@ -651,7 +651,7 @@ class StratifiedAtmosphereModel(nn.Module):
     Positive thermodynamic variables use unbounded, reference-anchored linear
     residuals in natural-log space.  Finite-domain radiative-transfer tables
     validate their own inputs independently of this primary atmosphere model.
-    Cartesian magnetic vectors use a direct unit-scaled linear decoder.
+    Magnetic vectors use a direct Cartesian decoder.
     Velocity components use a smooth arctangent bound with the configured
     local linear scale, preventing invalid relativistic Doppler factors while
     retaining nonzero gradients outside the ordinary photospheric range.
@@ -668,7 +668,6 @@ class StratifiedAtmosphereModel(nn.Module):
         "microturbulence",
         "gas_pressure",
     )
-
     def __init__(
         self,
         log_tau500,
@@ -1040,7 +1039,10 @@ class StratifiedAtmosphereModel(nn.Module):
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *inputs.shape[:-1], -1
         )
-        fields = self._decode_raw(raw, geometric_height_m=geometric_height)
+        fields = self._decode_raw(
+            raw,
+            geometric_height_m=geometric_height,
+        )
         return StratifiedAtmosphere(
             log_tau500=grid,
             geometric_height_m=geometric_height,
@@ -1095,7 +1097,10 @@ class StratifiedAtmosphereModel(nn.Module):
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *inputs.shape[:-1], -1
         )
-        return self._decode_raw(raw, geometric_height_m=height)
+        return self._decode_raw(
+            raw,
+            geometric_height_m=height,
+        )
 
     def evaluate_chart_height_points(
         self,
@@ -1120,7 +1125,10 @@ class StratifiedAtmosphereModel(nn.Module):
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *inputs.shape[:-1], -1
         )
-        return self._decode_raw(raw, geometric_height_m=height)
+        return self._decode_raw(
+            raw,
+            geometric_height_m=height,
+        )
 
     def position_from_coords_height(
         self, coords: torch.Tensor, geometric_height_m: torch.Tensor
@@ -1201,7 +1209,10 @@ class StratifiedAtmosphereModel(nn.Module):
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *inputs.shape[:-1], -1
         )[..., 0, :]
-        return self._decode_raw(raw, geometric_height_m=height)
+        return self._decode_raw(
+            raw,
+            geometric_height_m=height,
+        )
 
     def evaluate_position_points(
         self, position_m: torch.Tensor, time_hours: torch.Tensor | float | None = None
@@ -1345,7 +1356,7 @@ class StratifiedAtmosphereModel(nn.Module):
             "vector_decoder": (
                 "velocity uses a smoothly bounded component-wise arctangent output "
                 "with the configured local linear scale and nonzero tail gradients; "
-                "magnetic field remains an unbounded component-wise linear output; "
+                "magnetic field uses an unbounded Cartesian decoder; "
                 "output weights and biases remain randomly initialized; both vectors "
                 "always have three components"
             ),

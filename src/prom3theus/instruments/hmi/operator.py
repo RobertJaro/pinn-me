@@ -8,6 +8,7 @@ import math
 import torch
 from torch import nn
 
+from prom3theus.instruments.base import MagneticAzimuthConvention
 from prom3theus.resources import resource_path, verify_manifest_resource
 
 
@@ -42,6 +43,7 @@ class HMIFilterProfiles(nn.Module):
         self,
         quadrature_wavelength_angstrom,
         inner_half_width_angstrom: float,
+        magnetic_azimuth_offset_deg: float,
     ):
         super().__init__()
         provenance = _instrument_provenance()
@@ -53,6 +55,14 @@ class HMIFilterProfiles(nn.Module):
         if not math.isfinite(half_width) or half_width <= 0:
             raise ValueError("inner_half_width_angstrom must be finite and positive.")
         self.inner_half_width_angstrom = half_width
+        self.polarization_convention = MagneticAzimuthConvention(
+            name="hmi_physical_to_lte_azimuth",
+            offset_deg=magnetic_azimuth_offset_deg,
+        )
+        if self.polarization_convention.offset_deg != 90.0:
+            raise ValueError(
+                "HMI magnetic_azimuth_offset_deg must be exactly 90 degrees."
+            )
         self.tuning_reference_angstrom = float(
             provenance["spectral_line"][
                 "instrument_tuning_reference_air_wavelength_angstrom"
@@ -186,6 +196,7 @@ class HMIFilterProfiles(nn.Module):
             ),
             "inner_half_width_angstrom": self.inner_half_width_angstrom,
             "tuning_reference_air_wavelength_angstrom": self.tuning_reference_angstrom,
+            "polarization_convention": self.polarization_convention.metadata(),
             "provenance": self.provenance,
         }
 

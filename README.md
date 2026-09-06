@@ -276,6 +276,14 @@ that directory. The preparation manifest binds every response archive by
 SHA-256; the inversion verifies and selects each acquisition's response without
 network access.
 
+Polarization conventions are owned by the instrument operator at the boundary
+between physical fields and spectral synthesis. HMI explicitly adds 90 degrees
+to the observer-frame magnetic azimuth before LTE synthesis; this is equivalent
+to mapping `[Bx, By, Blos]` to `[-By, Bx, Blos]`. Hinode uses the identity
+mapping. The correction never rotates the Cartesian atmosphere used by physics,
+saved cubes, or vector-field exports, and both the resolved configuration and
+instrument metadata record the applied convention.
+
 ## Download, preparation, and run scripts
 
 The repository keeps the workflows as small, instrument-specific shell files.
@@ -346,7 +354,32 @@ creates a `*_stokes_validation.png` comparison containing reference and
 predicted I, Q, U, and V maps, ensemble line profiles, and integrated-fit
 scatter panels.
 
-The durable output is a schema-v1 artifact containing:
+Training also writes resumable PROM3THEUS Save States (P3S) to the durable
+output directory:
+
+```text
+state.p3s   # standalone Loader/evaluation state, overwritten atomically
+last.ckpt   # full PyTorch Lightning continuation checkpoint
+```
+
+Both files live directly under `solver.output_directory` and are refreshed
+after every completed validation. If `last.ckpt` already exists, the runner
+passes it to PyTorch Lightning and continues the complete training state.
+`state.p3s` contains trained parameters, epoch/step provenance, the resolved
+configuration, resource contracts, rendering model constructor inputs, and only
+a lightweight observation reference: source identity, raster names and times,
+validation selection, and spatial/temporal bounds. It does not duplicate FITS
+or canonical observation arrays. `prom3theus.artifacts.P3SLoader(path)` opens
+the signature-addressed converted observation store in the configured scratch
+directory on demand for post-training forward rendering, and verifies its
+source identity, times, bounds, and scientific contract.
+
+Converted training arrays remain exclusively in
+`solver.work_directory/observation-cache`; the inversion runner does not copy
+them into `solver.output_directory` or create a model artifact.
+
+The separate, explicitly invoked schema-v1 artifact API remains available for
+portable archival workflows. Such an artifact contains:
 
 ```text
 artifact/
@@ -397,6 +430,59 @@ depth or synthesize Stokes profiles above the line-formation domain; its NPZ
 metadata records the physical height bounds, sampling convention, and vector
 frames. Cost scales with valid pixels times `--full-shell-samples`; lower
 `--batch-size` when device memory is limited.
+
+### Comparing a trained HMI result with `hmi.B_720s`
+
+This standalone diagnostic opens `state.p3s` through `P3SLoader`, selects the
+stored Stokes raster matching the reference `T_OBS`, samples the full-disk HMI
+vector record onto its exact detector pixels, and writes spherical-component
+and azimuth figures, reusable comparison arrays, and JSON metrics. It does not
+participate in training.
+
+```bash
+prom3theus compare-hmi /path/to/run/state.p3s \
+  /glade/work/rjarolim/data/hmi_stokes/test_2024_03_24 \
+  --output /path/to/run/hmi_comparison \
+  --height-km 0 \
+  --disambig-bit 0 \
+  --minimum-transverse-gauss 200 \
+  --device cuda
+```
+
+Bit 0 is the minimum-energy/smoothed-minimum-energy result in strong and
+intermediate pixels and the potential-field result in weak full-disk pixels.
+Since the compact comparison input does not contain `conf_disambig`, headline
+branch and component metrics are restricted by the explicit transverse-field
+threshold. Use `--disambig-bit 2` to inspect the radial acute-angle alternative.
+The component convention is HMI/SHARP CEA: radial outward, theta southward, and
+phi westward.
+
+The comparison also tests all eight global azimuth conventions
+`chi' = sign * chi + k * 90 degrees`, with both azimuth directions and four
+quarter-turn rotations. It ranks them by the mean `Btheta`/`Bphi` Pearson
+correlation on strong-transverse pixels and records the component correlations
+for both the strong and all-valid masks. The HMI disambiguation bit is applied
+after each coordinate-convention transform.
+
+## P3S query API
+
+All common P3S reconstruction, raster selection, and model queries are owned by
+one loader:
+
+```python
+from prom3theus.artifacts import P3SLoader
+
+loader = P3SLoader("/path/to/run/state.p3s", device="cuda")
+cube = loader.cube(depth_samples=101)
+full_cube = loader.full_cube(height_samples=161)
+layers = loader.shell_slices([0.0, 1.0e6, 10.0e6])
+meridional = loader.meridional_slice(215.0)
+stokes = loader.stokes()
+surface = loader.raster_fields_at_height(0.0)
+```
+
+Raster lookup by validation role, index, name, or nearest observation time is
+also handled by `P3SLoader`; callers do not open observation stores directly.
 
 ## Numerical API
 

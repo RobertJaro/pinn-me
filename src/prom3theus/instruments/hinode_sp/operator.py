@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from prom3theus.instruments.base import MagneticAzimuthConvention
 from prom3theus.resources import resource_path, verify_manifest_resource
 
 
@@ -46,6 +47,10 @@ class HinodeSpectralPSF(nn.Module):
         self.fwhm_angstrom = float(fwhm_angstrom)
         self.oversample = int(oversample)
         self.truncate_sigma = float(truncate_sigma)
+        self.polarization_convention = MagneticAzimuthConvention(
+            name="identity",
+            offset_deg=0.0,
+        )
         self.provenance = provenance
         self.register_buffer(
             "_prepared_kernel", torch.empty(0, dtype=torch.float64), persistent=False
@@ -254,6 +259,7 @@ class HinodeSpectralPSF(nn.Module):
             "sigma_angstrom": self.sigma_angstrom,
             "oversample": self.oversample,
             "truncate_sigma": self.truncate_sigma,
+            "polarization_convention": self.polarization_convention.metadata(),
             "constant_preserving_boundary": "replicate",
             "provenance": self.provenance,
         }

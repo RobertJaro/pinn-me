@@ -9,6 +9,8 @@ from typing import Any
 
 from torch import nn
 
+from .base import MagneticAzimuthConvention
+
 
 @dataclass(frozen=True, slots=True)
 class InstrumentRegistration:
@@ -78,10 +80,16 @@ def build_instrument(config: Mapping[str, Any]) -> nn.Module:
         for method in ("synthesis_grid", "forward", "metadata")
         if not callable(getattr(operator, method, None))
     ]
-    if not isinstance(operator, nn.Module) or missing:
+    convention = getattr(operator, "polarization_convention", None)
+    if (
+        not isinstance(operator, nn.Module)
+        or missing
+        or not isinstance(convention, MagneticAzimuthConvention)
+    ):
         raise TypeError(
             f"Instrument {registration.name!r} returned an incompatible operator; "
-            f"missing {missing}."
+            f"missing methods={missing}, valid polarization_convention="
+            f"{isinstance(convention, MagneticAzimuthConvention)}."
         )
     return operator
 

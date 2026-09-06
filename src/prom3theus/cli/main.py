@@ -55,6 +55,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--storage-dtype", choices=("float32", "float64"), default="float32"
     )
 
+    compare_hmi = commands.add_parser(
+        "compare-hmi",
+        help="compare a P3S save state with a matching native HMI B_720s record",
+    )
+    compare_hmi.add_argument("save_state", type=Path, help="state.p3s path")
+    compare_hmi.add_argument(
+        "hmi_directory", type=Path, help="directory containing B_720s FITS segments"
+    )
+    compare_hmi.add_argument("--output", type=Path, required=True)
+    compare_hmi.add_argument("--height-km", type=float, default=0.0)
+    compare_hmi.add_argument("--disambig-bit", type=int, choices=(0, 1, 2), default=0)
+    compare_hmi.add_argument("--minimum-transverse-gauss", type=float, default=200.0)
+    compare_hmi.add_argument("--time-tolerance-seconds", type=float, default=2.0)
+    compare_hmi.add_argument("--alignment-tolerance-pixels", type=float, default=0.1)
+    compare_hmi.add_argument("--batch-size", type=int, default=4096)
+    compare_hmi.add_argument("--device", default="auto")
+    compare_hmi.add_argument("--dpi", type=int, default=180)
+
     validate_config = commands.add_parser(
         "validate-config",
         help="strictly validate and display a resolved YAML configuration",
@@ -161,6 +179,25 @@ def main(argv: Sequence[str] | None = None) -> None:
             device=args.device,
         )
         print(output)
+        return
+
+    if args.command == "compare-hmi":
+        from prom3theus.diagnostics.hmi_comparison import compare_hmi_save_state
+
+        result = compare_hmi_save_state(
+            args.save_state,
+            args.hmi_directory,
+            args.output,
+            height_km=args.height_km,
+            disambig_bit=args.disambig_bit,
+            minimum_transverse_gauss=args.minimum_transverse_gauss,
+            time_tolerance_seconds=args.time_tolerance_seconds,
+            alignment_tolerance_pixels=args.alignment_tolerance_pixels,
+            batch_size=args.batch_size,
+            device=args.device,
+            dpi=args.dpi,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
         return
 
     if args.command == "resources":

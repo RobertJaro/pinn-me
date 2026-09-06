@@ -15,7 +15,10 @@ from prom3theus.inversion.forward import (
     LTEForwardComposition,
 )
 from prom3theus.rt import StratifiedAtmosphereModel
-from prom3theus.training.lightning import LTEInversionModule
+from prom3theus.training.lightning import (
+    LTEInversionModule,
+    P3S_CONTEXT_KEY,
+)
 
 
 def test_constructor_requires_the_explicit_lte_runtime_contract():
@@ -254,6 +257,29 @@ def test_artifact_metadata_keeps_the_exact_physical_radiance_scale():
     assert (
         module.instrument_line_of_sight_velocity_correction_normalized.grad is not None
     )
+    context = {
+        "format": "prom3theus.save_state",
+        "version": 2,
+        "resolved_config": {"schema_version": 2},
+    }
+    module.set_save_state_context(context)
+    checkpoint = {}
+    module.on_save_checkpoint(checkpoint)
+    assert checkpoint[P3S_CONTEXT_KEY] == context
+
+    restored = object.__new__(LTEInversionModule)
+    torch.nn.Module.__init__(restored)
+    restored.save_state_context = None
+    restored.on_load_checkpoint(checkpoint)
+    assert restored.save_state_context == context
+
+    with pytest.raises(RuntimeError, match="missing required"):
+        restored.on_load_checkpoint({})
+
+    restored.save_state_context = context
+    incompatible = {P3S_CONTEXT_KEY: {**context, "version": 1}}
+    with pytest.raises(RuntimeError, match="differs from the configured run"):
+        restored.on_load_checkpoint(incompatible)
 
 
 def test_vector_regularization_shrinks_only_nonzero_components():

@@ -434,6 +434,7 @@ def test_filter_operator_uses_packaged_provenance_and_preserves_constant_stokes(
     operator = HMIFilterProfiles(
         quadrature_wavelength_angstrom=quadrature,
         inner_half_width_angstrom=0.65,
+        magnetic_azimuth_offset_deg=90.0,
     )
     observed = torch.tensor(
         [6173.1713, 6173.2401, 6173.3089, 6173.3777, 6173.4465, 6173.5153]
@@ -614,6 +615,7 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         synthesizer_config={"line_ids": list(observation.required_line_ids)},
         instrument_config={
             "type": observation.instrument_type,
+            "magnetic_azimuth_offset_deg": 90.0,
             **dict(observation.instrument_options),
         },
         stokes_loss_config={

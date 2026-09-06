@@ -19,6 +19,7 @@ def test_command_tree_is_small_and_explicit():
         action for action in parser._actions if action.dest == "command"
     )
     assert set(command_action.choices) == {
+        "compare-hmi",
         "download",
         "export",
         "invert",
@@ -39,6 +40,26 @@ def test_command_tree_is_small_and_explicit():
         action for action in download._actions if action.dest == "download_command"
     )
     assert set(download_action.choices) == {"hmi-stokes"}
+
+
+def test_hmi_comparison_has_explicit_p3s_reference_and_output():
+    args = _build_parser().parse_args(
+        [
+            "compare-hmi",
+            "run/state.p3s",
+            "data/hmi-vector",
+            "--output",
+            "run/hmi-comparison",
+            "--height-km",
+            "100",
+            "--disambig-bit",
+            "2",
+        ]
+    )
+    assert args.save_state == Path("run/state.p3s")
+    assert args.hmi_directory == Path("data/hmi-vector")
+    assert args.height_km == 100.0
+    assert args.disambig_bit == 2
 
 
 def test_hmi_download_requires_an_explicit_closed_interval():

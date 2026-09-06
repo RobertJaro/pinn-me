@@ -7,6 +7,7 @@ import sys
 import pytest
 import torch
 
+from prom3theus.instruments import MagneticAzimuthConvention
 from prom3theus.inversion.forward import (
     DepthRefinement,
     ForwardRuntime,
@@ -56,6 +57,7 @@ class _Instrument(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.prepared = None
+        self.polarization_convention = MagneticAzimuthConvention("identity", 0.0)
 
     @staticmethod
     def synthesis_grid(observed_wavelength):
@@ -241,9 +243,50 @@ def test_forward_composition_owns_velocity_path_and_instrument_application():
         torch.tensor([4.0, 5.0, 6.0]).expand(1, 2, 3),
     )
     torch.testing.assert_close(
+        result["magnetic_field_synthesis_observer"],
+        result["magnetic_field_observer"],
+    )
+    torch.testing.assert_close(
         result["atmosphere"].velocity_field,
         torch.tensor([1.0, 2.0, 3.0]).expand(1, 2, 3),
     )
+
+
+def test_forward_applies_only_the_instrument_magnetic_azimuth_convention():
+    composition, backend, instrument = _composition()
+    instrument.polarization_convention = MagneticAzimuthConvention(
+        "test_plus_90",
+        90.0,
+    )
+    wavelength = torch.tensor([1.0, 2.0])
+    runtime = ForwardRuntime(
+        coarse_depth_grid=torch.tensor([-5.0, 1.0]),
+        observed_wavelength_angstrom=wavelength,
+        synthesis_wavelength_angstrom=wavelength,
+        radiance_scale=1.0,
+        carrington_angular_velocity_rad_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
+    )
+
+    result = composition.synthesize(
+        torch.zeros(1, 3),
+        runtime=runtime,
+        ray_direction=torch.tensor([[-1.0, 0.0, 0.0]]),
+        stokes_basis=torch.eye(3).unsqueeze(0),
+        observer_los_velocity_m_per_s=torch.zeros(1),
+        instrument_response={"gain": torch.ones(1)},
+        return_details=True,
+    )
+
+    physical = torch.tensor([4.0, 5.0, 6.0]).expand(1, 2, 3)
+    synthesis = torch.tensor([-5.0, 4.0, 6.0]).expand(1, 2, 3)
+    torch.testing.assert_close(result["magnetic_field_observer"], physical)
+    torch.testing.assert_close(result["magnetic_field_synthesis_observer"], synthesis)
+    torch.testing.assert_close(
+        backend.synthesis_call["atmosphere"].magnetic_field,
+        synthesis,
+    )
+    torch.testing.assert_close(result["atmosphere"].magnetic_field, physical)
 
 
 def test_line_of_sight_velocity_correction_has_a_spectral_gradient():

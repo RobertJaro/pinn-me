@@ -56,6 +56,7 @@ def test_hmi_operator_integrates_batch_local_profiles_and_preserves_gradients():
     operator = HMIFilterProfiles(
         quadrature_wavelength_angstrom=quadrature,
         inner_half_width_angstrom=0.65,
+        magnetic_azimuth_offset_deg=90.0,
     )
     observed = torch.linspace(6173.1, 6173.5, 6, dtype=torch.float64)
     synthesis = operator.synthesis_grid(observed)
@@ -90,6 +91,32 @@ def test_hmi_operator_integrates_batch_local_profiles_and_preserves_gradients():
         )
 
 
+def test_instrument_polarization_conventions_are_explicit_and_hmi_only():
+    quadrature = torch.linspace(6173.0, 6173.6, 4, dtype=torch.float64)
+    hmi = HMIFilterProfiles(
+        quadrature_wavelength_angstrom=quadrature,
+        inner_half_width_angstrom=0.65,
+        magnetic_azimuth_offset_deg=90.0,
+    )
+    hinode = HinodeSpectralPSF(fwhm_angstrom=0.025, oversample=3)
+    physical = torch.tensor([[1.0, 2.0, 3.0]], requires_grad=True)
+
+    corrected = hmi.polarization_convention.to_synthesis_frame(physical)
+    unchanged = hinode.polarization_convention.to_synthesis_frame(physical)
+
+    torch.testing.assert_close(corrected, torch.tensor([[-2.0, 1.0, 3.0]]))
+    torch.testing.assert_close(unchanged, physical)
+    assert (
+        hmi.metadata()["polarization_convention"]["magnetic_azimuth_offset_deg"] == 90.0
+    )
+    assert (
+        hinode.metadata()["polarization_convention"]["magnetic_azimuth_offset_deg"]
+        == 0.0
+    )
+    corrected.sum().backward()
+    assert physical.grad is not None and torch.isfinite(physical.grad).all()
+
+
 def test_hmi_production_quadrature_has_distinct_float32_continuum_endpoints():
     half_width = 0.65
     reference = 6173.3433
@@ -98,6 +125,7 @@ def test_hmi_production_quadrature_has_distinct_float32_continuum_endpoints():
     operator = HMIFilterProfiles(
         quadrature_wavelength_angstrom=quadrature,
         inner_half_width_angstrom=half_width,
+        magnetic_azimuth_offset_deg=90.0,
     )
 
     observed = torch.linspace(6173.1, 6173.5, 6, dtype=torch.float32)
@@ -126,6 +154,7 @@ def test_hmi_production_grid_prepares_the_assembled_float32_lte_forward_model():
             "type": "hmi_filter_profiles",
             "quadrature_wavelength_angstrom": quadrature,
             "inner_half_width_angstrom": half_width,
+            "magnetic_azimuth_offset_deg": 90.0,
         },
         velocity_synthesis_mode="carrington_observer_relative",
         depth_sampling=DepthSamplingSettings(3, False, 1, 0.0),

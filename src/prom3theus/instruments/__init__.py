@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import InstrumentOperator
+from .base import InstrumentOperator, MagneticAzimuthConvention
 from .registry import (
     InstrumentRegistration,
     build_instrument,
@@ -27,6 +27,7 @@ __all__ = [
     "HMIFilterProfiles",
     "HinodeSpectralPSF",
     "InstrumentOperator",
+    "MagneticAzimuthConvention",
     "InstrumentRegistration",
     "build_instrument",
     "get_instrument_registration",

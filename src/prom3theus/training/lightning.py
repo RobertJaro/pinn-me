@@ -39,6 +39,11 @@ from .configuration import (
 )
 
 
+P3S_CONTEXT_KEY = "prom3theus_save_state"
+P3S_FORMAT = "prom3theus.save_state"
+P3S_VERSION = 2
+
+
 class LTEInversionModule(LightningModule):
     """Compose a shared atmosphere, LTE synthesis, and one observation operator.
 
@@ -344,7 +349,44 @@ class LTEInversionModule(LightningModule):
         )
         # Lookup tables are generated and regression-tested at high precision,
         # but the inversion graph has one explicit runtime dtype.
+        self.save_state_context: dict | None = None
         self.float()
+
+    def set_save_state_context(self, context: Mapping) -> None:
+        """Attach the portable evaluation contract embedded in every P3S file."""
+
+        if not isinstance(context, Mapping):
+            raise TypeError("checkpoint evaluation context must be a mapping.")
+        value = deepcopy(dict(context))
+        if value.get("format") != P3S_FORMAT or value.get("version") != P3S_VERSION:
+            raise ValueError("P3S context has an unsupported format or version.")
+        self.save_state_context = value
+
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        """Embed everything needed to locate and validate evaluation inputs."""
+
+        if self.save_state_context is None:
+            raise RuntimeError("P3S saving requires a configured evaluation context.")
+        checkpoint[P3S_CONTEXT_KEY] = deepcopy(self.save_state_context)
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore and schema-check the embedded evaluation contract."""
+
+        context = checkpoint.get(P3S_CONTEXT_KEY)
+        if context is None:
+            raise RuntimeError(
+                f"Save state is missing required {P3S_CONTEXT_KEY!r} metadata."
+            )
+        if not isinstance(context, Mapping):
+            raise RuntimeError(f"Save state {P3S_CONTEXT_KEY!r} metadata is invalid.")
+        if (
+            self.save_state_context is not None
+            and dict(context) != self.save_state_context
+        ):
+            raise RuntimeError(
+                "Save state evaluation context differs from the configured run."
+            )
+        self.set_save_state_context(context)
 
     @property
     def synthesis_wavelength_base(self) -> torch.Tensor:

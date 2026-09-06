@@ -172,7 +172,16 @@ def test_hmi_preparation_commands_are_fixed(tmp_path):
 
 def test_run_commands_are_separate_and_fixed(tmp_path):
     assert _run(HMI_RUN, tmp_path / "hmi") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_lte_dynamic.yaml"]
+        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_lte_dynamic.yaml"],
+        [
+            "-m",
+            "prom3theus.cli.main",
+            "compare-hmi",
+            "/glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07/state.p3s",
+            "/glade/work/rjarolim/data/hmi_stokes/test_2024_03_24",
+            "--output",
+            "/glade/work/rjarolim/lte/hmi_comparison",
+        ],
     ]
     assert _run(HINODE_RUN, tmp_path / "hinode") == [
         [

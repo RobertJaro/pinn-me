@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
 import prom3theus.inversion.runner as runner
-from prom3theus.artifacts.model import load_manifest
 from prom3theus.config import load_config
 from prom3theus.observations import (
     CARRINGTON_REGISTERED_RELATIVE_VELOCITY,
@@ -36,7 +36,9 @@ def _raster() -> ObservationRaster:
         .clone(),
         valid_mask=torch.ones(1, 2, dtype=torch.bool),
         metadata={
+            "times": ["2024-03-24T01:00:00.000"],
             "coordinates": {
+                "time_scale": "TAI",
                 "network_affine": {
                     "center_mm": [0.0, 0.0],
                     "scale_mm": [1.0, 1.0],
@@ -54,6 +56,16 @@ def _raster() -> ObservationRaster:
 class _DataModule:
     def __init__(self, raster: ObservationRaster, store: Path):
         self.raster = raster
+        self.rasters = [raster]
+        self.raster_names = ["raster_0000"]
+        self.validation_raster_index = 0
+        self.observation_sampling_bounds = {
+            "surface_longitude_center_rad": 0.0,
+            "surface_longitude_offset_rad": [0.0, 0.0],
+            "surface_latitude_rad": [0.0, 0.0],
+            "time_hours": [0.0, 0.0],
+            "solar_radius_m": 6.96e8,
+        }
         self.observation_store_path = store
 
     @staticmethod
@@ -71,6 +83,10 @@ class _Module(torch.nn.Module):
             values["wavelength_angstrom"]
         ).tolist()
         self.hparams = values
+        self.save_state_context = None
+
+    def set_save_state_context(self, context):
+        self.save_state_context = deepcopy(dict(context))
 
 
 class _Trainer:
@@ -81,11 +97,13 @@ class _Trainer:
         self.fit_call = None
         type(self).latest = self
 
-    def fit(self, module, *, datamodule):
-        self.fit_call = (module, datamodule)
+    def fit(self, module, *, datamodule, ckpt_path=None):
+        self.fit_call = (module, datamodule, ckpt_path)
 
 
-def test_runner_embeds_the_exact_observation_store(tmp_path, monkeypatch):
+def test_runner_keeps_observation_arrays_out_of_durable_output(
+    tmp_path, monkeypatch
+):
     loaded = load_config(PROJECT_ROOT / "configs" / "hinode_lte_mhs.yaml")
     config = replace(
         loaded,
@@ -155,19 +173,59 @@ def test_runner_embeds_the_exact_observation_store(tmp_path, monkeypatch):
     result = runner.run_inversion(config, rebuild_observations=True)
 
     assert call["kwargs"]["rebuild"] is True
-    assert _Trainer.latest.fit_call == (result.module, data)
+    assert _Trainer.latest.fit_call == (result.module, data, None)
     assert _Trainer.latest.options["gradient_clip_val"] == 0.1
+    assert _Trainer.latest.options["enable_checkpointing"] is True
     assert "val_check_interval" not in _Trainer.latest.options
-    manifest = load_manifest(result.artifact_directory)
-    assert manifest.observation["store"]["path"] == "observations"
-    assert manifest.model["run_metadata"]["prepared_by"] == "runner-test"
-    assert manifest.model["run_metadata"]["adapter"] == "hinode_sp"
-    embedded, names, metadata = ObservationStore.load_sequence(
-        result.artifact_directory / "observations"
+    checkpoint_callbacks = [
+        callback
+        for callback in _Trainer.latest.options["callbacks"]
+        if isinstance(callback, runner.ModelCheckpoint)
+    ]
+    p3s_callbacks = [
+        callback
+        for callback in _Trainer.latest.options["callbacks"]
+        if isinstance(callback, runner.P3SSaveStateCallback)
+    ]
+    assert len(checkpoint_callbacks) == 1
+    assert len(p3s_callbacks) == 1
+    recovery = checkpoint_callbacks[0]
+    assert recovery.monitor is None
+    assert recovery.save_last is False
+    assert recovery.save_weights_only is False
+    assert recovery.save_top_k == 1
+    assert recovery.every_n_epochs == 1
+    assert recovery._save_on_train_epoch_end is False
+    assert recovery.dirpath == str((tmp_path / "runs").resolve())
+    assert recovery.format_checkpoint_name({}).endswith("last.ckpt")
+    assert p3s_callbacks[0].path == (tmp_path / "runs" / "state.p3s").resolve()
+    assert result.save_state_path == (tmp_path / "runs" / "state.p3s").resolve()
+    assert result.lightning_checkpoint_path == (
+        tmp_path / "runs" / "last.ckpt"
+    ).resolve()
+    context = result.module.save_state_context
+    assert context["format"] == "prom3theus.save_state"
+    assert context["version"] == 2
+    assert context["resolved_config"] == config.to_dict()
+    assert context["observation"]["spec"] == spec.metadata()
+    assert context["observation"]["raster_names"] == ["raster_0000"]
+    assert context["observation"]["times"] == [
+        {"values": ["2024-03-24T01:00:00.000"], "scale": "tai"}
+    ]
+    assert context["observation"]["bounds"] == data.observation_sampling_bounds
+    expected_model = dict(result.module.hparams)
+    expected_model["run_metadata"] = {}
+    expected_model = json.loads(json.dumps(expected_model, default=str))
+    assert context["model"] == expected_model
+    assert not (tmp_path / "runs" / "artifact").exists()
+
+    result.lightning_checkpoint_path.touch()
+    continued = runner.run_inversion(config)
+    assert _Trainer.latest.fit_call == (
+        continued.module,
+        data,
+        result.lightning_checkpoint_path,
     )
-    assert len(embedded) == 1
-    assert names == ["raster_0000"]
-    assert metadata["observation"] == spec.metadata()
 
 
 def test_extrapolation_builds_distinct_full_and_upper_physics_domains():
@@ -205,3 +263,36 @@ def test_visualization_outputs_are_kept_with_the_durable_run(tmp_path):
     callback = runner._visualization_callback(config)
 
     assert callback.output_directory == (tmp_path / "output" / "diagnostics").resolve()
+
+
+def test_p3s_contains_only_context_parameters_and_progress(tmp_path):
+    callback = runner.P3SSaveStateCallback(tmp_path / "state.p3s")
+    module = _Module(wavelength_angstrom=[1.0, 2.0])
+    context = {"format": "prom3theus.save_state", "version": 2}
+    module.set_save_state_context(context)
+    barriers = []
+    trainer = SimpleNamespace(
+        is_global_zero=True,
+        sanity_checking=False,
+        current_epoch=3,
+        global_step=1000,
+        strategy=SimpleNamespace(barrier=lambda: barriers.append(True)),
+    )
+
+    callback.on_validation_end(trainer, module)
+    trainer.current_epoch = 4
+    trainer.global_step = 2000
+    callback.on_validation_end(trainer, module)
+
+    payload = torch.load(tmp_path / "state.p3s", weights_only=True)
+    assert set(payload) == {
+        "prom3theus_save_state",
+        "parameters",
+        "epoch",
+        "global_step",
+    }
+    assert payload["prom3theus_save_state"] == context
+    assert set(payload["parameters"]) == {"weight"}
+    assert payload["epoch"] == 4
+    assert payload["global_step"] == 2000
+    assert barriers == [True, True]

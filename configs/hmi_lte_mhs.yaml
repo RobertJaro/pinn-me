@@ -79,6 +79,8 @@ synthesis:
 
 instrument:
   type: hmi_filter_profiles
+  # HMI-specific physical-field azimuth correction before polarized synthesis.
+  magnetic_azimuth_offset_deg: 90.0
 
 training:
   depth_sampling:

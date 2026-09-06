@@ -9,8 +9,8 @@ schema_version: 2
 
 solver:
   kind: lte
-  output_directory: /glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v04
-  work_directory: /glade/derecho/scratch/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v04
+  output_directory: /glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07
 
 resources:
   # The wheel includes the checksum-pinned LTE tables for both instruments.
@@ -97,6 +97,8 @@ synthesis:
 instrument:
   # Uses each acquisition's prepared phase-map response rather than a Gaussian.
   type: hmi_filter_profiles
+  # HMI-specific physical-field azimuth correction before polarized synthesis.
+  magnetic_azimuth_offset_deg: 90.0
   # Explicit initial global line-zero-point correction; optimized during fitting.
   line_of_sight_velocity_correction_m_per_s: 0.0
   # Own the absolute Doppler zero point outside the physical velocity field.
@@ -171,7 +173,7 @@ loss:
   stokes_sigmas: {i: 5.0e-3, q: 8.0e-4, u: 8.0e-4, v: 8.0e-4}
   huber_delta: 1.0
   # Relative preferences are normalized to sum to one at runtime.
-  stokes_weights: {i: 1.0, q: 5.0, u: 5.0, v: 5.0}
+  stokes_weights: {i: 1.0, q: 10.0, u: 10.0, v: 10.0}
 
 diagnostics:
   validation_every_n_epochs: 1

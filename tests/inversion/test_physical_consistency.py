@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from prom3theus.instruments import MagneticAzimuthConvention
 from prom3theus.inversion.forward import (
     DepthRefinement,
     ForwardRuntime,
@@ -36,6 +37,8 @@ class _CaptureBackend:
 
 
 class _IdentityInstrument(torch.nn.Module):
+    polarization_convention = MagneticAzimuthConvention("identity", 0.0)
+
     @staticmethod
     def synthesis_grid(observed_wavelength):
         return observed_wavelength

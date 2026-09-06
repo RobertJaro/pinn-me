@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 from types import SimpleNamespace
 
@@ -7,6 +8,8 @@ import torch
 
 import prom3theus.artifacts.export as exporter
 import prom3theus.artifacts.evaluation as artifact_evaluation
+import prom3theus.artifacts.checkpoint as checkpoint_artifact
+import prom3theus.artifacts.loader as p3s_loader
 import prom3theus.artifacts.stokes as stokes_evaluation
 import prom3theus.artifacts.validation as artifact_validation
 from prom3theus.artifacts import ArtifactExportError as PackageArtifactExportError
@@ -24,6 +27,7 @@ from prom3theus.observations import (
     ObservationRaster,
     ObservationSpec,
     ObservationStore,
+    VelocitySynthesisMode,
     observation_store_signature,
 )
 
@@ -32,7 +36,12 @@ def _raster(
     *, auxiliary=None, mode=CARRINGTON_REGISTERED_RELATIVE_VELOCITY, height=1
 ):
     metadata = {
-        "ray_geometry": {"scene_basis_rows": np.eye(3).tolist()},
+        "ray_geometry": {
+            "scene_basis_rows": np.eye(3).tolist(),
+            "solar_radius_m": 6.96e8,
+        },
+        "times": ["2024-03-24T01:00:00.000"],
+        "coordinates": {"time_scale": "TAI"},
         "stokes_order": ["I", "Q", "U", "V"],
         "normalization": {
             "indices": [0, 1],
@@ -113,6 +122,23 @@ class _FakeAtmosphere(torch.nn.Module):
         self.scale = torch.nn.Parameter(torch.tensor(1.0))
         self.register_buffer("log_tau500", torch.as_tensor(log_tau500))
 
+    def evaluate_at_height(self, coordinates, heights):
+        scalar = self.scale * torch.ones_like(heights)
+        vector = torch.zeros(
+            coordinates.shape[0], 3, dtype=coordinates.dtype, device=coordinates.device
+        )
+        vector[:, 0] = self.scale
+        return {
+            "temperature": 5_000.0 * scalar,
+            "microturbulence": 1_000.0 * scalar,
+            "gas_pressure": 100.0 * scalar,
+            "magnetic_field": vector,
+            "velocity_field": 2.0 * vector,
+        }
+
+    def evaluate_chart_height_points(self, coordinates, heights):
+        return self.evaluate_at_height(coordinates, heights)
+
 
 class _FakeLTE(torch.nn.Module):
     last_kwargs = None
@@ -127,10 +153,28 @@ class _FakeLTE(torch.nn.Module):
         self.velocity_synthesis_mode = kwargs["velocity_synthesis_mode"]
         self.instrument_line_of_sight_velocity_correction_m_per_s = torch.tensor(0.0)
         self.loaded_strict = None
+        self.save_state_context = None
 
     def load_state_dict(self, state_dict, strict=True):
         self.loaded_strict = strict
         return super().load_state_dict(state_dict, strict=strict)
+
+    def set_save_state_context(self, context):
+        self.save_state_context = dict(context)
+
+    def synthesize(self, coordinates, **options):
+        assert options["ray_direction"].shape == coordinates.shape
+        assert options["stokes_basis"].shape == (*coordinates.shape[:-1], 3, 3)
+        return {
+            "stokes": self.atmosphere_model.scale
+            * torch.ones(
+                coordinates.shape[0],
+                4,
+                2,
+                dtype=coordinates.dtype,
+                device=coordinates.device,
+            )
+        }
 
 
 class _EvaluationAtmosphere(torch.nn.Module):
@@ -246,9 +290,20 @@ def _write_artifact(tmp_path, *, observation=None, signature=None):
         (artifact / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
     config = SimpleNamespace(
         resources=SimpleNamespace(bundle="packaged"),
-        observation=SimpleNamespace(type="hinode_sp"),
+        observation=SimpleNamespace(
+            type="hinode_sp",
+            to_dict=lambda: {
+                **observation_config,
+                "loader": {
+                    "batch_size": 2,
+                    "validation_batch_size": 2,
+                    "validation_stride": 1,
+                },
+            },
+        ),
         instrument=SimpleNamespace(type="hinode_sp"),
         synthesis=SimpleNamespace(line_ids=("Fe_I_6301",)),
+        solver=SimpleNamespace(work_directory=tmp_path / "work"),
     )
     return artifact, resources, config, model_config
 
@@ -266,6 +321,181 @@ def _patch_external_contracts(monkeypatch, resources, config):
         "get_observation_adapter",
         lambda name: SimpleNamespace(name=name),
     )
+
+
+def test_p3s_round_trip_reconstructs_model_and_evaluation_raster(
+    tmp_path, monkeypatch
+):
+    artifact, resources, config, model_config = _write_artifact(tmp_path)
+    _patch_external_contracts(monkeypatch, resources, config)
+    monkeypatch.setattr(checkpoint_artifact, "LTEInversionModule", _FakeLTE)
+    stored_rasters, stored_names, stored_metadata = ObservationStore.load_sequence(
+        artifact / "observations"
+    )
+    bounds = {
+        "surface_longitude_center_rad": 0.0,
+        "surface_longitude_offset_rad": [0.0, 0.0],
+        "surface_latitude_rad": [0.0, 0.0],
+        "time_hours": [0.0, 0.0],
+        "solar_radius_m": 6.96e8,
+    }
+    context = checkpoint_artifact.p3s_context(
+        package_version="test",
+        resolved_config={
+            "schema_version": 2,
+            "observation": {"type": "hinode_sp", "directory": "/source"},
+            "resources": {"bundle": "packaged"},
+        },
+        resources=resources,
+        observation_spec=_spec().metadata(),
+        source_signature=ObservationStore.manifest(artifact / "observations")[
+            "source_signature"
+        ],
+        raster_names=stored_names,
+        validation_raster_index=stored_metadata["validation_raster_index"],
+        times=[{"values": ["2024-03-24T01:00:00.000"], "scale": "tai"}],
+        bounds=bounds,
+        model=model_config,
+    )
+    original = _FakeLTE(**model_config)
+    save_state_path = tmp_path / "state.p3s"
+    torch.save(
+        {
+            "epoch": 7,
+            "global_step": 12_345,
+            "parameters": dict(original.named_parameters()),
+            "prom3theus_save_state": context,
+        },
+        save_state_path,
+    )
+
+    loaded = checkpoint_artifact.load_validated_save_state(save_state_path)
+
+    assert loaded.epoch == 7
+    assert loaded.global_step == 12_345
+    assert loaded.observation.raster_names == ("raster_0000",)
+    assert loaded.observation.bounds == bounds
+    assert loaded.module.save_state_context == context
+    torch.testing.assert_close(
+        loaded.module.atmosphere_model.scale,
+        original.atmosphere_model.scale,
+    )
+    raster = stored_rasters[0]
+    rendered = loaded.module.synthesize(
+        raster.coordinates.reshape(-1, 3),
+        ray_direction=raster.ray_direction.reshape(-1, 3),
+        stokes_basis=raster.stokes_basis.reshape(-1, 3, 3),
+    )["stokes"]
+    assert rendered.shape == (2, 4, 2)
+    assert torch.isfinite(rendered).all()
+
+    cache_path = (
+        tmp_path
+        / "work"
+        / "observation-cache"
+        / f"hinode_sp-{loaded.observation.source_signature}.observation"
+    )
+    ObservationStore.save_sequence(
+        cache_path,
+        stored_rasters,
+        raster_names=stored_names,
+        source_signature=loaded.observation.source_signature,
+        metadata=stored_metadata,
+    )
+    loader = p3s_loader.P3SLoader(save_state_path, device="cpu")
+    assert loader._data_module is None
+    assert loader.raster_names == ("raster_0000",)
+    assert loader.raster_count == 1
+    assert loader._data_module is None
+    assert loader.select_raster().name == "raster_0000"
+    assert loader._data_module.observation_store_path == cache_path
+    assert loader.select_raster(index=0).index == 0
+    assert loader.select_raster(name="raster_0000").index == 0
+    assert loader._data_module.observation_store_path == cache_path
+    height_fields = loader.raster_fields_at_height(0.0, batch_size=1)
+    assert height_fields["magnetic_field_gauss"].shape == (1, 2, 3)
+    assert np.isfinite(height_fields["temperature_k"]).all()
+
+    monkeypatch.setattr(p3s_loader, "depth_grid", lambda module, count: count)
+    monkeypatch.setattr(
+        p3s_loader,
+        "evaluate_atmosphere",
+        lambda module, raster, **kwargs: {"kind": "cube", **kwargs},
+    )
+    monkeypatch.setattr(
+        p3s_loader, "full_shell_height_grid", lambda module, count: count
+    )
+    monkeypatch.setattr(
+        p3s_loader,
+        "evaluate_full_shell_atmosphere",
+        lambda module, raster, **kwargs: {"kind": "full_cube", **kwargs},
+    )
+    monkeypatch.setattr(
+        p3s_loader,
+        "evaluate_stokes",
+        lambda module, raster, spec, **kwargs: {"kind": "stokes", **kwargs},
+    )
+    assert loader.cube(depth_samples=17)["kind"] == "cube"
+    assert loader.full_cube(height_samples=23)["kind"] == "full_cube"
+    assert loader.stokes()["kind"] == "stokes"
+
+    evaluator = SimpleNamespace(
+        evaluate_shell_layers=lambda module, raster, heights: {
+            "kind": "shell_slices",
+            "heights": heights,
+        },
+        evaluate_meridional_slice=lambda module, raster: {
+            "kind": "meridional_slice"
+        },
+    )
+    monkeypatch.setattr(loader, "_slice_evaluator", lambda **kwargs: evaluator)
+    assert loader.shell_slices([0.0, 1.0])["kind"] == "shell_slices"
+    assert loader.meridional_slice(215.0)["kind"] == "meridional_slice"
+
+
+def test_p3s_rejects_nonprimitive_metadata(tmp_path, monkeypatch):
+    artifact, resources, config, model_config = _write_artifact(tmp_path)
+    _patch_external_contracts(monkeypatch, resources, config)
+    context = checkpoint_artifact.p3s_context(
+        package_version="test",
+        resolved_config={
+            "schema_version": 2,
+            "resources": {"bundle": "packaged"},
+        },
+        resources=resources,
+        observation_spec=_spec().metadata(),
+        source_signature=ObservationStore.manifest(artifact / "observations")[
+            "source_signature"
+        ],
+        raster_names=("raster_0000",),
+        validation_raster_index=0,
+        times=[{"values": ["2024-03-24T01:00:00.000"], "scale": "tai"}],
+        bounds={
+            "surface_longitude_center_rad": 0.0,
+            "surface_longitude_offset_rad": [0.0, 0.0],
+            "surface_latitude_rad": [0.0, 0.0],
+            "time_hours": [0.0, 0.0],
+            "solar_radius_m": 6.96e8,
+        },
+        model=model_config,
+    )
+    incompatible = deepcopy(context)
+    incompatible["model"]["velocity_synthesis_mode"] = (
+        VelocitySynthesisMode.CARRINGTON_REGISTERED_RELATIVE
+    )
+    path = tmp_path / "nonprimitive.p3s"
+    torch.save(
+        {
+            "epoch": 0,
+            "global_step": 0,
+            "parameters": {},
+            "prom3theus_save_state": incompatible,
+        },
+        path,
+    )
+
+    with pytest.raises(PackageArtifactExportError, match="Could not safely load"):
+        checkpoint_artifact.load_validated_save_state(path)
 
 
 def test_export_reconstructs_exact_manifest_model_and_stored_observation(

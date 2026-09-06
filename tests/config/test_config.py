@@ -65,6 +65,7 @@ def test_all_public_configs_load_with_explicit_discriminators():
     assert hinode.observation.type == hinode.instrument.type == "hinode_sp"
     assert hmi.observation.type == "hmi_stokes"
     assert hmi.instrument.type == "hmi_filter_profiles"
+    assert hmi.instrument.magnetic_azimuth_offset_deg == 90.0
     assert hmi.atmosphere.geometry.time_dependent is True
     assert hmi.atmosphere.geometry.outer_height_megameter == 50.0
     assert hmi.atmosphere.geometry.line_formation_outer_height_megameter == 1.5
@@ -131,10 +132,10 @@ def test_all_public_configs_load_with_explicit_discriminators():
         "/glade/work/rjarolim/data/inversion/hinode_2011_02/20110214_000004"
     )
     assert hmi.solver.output_directory == Path(
-        "/glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v03"
+        "/glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07"
     )
     assert hmi.solver.work_directory == Path(
-        "/glade/derecho/scratch/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v03"
+        "/glade/derecho/scratch/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07"
     )
     assert hmi.observation.directory == Path(
         "/glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe"
@@ -148,7 +149,7 @@ def test_hmi_server_paths_are_literal_and_environment_independent():
     config = load_config(CONFIG_DIRECTORY / "hmi_lte_dynamic.yaml", environ={})
 
     assert config.solver.output_directory == Path(
-        "/glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v03"
+        "/glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07"
     )
     assert config.resources.bundle == "packaged"
     assert config.observation.directory == Path(
@@ -405,10 +406,21 @@ def test_observation_and_instrument_types_must_be_compatible(raw_hinode):
     document = deepcopy(raw_hinode)
     document["instrument"] = {
         "type": "hmi_filter_profiles",
+        "magnetic_azimuth_offset_deg": 90.0,
         "line_of_sight_velocity_correction_m_per_s": 0.0,
     }
 
     with pytest.raises(ConfigError, match="incompatible observation/instrument"):
+        parse_config(document, base_directory=CONFIG_DIRECTORY, environ={})
+
+
+def test_hmi_azimuth_correction_is_explicit_and_fixed_to_90_degrees():
+    document = yaml.safe_load(
+        (CONFIG_DIRECTORY / "hmi_lte_dynamic.yaml").read_text(encoding="utf-8")
+    )
+    document["instrument"]["magnetic_azimuth_offset_deg"] = 0.0
+
+    with pytest.raises(ConfigError, match="exactly 90 degrees"):
         parse_config(document, base_directory=CONFIG_DIRECTORY, environ={})
 
 

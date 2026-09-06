@@ -499,6 +499,11 @@ class LTEForwardComposition:
             sampled_atmosphere.magnetic_field,
             stokes_basis,
         )
+        magnetic_field_synthesis_observer = (
+            self.instrument.polarization_convention.to_synthesis_frame(
+                magnetic_field_observer
+            )
+        )
         velocity_field_corotating_observer = project_vectors_to_stokes(
             sampled_atmosphere.velocity_field,
             stokes_basis,
@@ -548,7 +553,7 @@ class LTEForwardComposition:
         synthesis_atmosphere = replace(
             sampled_atmosphere,
             velocity_field=velocity_field_observer,
-            magnetic_field=magnetic_field_observer,
+            magnetic_field=magnetic_field_synthesis_observer,
         )
         transfer_path = RayDistancePath(ray_trace.distance_m)
         high_resolution_stokes = self.backend.synthesize(
@@ -599,6 +604,9 @@ class LTEForwardComposition:
                     runtime.instrument_line_of_sight_velocity_correction_m_per_s
                 ),
                 "magnetic_field_observer": magnetic_field_observer,
+                "magnetic_field_synthesis_observer": (
+                    magnetic_field_synthesis_observer
+                ),
                 "velocity_field_corotating_observer": (
                     velocity_field_corotating_observer
                 ),
