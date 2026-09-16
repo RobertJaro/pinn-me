@@ -23,6 +23,8 @@ def test_resource_generator_is_separate_from_runtime_package():
         "README.md",
         "__init__.py",
         "_shared.py",
+        "aia_euv.py",
+        "coronal_cooling.py",
         "build.py",
         "common_atomic.py",
         "hinode_sp.py",
@@ -46,6 +48,18 @@ def test_resource_generator_cli_is_inspectable_without_network_access():
     )
     assert "--output-directory" in result.stdout
     assert "--cache-directory" in result.stdout
+
+
+def test_aia_resource_converter_cli_is_inspectable_without_network_access():
+    result = subprocess.run(
+        [sys.executable, "-m", "resource_builder.aia_euv", "--help"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--source-response" in result.stdout
+    assert "--output-directory" in result.stdout
 
 
 def test_flat_builders_own_the_complete_manifest_inventory():

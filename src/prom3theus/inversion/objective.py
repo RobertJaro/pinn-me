@@ -1,67 +1,47 @@
-"""Noise-standardized Stokes objectives for spectropolarimetric inversions."""
+"""Linear and polarization-asinh Stokes objectives."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import math
 from numbers import Real
 
 import torch
 from torch import nn
 
+from prom3theus.core.transforms import normalized_asinh
 
 STOKES_COMPONENTS = ("I", "Q", "U", "V")
 
 
 class StokesObjective(nn.Module):
-    """Apply an elementwise Huber penalty to noise-standardized residuals.
+    """Squared residuals, or linear I and asinh Q/U/V.
 
     Prediction and target remain in the fixed loader-scaled atlas-continuum units.
-    The fixed component sigmas describe effective measurement/model discrepancy in
-    those same units; no local continuum is estimated or divided out.
+    For asinh_mse, Q/U/V are stretched individually before subtraction, with the
+    scale in those units and division by asinh(1/scale) so unit input stays unit.
+    No local continuum is estimated or divided out.
     """
 
-    def __init__(self, type="huber", *, stokes_sigmas, huber_delta=1.0):
+    def __init__(self, type="mse", *, asinh_scale=1e-3):
         super().__init__()
-        if type != "huber":
-            raise ValueError(f'Unknown Stokes loss type {type!r}; expected "huber".')
-        if not isinstance(stokes_sigmas, Mapping) or set(stokes_sigmas) != set(
-            STOKES_COMPONENTS
+        if type not in ("mse", "asinh_mse"):
+            raise ValueError(f"Unknown Stokes loss type {type!r}.")
+        if (
+            isinstance(asinh_scale, bool)
+            or not isinstance(asinh_scale, Real)
+            or not math.isfinite(asinh_scale)
+            or asinh_scale <= 0
         ):
-            raise TypeError(
-                f"stokes_sigmas must contain exactly {list(STOKES_COMPONENTS)}."
-            )
-        raw_sigmas = [stokes_sigmas[name] for name in STOKES_COMPONENTS]
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, Real)
-            or not math.isfinite(float(value))
-            or value <= 0
-            for value in raw_sigmas
-        ):
-            raise ValueError("Stokes sigmas must be finite and strictly positive.")
-        sigmas = torch.tensor(raw_sigmas, dtype=torch.float64)
-        if isinstance(huber_delta, bool) or not isinstance(huber_delta, (int, float)):
-            raise TypeError("huber_delta must be numeric.")
-        delta = float(huber_delta)
-        if not math.isfinite(delta) or delta <= 0:
-            raise ValueError("huber_delta must be finite and strictly positive.")
-        self.loss_type = "huber"
-        self.huber_delta = delta
-        self.register_buffer("stokes_sigmas", sigmas.reshape(1, 4, 1))
+            raise ValueError("Stokes asinh scale must be finite and strictly positive.")
+        self.asinh_scale = float(asinh_scale)
+        self.loss_type = type
 
     def configuration(self):
         """Return the canonical artifact description of the objective."""
-        return {
-            "type": self.loss_type,
-            "stokes_sigmas": {
-                name: float(value)
-                for name, value in zip(
-                    STOKES_COMPONENTS, self.stokes_sigmas.flatten().tolist()
-                )
-            },
-            "huber_delta": self.huber_delta,
-        }
+        result = {"type": self.loss_type}
+        if self.loss_type == "asinh_mse":
+            result["asinh_scale"] = self.asinh_scale
+        return result
 
     @staticmethod
     def _validate_profiles(prediction, target):
@@ -86,17 +66,51 @@ class StokesObjective(nn.Module):
         self._validate_profiles(target, target)
         return torch.isfinite(target).all(dim=(-2, -1))
 
+    def transform(self, profiles):
+        """Values compared by the loss, after synthesis and instrument integration."""
+        self._validate_profiles(profiles, profiles)
+        if self.loss_type == "asinh_mse":
+            return torch.cat(
+                (
+                    profiles[..., :1, :],
+                    normalized_asinh(profiles[..., 1:, :], self.asinh_scale),
+                ),
+                dim=-2,
+            )
+        return profiles
+
     def elementwise(self, prediction, target):
         """Return an unreduced loss with the profile input shape."""
         self._validate_profiles(prediction, target)
-        residual = (prediction - target) / self.stokes_sigmas.to(prediction)
-        absolute = residual.abs()
-        delta = self.huber_delta
-        return torch.where(
-            absolute <= delta,
-            0.5 * residual.square(),
-            delta * (absolute - 0.5 * delta),
-        )
+        residual = self.transform(prediction) - self.transform(target)
+        return residual.square()
 
     def forward(self, prediction, target):
         return self.elementwise(prediction, target)
+
+
+def weighted_stokes_loss(
+    objective: StokesObjective,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    wavelength_weights: torch.Tensor,
+    stokes_weights: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce the common Stokes objective over samples and active wavelengths.
+
+    Weights are validated and applied directly without component normalization.
+    Non-finite values propagate to the final objective; no device-wide scans are
+    needed here. Both single-observation training and joint evaluation use this
+    exact reduction, including its gradients.
+    """
+    if prediction.ndim < 3:
+        raise ValueError("Stokes profiles must have shape [..., 4, wavelength].")
+    elementwise = objective(prediction, target)
+    spectral_weights = wavelength_weights.to(prediction)
+    weighted = elementwise * spectral_weights
+    sample_dimensions = tuple(range(prediction.ndim - 2))
+    component = weighted.sum(dim=(*sample_dimensions, prediction.ndim - 1))
+    sample_count = prediction.numel() // (4 * prediction.shape[-1])
+    component = component / (sample_count * spectral_weights.sum())
+    return component, torch.dot(component, stokes_weights.to(component))

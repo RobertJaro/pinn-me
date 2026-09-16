@@ -184,7 +184,15 @@ def project_vectors_to_stokes(
     vector: torch.Tensor,
     stokes_basis: torch.Tensor,
 ) -> torch.Tensor:
-    """Project global vectors onto row bases ``[+Q, +U, toward observer]``."""
+    """Project global vectors onto row bases ``[+Q, +Q_perp, toward observer]``.
+
+    The second row is the transverse axis 90 degrees from ``+Q`` in the
+    direction of increasing magnetic azimuth, not the ``+U`` direction, which
+    bisects the two at 45 degrees. Polarized synthesis consumes exactly this
+    convention: with ``(b_x, b_y)`` the projections onto the first two rows,
+    ``sin^2(theta) cos(2 chi) = (b_x^2 - b_y^2)/B^2`` and
+    ``sin^2(theta) sin(2 chi) = 2 b_x b_y/B^2``.
+    """
 
     value = torch.as_tensor(vector)
     basis = torch.as_tensor(stokes_basis, dtype=value.dtype, device=value.device)

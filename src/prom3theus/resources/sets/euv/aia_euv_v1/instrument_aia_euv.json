@@ -1,0 +1,47 @@
+{
+  "calibration_contract": {
+    "crosstalk": {
+      "channel_pairs": [
+        [
+          "A94",
+          "A304"
+        ],
+        [
+          "A131",
+          "A335"
+        ]
+      ],
+      "included": true
+    },
+    "degradation": {
+      "algorithm": "aiapy.calibrate.degradation",
+      "calibration_version": 10,
+      "observation_requirement": "divide observed count rates by the degradation factor relative to the response reference epoch",
+      "source_sha256": "0a3f2db39d05c44185f6fdeec928089fb55d1ce1e0a805145050c6356cbc6e98"
+    },
+    "emission_measure_convention": "electron_density_squared",
+    "eve_normalization": {
+      "absolute_reference_date": "2010-05-01",
+      "algorithm": "aiapy.response.Channel.eve_correction",
+      "included": true
+    },
+    "measurement_semantics": "per_native_pixel",
+    "native_pixel_solid_angle_relative_tolerance": 0.02,
+    "native_pixel_solid_angle_sr": 8.461580394691914e-12,
+    "reference_epoch": "2010-03-24T00:00:00Z",
+    "response_unit": "DN s^-1 pixel^-1 cm^5",
+    "schema": "prom3theus.aia-reference-calibration",
+    "schema_version": 1,
+    "sensitivity_convention": "reference_epoch"
+  },
+  "calibration_convention_id": "sha256:1e44f2c52c66e0ce76f900edb15a1b4503e680e90f64063cb70eea8d38d82c25",
+  "channels": [
+    "171",
+    "193",
+    "211"
+  ],
+  "instrument": "SDO/AIA",
+  "resource_type": "prom3theus-aia-euv-instrument",
+  "response_resource": "aia_euv_v1:aia_temperature_response",
+  "schema_version": 1
+}

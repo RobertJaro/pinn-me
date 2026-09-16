@@ -9,7 +9,6 @@ from matplotlib.colors import LogNorm, Normalize
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
-
 FIELD_STYLES = {
     "temperature": {
         "label": r"$\log_{10}(T / \mathrm{K})$",
@@ -44,14 +43,30 @@ FIELD_STYLES = {
         "cmap": "seismic",
         "signed": True,
     },
-    "b_r": {"label": r"$B_r$ [G]", "cmap": "RdBu_r", "signed": True},
-    "b_theta": {"label": r"$B_\theta$ [G]", "cmap": "RdBu_r", "signed": True},
-    "b_phi": {"label": r"$B_\phi$ [G]", "cmap": "RdBu_r", "signed": True},
+    "b_r": {
+        "label": r"$B_r$ [G]",
+        "cmap": "RdBu_r",
+        "signed": True,
+        "full_range": True,
+    },
+    "b_theta": {
+        "label": r"$B_\theta$ [G]",
+        "cmap": "RdBu_r",
+        "signed": True,
+        "full_range": True,
+    },
+    "b_phi": {
+        "label": r"$B_\phi$ [G]",
+        "cmap": "RdBu_r",
+        "signed": True,
+        "full_range": True,
+    },
     "field_strength": {
         "label": r"$|\mathbf{B}|$ [G]",
         "cmap": "viridis",
         "signed": False,
         "log_norm": True,
+        "full_range": True,
     },
     "inclination": {
         "label": r"inclination $\gamma$ [deg]",
@@ -113,6 +128,11 @@ class DiagnosticPlotter:
         if "vmin" in style or "vmax" in style:
             return Normalize(vmin=style.get("vmin"), vmax=style.get("vmax"))
 
+        if style.get("full_range", False) and not style.get("log_norm", False):
+            finite = values[np.isfinite(values)]
+            extent = max(float(np.abs(finite).max()), 1e-12) if finite.size else 1.0
+            return Normalize(vmin=-extent, vmax=extent)
+
         if not style.get("log_norm", False):
             vmin, vmax = cls._limits(values, signed=style["signed"])
             return Normalize(vmin=vmin, vmax=vmax)
@@ -120,7 +140,11 @@ class DiagnosticPlotter:
         positive = values[np.isfinite(values) & (values > 0.0)]
         if positive.size == 0:
             return LogNorm(vmin=1.0, vmax=10.0)
-        vmin, vmax = np.percentile(positive, (2.0, 98.0))
+        vmin, vmax = (
+            (positive.min(), positive.max())
+            if style.get("full_range", False)
+            else np.percentile(positive, (2.0, 98.0))
+        )
         if not vmax > vmin:
             vmin = float(vmin) / 1.01
             vmax = float(vmax) * 1.01
@@ -218,4 +242,4 @@ class DiagnosticPlotter:
         )
 
 
-__all__ = ["DiagnosticPlotter", "FIELD_STYLES"]
+__all__ = ["FIELD_STYLES", "DiagnosticPlotter"]

@@ -1,7 +1,7 @@
 """Inversion composition, objectives, sampling, and execution."""
 
+from prom3theus.inversion.depth_sampling import DepthRefinement
 from .forward import (
-    DepthRefinement,
     ForwardRuntime,
     ForwardSynthesisBackend,
     LTEForwardComposition,

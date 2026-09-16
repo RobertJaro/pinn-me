@@ -212,7 +212,12 @@ def detector_stokes_basis(
     hpc_y: np.ndarray,
     pixel_scale_matrix: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return HMI's fixed ``[CCD-up, counter-clockwise]`` transverse axes."""
+    """Return HMI's fixed ``[CCD-up, counter-clockwise]`` transverse axes.
+
+    The second axis is 90 degrees from ``+Q`` about the line of sight, the
+    convention polarized synthesis expects; it is not the 45-degree ``+U``
+    direction.
+    """
 
     matrix = np.asarray(pixel_scale_matrix, dtype=np.float64)
     if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
@@ -233,9 +238,9 @@ def detector_stokes_basis(
     q_axis = detector_y[0] * hpc_x + detector_y[1] * hpc_y
     q_axis -= np.sum(q_axis * los, axis=-1, keepdims=True) * los
     q_axis /= np.linalg.norm(q_axis, axis=-1, keepdims=True)
-    u_axis = np.cross(los, q_axis)
-    u_axis /= np.linalg.norm(u_axis, axis=-1, keepdims=True)
-    return q_axis, u_axis
+    q_perp_axis = np.cross(los, q_axis)
+    q_perp_axis /= np.linalg.norm(q_perp_axis, axis=-1, keepdims=True)
+    return q_axis, q_perp_axis
 
 
 def build_geometry(
@@ -288,10 +293,10 @@ def build_geometry(
     image_x /= np.linalg.norm(image_x, axis=-1, keepdims=True)
     image_y = np.cross(los, image_x)
     image_y /= np.linalg.norm(image_y, axis=-1, keepdims=True)
-    q_axis, u_axis = detector_stokes_basis(
+    q_axis, q_perp_axis = detector_stokes_basis(
         los, image_x, image_y, s_map.wcs.pixel_scale_matrix
     )
-    stokes_basis = np.stack((q_axis, u_axis, los), axis=-2)
+    stokes_basis = np.stack((q_axis, q_perp_axis, los), axis=-2)
 
     surface_unit = surface_xyz / np.linalg.norm(surface_xyz, axis=-1, keepdims=True)
     geometry_valid = (
@@ -343,7 +348,11 @@ def build_geometry(
         "solar_radius_m": solar_radius_m,
         "scene_basis_rows": scene_basis.tolist(),
         "scene_basis_order": ["chart_x", "chart_y", "chart_normal"],
-        "stokes_basis_order": ["+Q", "+U", "toward_observer"],
+        "stokes_basis_order": ["+Q", "+Q_perp", "toward_observer"],
+        "stokes_basis_order_note": (
+            "the second row is the transverse axis 90 degrees from +Q toward "
+            "increasing magnetic azimuth, not the 45-degree +U direction"
+        ),
         "stokes_reference": "CCD column-up; azimuth increases counter-clockwise",
         "stokes_reference_source": HMI_STOKES_REFERENCE_URL,
         "detector_y_hpc_coefficients": (

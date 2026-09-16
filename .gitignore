@@ -24,7 +24,4 @@ runs/
 
 # Local scientific inputs and preparation workspaces. The immutable runtime
 # resource bundle lives in src/prom3theus/resources/data.
-data/hinode/
-data/hmi/
-data/calibration/
-data/lte_resources/
+/data/

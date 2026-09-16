@@ -1,0 +1,382 @@
+# Single-time HMI + MHS + div B + raw potential boundary experiment.
+# All four HMI Stokes components optimize from step zero; AIA renders only.
+schema_version: 3
+
+solver:
+  kind: joint
+  output_directory: /glade/work/rjarolim/lte/hmi_aia_potential_siren_20260913_30
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hmi_aia_potential_siren_20260913_30
+
+scene:
+  reference_stream: photospheric_stokes
+  # UTC; start inclusive, end exclusive. One acquisition around 00:12
+  # at the prepared 12-minute cadence, including all three AIA channels.
+  time_window:
+    start: "2011-02-14T00:06:00"
+    end: "2011-02-14T00:18:00"
+
+atmosphere:
+  geometry:
+    type: spherical_shell
+    time_dependent: false
+    height_input_scale_m: 1.0e+7
+    uniform_spatial_scaling: true  # Use the height scale for all spatial inputs.
+    outer_height_megameter: 50.0
+    line_formation_outer_height_megameter: 1.5
+    inner_height_megameter: -1.0
+    tangent_margin_m: 1000.0
+  reference_atmosphere: falc_82
+  upper_atmosphere:
+    type: hydrostatic_corona
+    transition_region_top_megameter: 2.5
+    coronal_temperature_k: 1.0e+6
+    reference_grid_points: 2048
+  parameters:
+    temperature: {log_scale: 0.1}
+    velocity: {scale_m_per_s: 1000.0, maximum_m_per_s: 100000.0}
+    # B = grad(psi) + alpha*B_delta. alpha is 0 for the first cool_steps (the
+    # field is then exactly curl-free by construction, not merely penalized),
+    # then ramps linearly to 1 over the following ramp_steps.
+    magnetic_field: {
+      scale_gauss: 100.0, representation: potential_delta,
+      potential_delta_cool_steps: 4000, potential_delta_ramp_steps: 2000,
+    }
+    microturbulence: {log_scale: 0.2}
+    gas_pressure: {log_scale: 0.5}
+  network:
+    type: siren
+    hidden_dimension: 256
+    hidden_layers: 8
+    first_omega_0: 5.0
+    hidden_omega_0: 1.0
+    radial_weighting: null  # Preserve spatial input scaling without a radial warp.
+
+physics:
+  vector_basis_matches_spatial_coordinates: true
+  adiabatic_index: 1.6666666666666667
+  # Volume current-free equation is disabled below; must be 0 exactly when
+  # that equation is disabled.
+  magnetic_current_free_steps: 0
+  magnetic_current_free_final_factor: 0.0
+  # Physics is active from step zero and ramps in gradually for stability.
+  loss_start_step: 0
+  loss_ramp_steps: 2500
+  # Use the exact squared MHS residual; do not clip localized failures.
+  robust_loss_delta: 0.0
+  potential_boundary:
+    enabled: true
+    geometry: spherical_neumann
+    source_height_megameter: 0.0
+    # Delayed further (was 1000): the reference is self-referential (built
+    # from the model's own still-ambiguous Br), and prior gradient-norm
+    # probes measured this term at 28-450x the photospheric data gradient
+    # when it activates. Give the Stokes fit and disambiguation more time to
+    # settle on their own before this term starts reinforcing whatever
+    # photospheric pattern currently exists.
+    start_step: 1000
+    ramp_steps: 2000
+    update_every_n_steps: 1000
+    freeze_step: 10000
+    blend: 0.5
+    # Residuals are in B_hat^2; with B0=100 G, a 100 G RMS error contributes
+    # 0.001 per boundary budget.
+    # Reduced 5x (was 1.0e-3): this term's gradient was measured to dominate
+    # the shared network by 1-2 orders of magnitude over the data/physics
+    # fit; shrinking it gives the (now-larger) MHS/current-free weights below
+    # a real chance to shape the field before the boundary term locks in.
+    weight: 2.0e-4
+    grid_size: 64
+    source_supersampling: 2
+    top_grid_size: 16
+    side_horizontal_points: 32
+    side_height_points: 16
+    jitter_fraction: 1.0
+    seed: 0
+    batch_size: 256
+    field_floor_gauss: 1.0
+    photosphere:
+      # Penalize >45-degree horizontal disagreement only for strong reference
+      # fields. Disabled: kept off while the disambiguation approach is
+      # reworked.
+      enabled: false
+      minimum_horizontal_field_gauss: 1.0
+      batch_size: 256
+      weight: 10
+      start_step: 1000
+      ramp_steps: 2000
+      end_step: 8000
+  collocation:
+    volume_points_per_step: 2048
+    # Unused while volume_sampling is fully_random below (kept at a sensible
+    # divisor of volume_points_per_step in case height_grouped is restored).
+    height_layers_per_step: 64
+    upper_volume_points_per_step: 1024
+    upper_height_layers_per_step: 32
+    upper_boundary_points_per_step: 256
+    side_boundary_points_per_step: 512
+    validation_side_boundary_points: 256
+    validation_height_layers: 12
+    validation_upper_height_layers: 6
+    validation_points_per_height: 32
+    # Draw volume_points_per_step fully independent points across the whole
+    # volume every step instead of height_layers_per_step discrete shared
+    # heights. Every per-height-group normalization scale in magnetofluid.py
+    # becomes a per-point local scale as a direct result (a group of one
+    # point). height_sampling_power still controls the height *density*
+    # (still skewed toward the surface); it no longer determines a discrete
+    # bin width, so the earlier sparse-height-bin "single failure layer"
+    # collapse (data/collapse_layer_probe/report.md) cannot recur through
+    # that specific mechanism. Required by hard_example_enabled below.
+    volume_sampling: fully_random
+    height_sampling_power: 2.5
+    # Superseded by hard_example_* below: residual_adaptive_fraction assumed
+    # >1 point per height group to rank within, which no longer holds now
+    # that every group has exactly one point (round(1 * 0.5) rounds to 0).
+    residual_adaptive_enabled: false
+    residual_adaptive_candidate_multiplier: 2
+    residual_adaptive_fraction: 0.5
+    residual_adaptive_start_step: 500
+    residual_adaptive_update_every_n_steps: 250
+    # Two-part collocation: most of the batch is fresh random points every
+    # step; the rest is the highest-residual points from the previous step,
+    # jittered and reused. Unlike residual_adaptive_* (which only re-ranked
+    # within one fixed discrete height layer), this tracks the globally
+    # hardest points across the whole volume regardless of where they are,
+    # so a thin high-error band gets found and kept in view instead of
+    # depending on the sampler landing there by chance.
+    hard_example_enabled: true
+    hard_example_count: 256
+    hard_example_start_step: 500
+    hard_example_jitter_length_m: 50000.0
+    hard_example_jitter_time_hours: 0.0
+  normalization:
+    length_m: 1.0e+6
+    time_s: 3600.0
+    magnetic_field_floor_gauss: 1.0
+    velocity_scale_m_per_s: 1000.0
+    force_balance_pressure_floor_pa: 1.0
+    # Trying live (non-detached) again, now paired with volume_sampling:
+    # fully_random above rather than the height-pooled version tried earlier.
+    # This is still the more exploitable combination (a point's own field
+    # fully sets its own denominator, un-diluted by neighbors) -- watch
+    # field/pressure amplitude for runaway growth or collapse and revert to
+    # true if so.
+    detach_normalization_scale: false
+  equations:
+    hydrostatic_equilibrium: {enabled: false, weight: 0.0}
+    # Increased 5x (was 1.0e-2): prior gradient-norm probes found MHS +
+    # current-free contributed only ~2-16% of the Stokes data gradient at
+    # initialization, far too weak to compete with the potential-boundary
+    # term for shaping the field. Raise together with the reduced potential
+    # weight above so physics gets a real say before the boundary term locks
+    # in a possibly-wrong disambiguation branch.
+    magnetohydrostatic_equilibrium: {enabled: true, weight: 5.0e-2}
+    momentum: {enabled: false, weight: 0.0}
+    # No longer structurally guaranteed zero now that B = grad(psi) + alpha*B_delta
+    # (only grad(psi) is exactly divergence-free; B_delta is not).
+    magnetic_divergence: {enabled: true, weight: 1.0e-1}
+    magnetic_force_free: {enabled: false, weight: 0.0}
+    magnetic_current_free: {enabled: false, weight: 0.0}
+    radial_magnetic_energy_gradient: {enabled: false, weight: 0.0}
+    # Disabled: applied uniformly across the whole volume it fights the
+    # tangential ("fanning") field structure near the photosphere instead of
+    # only shaping the distant, genuinely more radial corona.
+    radial_magnetic_field: {enabled: false, weight: 0.0}
+    induction: {enabled: false, weight: 0.0}
+    continuity: {enabled: false, weight: 0.0}
+    adiabatic_pressure: {enabled: false, weight: 0.0}
+    coronal_energy:
+      enabled: false
+      weight: 0.0
+      # Generate offline with resource_builder.coronal_cooling before enabling.
+      cooling_table: null
+      minimum_height_megameter: 3.0
+      conductivity_w_m_k72: 1.0e-11
+      magnetic_floor_gauss: 0.1
+      # Prescribed heating, not an additional model output; initial trial values.
+      heating_w_m3: 1.0e-5
+      heating_scale_height_megameter: 30.0
+    # Top and sides are constrained by the progressive potential field.
+    upper_boundary_current_free: {enabled: false, weight: 0.0}
+    side_boundary_current_free: {enabled: false, weight: 0.0}
+    upper_boundary_no_inflow: {enabled: false, weight: 0.0}
+    side_boundary_no_inflow: {enabled: false, weight: 0.0}
+    upper_boundary_open_velocity: {enabled: false, weight: 0.0}
+    side_boundary_open_velocity: {enabled: false, weight: 0.0}
+    upper_domain_microturbulence_prior: {enabled: false, weight: 0.0}
+    upper_domain_temperature_prior: {enabled: false, weight: 0.0}
+    upper_boundary_tangential_magnetic_neumann: {enabled: false, weight: 0.0}
+    side_boundary_tangential_magnetic_neumann: {enabled: false, weight: 0.0}
+    upper_boundary_gas_pressure_prior: {enabled: true, weight: 1.0e-4}
+
+# The vector_potential gauge/smoothness regularization no longer applies:
+# potential_delta has no vector potential A to regularize this way.
+atmosphere_regularization: []
+
+streams:
+  - id: photospheric_stokes
+    observation:
+      type: hmi_stokes
+      directory: /glade/work/rjarolim/data/prom3theus/2011_02/hmi/prepared
+      selection:
+        acquisition_indices: null  # Selected by the shared time window above.
+        validation_raster: 0
+      loader:
+        batch_size: 256
+        validation_batch_size: 64
+        validation_stride: 16
+        preparation_workers: 8
+        workers: 8
+        pin_memory: false
+        progress: true
+      calibration:
+        transmission_profile_directory: /glade/work/rjarolim/data/prom3theus/2011_02/hmi/responses
+        require_quality_zero: true
+        quiet_sun_max_fractional_polarization: 1.0e-2
+        quiet_sun_trim_quantiles: [0.05, 0.95]
+        minimum_quiet_sun_pixels: 128
+        calibration_sample_limit: 4096
+    data_term:
+      type: lte_stokes
+      weight: 10.0  # Keep the Stokes likelihood contribution constant.
+      disambiguation:
+        # Temporary smooth observer-frame phase; raw Stokes cannot distinguish
+        # the two transverse fields separated by 180 degrees.
+        # The whole SIREN, including its output head, uses the canonical
+        # random initialization: a fresh run starts at an arbitrary,
+        # spatially varying phase, not the identity rotation.
+        enabled: false
+        # Lengthened again (was 4000): the re-enabled potential-field
+        # photospheric prior above (physics.potential_boundary.photosphere)
+        # acts directly on the raw model field from step 1000 to end_step
+        # 8000. Keeping the binary sin(phi)^2 preference off until that prior
+        # has had its full window lets it shape the raw field's natural
+        # orientation first, instead of the phase network snapping to an
+        # arbitrary branch (driven only by the early, ambiguity-blind Q/U/V
+        # fit) before the physically-motivated prior has had a chance to act.
+        cold_steps: 8000  # Keep the binary phase penalty off while the initial Stokes fit settles.
+        warmup_steps: 2000  # Warm sin(phi)^2 after the cold start.
+        handoff_step: 15000  # Permanently remove the temporary phase mask.
+        binary_weight: 0.03
+        hidden_dimension: 64
+        hidden_layers: 5
+        first_omega_0: 30.0  # Smooth initial spatial bandwidth.
+        hidden_omega_0: 1.0
+      synthesis:
+        line_ids: [FeI_6173.3352]
+        excluded_wavelength_windows_angstrom: []
+      instrument:
+        type: hmi_filter_profiles
+        magnetic_azimuth_offset_deg: 90.0
+        line_of_sight_velocity_correction_m_per_s: 0.0
+        optimize_line_of_sight_velocity_correction: false  # Required for static runs.
+      objective:
+        type: mse  # I linear; Q/U/V transformed after instrument integration.
+        # asinh_scale: 1.0e-3
+        # Direct weights after the normalized Stokes transform.
+        stokes_weights: {i: 1, q: 50, u: 50, v: 100}
+      depth_sampling:
+        # FALC reference coordinates shape Stokes quadrature; the model uses height.
+        reference_log_tau500_bounds: [-5.0, 1.0]
+        sample_count: 25
+        coarse_to_fine:
+          enabled: true
+          fine_sample_count: 16
+          uniform_weight_floor: 0.05
+
+  - id: coronal_euv
+    observation:
+      type: aia_euv
+      directory: /glade/work/rjarolim/data/prom3theus/2011_02/aia/prepared
+      channels_angstrom: [171, 193, 211]
+      selection:
+        validation_exposure_group: target-0000
+      loader:
+        batch_size: 256
+        validation_batch_size: 4096
+        workers: 8
+        pin_memory: false
+    data_term:
+      type: aia_optically_thin
+      # Fit AIA images, including calibration priors.
+      weight: 0.0
+      synthesis:
+        response_resource: aia_euv_v1:aia_temperature_response
+        ray_end: atmosphere_outer_shell
+        ray_samples: 96
+        coarse_to_fine: {enabled: true, fine_sample_count: 96, uniform_weight_floor: 0.05}
+        training_jitter: true
+        height_sampling_power: 2.0
+      objective:
+        type: asinh_mse
+        channel_weights:
+          - {channel_angstrom: 171, weight: 1.0}
+          - {channel_angstrom: 193, weight: 1.0}
+          - {channel_angstrom: 211, weight: 1.0}
+        calibration:
+          enabled: true
+          absolute_prior_fraction: 0.25
+          relative_prior_fraction: 0.15
+
+diagnostics:
+  visualization:
+    enabled: true
+    render_atmosphere: true
+    render_streams: true
+    ray_sampling:
+      batch_size: 512
+      max_pixels: 4096
+      max_profile_samples: 2048
+    slice_sampling:
+      batch_size: 512
+      layer_count: 6
+      longitude_points: 128
+      latitude_points: 128
+      radial_points: 256
+    meridional_slice:
+      enabled: true
+      longitude_deg: 35.3
+    contribution_ray_count: 0
+    dpi: 180
+
+logging:
+  type: wandb
+  project: PROM3THEUS
+  run_name: HMI SIREN MHS div B raw potential 2011-02-14 00:12
+  tags: [hmi, aia, sdo, lte, mhs, div-b, potential, single-time]
+
+training:
+  loader_seed: 0
+  reader_workers: 2  # Global maximum concurrent bulk reads.
+  loader_block_bytes: 33554432
+  loader_cache_bytes: 134217728  # Per observation stream, across its channels.
+  loader_prefetch_batches: 2
+  loader_max_batch_bytes: 67108864
+  gpu_prefetch: true
+  device: auto
+  max_steps: -1
+  max_epochs: 500
+  learning_rate: 3.0e-4
+  final_learning_rate: 3.0e-5
+  gradient_clip_norm: 0.1
+  log_every_n_steps: 10
+  warmup_steps: 1000
+  loss_balance:
+    enabled: true
+    start_step: 250
+    update_every_n_steps: 100
+    ema_decay: 0.9
+    adaptation_rate: 0.1
+    # Each shared residual remains a small correction to the Stokes anchor.
+    target_gradient_fraction: 0.1
+    min_multiplier: 0.01
+    max_multiplier: 100.0
+    probe_parameter_count: 4
+    excluded_objectives:
+      - shared.potential_boundary.top
+      - shared.potential_boundary.side
+  validation_every_n_steps: 1000
+  validation_samples_per_stream: 256
+  checkpoint_every_n_steps: 1000
+  resume_from_checkpoint: null
+  reference_stream: photospheric_stokes

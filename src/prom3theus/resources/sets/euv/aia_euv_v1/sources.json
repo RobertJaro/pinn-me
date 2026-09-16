@@ -1,0 +1,73 @@
+{
+  "builder": {
+    "algorithm_version": 1,
+    "name": "resource_builder.aia_euv",
+    "operation": "verified channel selection without numerical resampling"
+  },
+  "converted_source_artifact": {
+    "filename": "aia_reference.sunerf.npz",
+    "response_id": "sha256:73a29fd3468b187c054bd986fe41b4d029c1e7a6b8dec6f10897b74badeb80fd",
+    "schema": "sunerf.euv-temperature-response",
+    "schema_version": 1,
+    "sha256": "90e893725f1cef0340347f901ff4da82b95ae2d1cf01132565592f6839178281"
+  },
+  "resource_set_id": "aia_euv_v1",
+  "schema_version": 1,
+  "scientific_sources": {
+    "aia_degradation_correction": {
+      "algorithm": "aiapy.calibrate.degradation",
+      "calibration_version": 10,
+      "factor_at_reference_epoch": 1.0,
+      "name": "aia_V10_20201119_190000_response_table.txt",
+      "reference_epoch": "2010-03-24T00:00:00Z",
+      "sha256": "0a3f2db39d05c44185f6fdeec928089fb55d1ce1e0a805145050c6356cbc6e98",
+      "source": {
+        "description": "AIA V10 EVE/FISM degradation and effective-area correction table",
+        "filename": "aia_V10_20201119_190000_response_table.txt",
+        "reference_url": "https://hesperia.gsfc.nasa.gov/ssw/sdo/aia/response/V10_release_notes.txt",
+        "sha256": "0a3f2db39d05c44185f6fdeec928089fb55d1ce1e0a805145050c6356cbc6e98",
+        "size_bytes": 17400,
+        "url": "https://raw.githubusercontent.com/LM-SAL/backup-files/ef466df3faa4699ee1c8dec6b26f8449c8e41865/static/sdo/aia/response/aia_V10_20201119_190000_response_table.txt",
+        "version": "V10-20201119_190000"
+      },
+      "version": "V10-20201119_190000"
+    },
+    "aia_full_instrument_response": {
+      "name": "aia_V8_all_fullinst.genx",
+      "sha256": "3940648e6b02876c45a9893f40806bbcc50baa994ae3fa2d95148916988426dd",
+      "source": {
+        "description": "AIA EUV component efficiencies, effective areas, detector gain, crosstalk inputs, and plate scale; byte-identical for AIA V9/V10",
+        "filename": "aia_V8_all_fullinst.genx",
+        "reference_url": "https://hesperia.gsfc.nasa.gov/ssw/sdo/aia/response/V10_release_notes.txt",
+        "sha256": "3940648e6b02876c45a9893f40806bbcc50baa994ae3fa2d95148916988426dd",
+        "size_bytes": 5426568,
+        "url": "https://raw.githubusercontent.com/LM-SAL/backup-files/ef466df3faa4699ee1c8dec6b26f8449c8e41865/static/sdo/aia/response/aia_V8_all_fullinst.genx",
+        "version": "V8"
+      },
+      "version": "V8"
+    },
+    "chianti_abundance": {
+      "filename": "sun_coronal_2021_chianti.abund",
+      "name": "sun_coronal_2021_chianti",
+      "sha256": "396f76c5accb9178069ec6e89b78d06f0b8ebb5ec5567e2a10f35eff12ccaa40",
+      "size_bytes": 1582,
+      "version": "11.0.2"
+    },
+    "chianti_atomic_database": {
+      "filename": "chianti_11.0.2.h5",
+      "name": "CHIANTI",
+      "reference_url": "https://www.chiantidatabase.org/chianti_download.html",
+      "sha256": "6b34b5421342281baa8fd1d84b293dd5f3b55ec27e6ad9556429ed68a69288cd",
+      "size_bytes": 2327758549,
+      "version": "11.0.2",
+      "versioned_group_count": 10393
+    },
+    "chianti_ionization_equilibrium": {
+      "filename": "chianti.ioneq",
+      "name": "chianti",
+      "sha256": "706029c824704ab727c40570a8709bae42bf69745db2fa5cd54d5b8b12bc41db",
+      "size_bytes": 504253,
+      "version": "11.0.2"
+    }
+  }
+}

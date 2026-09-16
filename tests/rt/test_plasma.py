@@ -1,6 +1,7 @@
 import torch
 
 from prom3theus.rt import (
+    AtomicDatabase,
     ContinuumOpacity,
     SolarPlasmaTable,
     THOMSON_CROSS_SECTION_M2,
@@ -100,7 +101,10 @@ def test_hot_thermodynamics_reach_exact_fully_ionized_ideal_limit():
 def test_pressure_continuation_preserves_unbounded_scaling():
     plasma = SolarPlasmaTable().to(dtype=torch.float64)
     temperature = torch.tensor([5_500.0, 5_500.0], dtype=torch.float64)
-    pressure = torch.tensor([1.0e7, 2.0e7], dtype=torch.float64)
+    # Both points sit beyond the 10 MPa STiC pressure edge, where the hybrid
+    # continuation makes absorption scale as density squared and the neutral
+    # hydrogen reservoir linearly.
+    pressure = torch.tensor([1.0e8, 2.0e8], dtype=torch.float64)
     wavelength = torch.tensor([5000.0], dtype=torch.float64)
     state = plasma.prepare_plasma_state(temperature, pressure)
     absorption = plasma.true_absorption(wavelength, temperature, pressure, state)
@@ -112,3 +116,38 @@ def test_pressure_continuation_preserves_unbounded_scaling():
     torch.testing.assert_close(
         neutral_h[1] / neutral_h[0], torch.tensor(2.0, dtype=torch.float64)
     )
+
+
+def test_faded_line_populations_stay_differentiable_above_the_photosphere():
+    """A zero reservoir must yield a zero population with a finite derivative.
+
+    Any shell whose floor reaches below the FALC table, and every coronal
+    extrapolation, drives cells past the hot end of the photospheric fade.
+    There the Fe I reservoir is exactly zero: the population is correctly zero,
+    but routing it through log/exp made its derivative inf * 0 = NaN, which
+    silently poisoned the whole training backward pass.
+    """
+
+    atomic = AtomicDatabase()
+    table = SolarPlasmaTable(atomic)
+    line = atomic.get_line("FeI_6173.3352")
+    fade_top = table.eos.transition_temperature_bounds_k[1]
+    temperature = torch.tensor(
+        [6000.0, 20000.0, fade_top, 1.5 * fade_top, 48000.0],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    gas_pressure = torch.full_like(temperature, 1.6e5).detach()
+
+    populations = table.reference_lower_level_populations(
+        [line], temperature, gas_pressure
+    )[line.id]
+    gradient, = torch.autograd.grad(populations.sum(), temperature)
+
+    assert torch.isfinite(populations).all()
+    assert torch.isfinite(gradient).all()
+    assert torch.all(populations[:2] > 0)
+    # From the fade top onward the population vanishes exactly, and strictly
+    # above it so does its derivative.
+    assert torch.all(populations[2:] == 0)
+    assert torch.all(gradient[3:] == 0)

@@ -196,6 +196,13 @@ class ObservationRaster:
     metadata: Mapping[str, Any]
     auxiliary: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
+    _bulk_catalog: Any = field(default=None, init=False, repr=False, compare=False)
+
+    def __reduce__(self):
+        from .loading import raster_reduce
+
+        return raster_reduce(self)
+
     def __post_init__(self) -> None:
         tensors = {
             "stokes": torch.as_tensor(self.stokes),
@@ -329,10 +336,10 @@ class ObservationRaster:
 
     @property
     def mu(self) -> torch.Tensor:
-        surface = self.surface_position_m / torch.linalg.vector_norm(
-            self.surface_position_m, dim=-1, keepdim=True
-        )
-        return (surface * -self.ray_direction).sum(dim=-1, keepdim=True)
+        from .arrays import materialize_array
+        position = materialize_array(self.surface_position_m)
+        surface = position / torch.linalg.vector_norm(position, dim=-1, keepdim=True)
+        return (surface * -materialize_array(self.ray_direction)).sum(dim=-1, keepdim=True)
 
 
 class ObservationSample(TypedDict, total=False):

@@ -33,9 +33,19 @@ hmi-preparation = [
   "drms>=0.6.2",
   "python-dateutil>=2.8.2",
   "sunpy[map]>=5",
+  "tqdm>=4.61.2",
+]
+aia-preparation = [
+  "aiapy==0.12.1",
+  "astropy>=7.1.1",
+  "drms>=0.6.2",
+  "python-dateutil>=2.8.2",
+  "sunpy[image,map,net]>=7.0",
+  "tqdm>=4.61.2",
 ]
 visualization = [
   "matplotlib>=3.6",
+  "sunpy>=5",
   "wandb>=0.13",
 ]
 test = [
@@ -70,6 +80,7 @@ version = {attr = "prom3theus.__version__"}
   "data/common/*.json",
   "data/hinode_sp/*.json",
   "data/hmi_stokes/*.json",
+  "sets/euv/aia_euv_v1/*.json",
 ]
 
 [tool.setuptools.data-files]
@@ -78,6 +89,7 @@ version = {attr = "prom3theus.__version__"}
   "configs/hinode_lte_mhs_extrapolation.yaml",
   "configs/hmi_lte_mhs.yaml",
   "configs/hmi_lte_dynamic.yaml",
+  "configs/hmi_aia_dynamic.yaml",
 ]
 
 [tool.pytest.ini_options]

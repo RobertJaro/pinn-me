@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from prom3theus.observations.arrays import materialize_array
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 
 import numpy as np
+from prom3theus.observations.bulk import read_native_grid
 import torch
 
 from prom3theus.core import (
@@ -14,6 +17,10 @@ from prom3theus.core import (
     project_cartesian_to_spherical,
     spherical_to_cartesian,
 )
+from dataclasses import replace
+
+from prom3theus.rt import project_vectors_to_stokes
+from prom3theus.rt.wavelength import air_to_vacuum_angstrom
 
 from .sampling import subsample_grid
 
@@ -137,7 +144,9 @@ class AtmosphereSampling:
                 "A physical radial slice requires at least two radial points."
             )
         if slice_layer_count < 3:
-            raise ValueError("Physical shell plots require at least three radial layers.")
+            raise ValueError(
+                "Physical shell plots require at least three radial layers."
+            )
         return cls(
             ray_evaluation_batch_size=ray_evaluation_batch_size,
             max_ray_pixels=max_ray_pixels,
@@ -164,20 +173,98 @@ class AtmosphereEvaluator:
     def _central_observer_basis(raster) -> torch.Tensor:
         """Return the real Stokes basis nearest the validation field center."""
 
-        valid = raster.valid_mask.detach().cpu().bool()
-        surface = raster.surface_position_m.detach().float().cpu()[valid]
-        bases = raster.stokes_basis.detach().float().cpu()[valid]
+        valid = materialize_array(raster.valid_mask).detach().cpu().bool()
+        surface = materialize_array(raster.surface_position_m).detach().float().cpu()[valid]
+        bases = materialize_array(raster.stokes_basis).detach().float().cpu()[valid]
         if surface.shape[0] < 1 or bases.shape != (surface.shape[0], 3, 3):
             raise ValueError(
                 "Observer-frame validation requires at least one valid Stokes basis."
             )
-        surface_unit = surface / torch.linalg.vector_norm(
-            surface, dim=-1, keepdim=True
-        )
+        surface_unit = surface / torch.linalg.vector_norm(surface, dim=-1, keepdim=True)
         center = surface_unit.mean(dim=0)
         center = center / torch.linalg.vector_norm(center)
         center_index = torch.argmax(surface_unit @ center)
         return bases[center_index]
+
+    @staticmethod
+    def _line_core_extinction(pl_module, atmosphere, stokes_basis) -> torch.Tensor:
+        """Return total extinction at the most opaque observed line core, in m^-1.
+
+        This is the diagonal ``eta_I`` the formal solver actually integrates on
+        the ray path: continuum plus Zeeman-split line absorption at the
+        configured line centres, evaluated with the observer-frame field and
+        line-of-sight velocity.  Integrating it gives the optical depth the
+        observation genuinely sees, which reaches unity far higher in the
+        atmosphere than the 500 nm continuum does.
+
+        The field and velocity must be projected onto the Stokes basis first:
+        ``eta_I`` depends on the field's inclination to the line of sight and
+        on the Doppler shift of the core, neither of which the model-frame
+        vectors carry.  Azimuth is irrelevant here, since ``eta_I`` depends
+        only on ``sin^2(theta)`` and ``cos^2(theta)``.
+        """
+
+        synthesizer = pl_module.synthesizer
+        temperature = atmosphere.temperature
+        gas_pressure = atmosphere.gas_pressure
+        basis = stokes_basis.to(temperature)
+        observed = replace(
+            atmosphere,
+            magnetic_field=project_vectors_to_stokes(
+                atmosphere.magnetic_field.to(temperature), basis
+            ),
+            velocity_field=project_vectors_to_stokes(
+                atmosphere.velocity_field.to(temperature), basis
+            ),
+        )
+        wavelength = temperature.new_tensor(
+            [line.wavelength_air_angstrom for line in synthesizer.lines]
+        )
+        wavelength, _ = torch.sort(wavelength)
+        continuum_grid = torch.cat(
+            (
+                air_to_vacuum_angstrom(wavelength),
+                wavelength.new_tensor([5000.0]),
+            )
+        )
+        plasma_state = synthesizer.continuum_opacity.prepare_plasma_state(
+            temperature, gas_pressure
+        )
+        continuum = synthesizer.continuum_opacity(
+            continuum_grid, temperature, gas_pressure, plasma_state
+        )
+        thermodynamics = synthesizer.continuum_opacity.reference_line_thermodynamics(
+            temperature,
+            gas_pressure,
+            plasma_state,
+            include_electron_density=synthesizer.requires_stark_electron_density,
+        )
+        propagation = synthesizer.line_opacity(
+            wavelength,
+            temperature,
+            observed.v_los,
+            observed.microturbulence,
+            observed.magnetic_field,
+            continuum[..., :-1],
+            continuum[..., -1],
+            lower_level_populations=(
+                synthesizer.continuum_opacity.reference_lower_level_populations(
+                    synthesizer.lines,
+                    temperature,
+                    gas_pressure,
+                    plasma_state,
+                    fe_i_population_over_partition=thermodynamics[
+                        "fe_i_population_over_partition"
+                    ],
+                )
+            ),
+            damping_electron_density=thermodynamics.get("electron_density"),
+            damping_hydrogen_neutral=thermodynamics["hydrogen_neutral"],
+            # Absolute m^-1, matching the RayDistancePath the inversion uses.
+            normalize_to_alpha500=False,
+        )
+        # eta_I is the [0, 0] element; keep the most opaque core across lines.
+        return propagation[..., 0, 0].amax(dim=-1)
 
     def evaluate_ray_optical_depth(
         self,
@@ -194,12 +281,16 @@ class AtmosphereEvaluator:
         height, width = raster.spatial_shape
         if rows is None or columns is None:
             rows, columns = subsample_grid(height, width, self.max_ray_pixels)
-        coords = raster.coordinates[rows][:, columns]
-        ray_direction = raster.ray_direction[rows][:, columns]
-        surface_position_m = raster.surface_position_m[rows][:, columns]
-        valid = raster.valid_mask[rows][:, columns]
+        coords = read_native_grid(raster.coordinates, rows, columns)
+        ray_direction = read_native_grid(raster.ray_direction, rows, columns)
+        surface_position_m = read_native_grid(raster.surface_position_m, rows, columns)
+        valid = read_native_grid(raster.valid_mask, rows, columns)
+        stokes_basis = read_native_grid(raster.stokes_basis, rows, columns)
         flat_coords = coords[valid].to(device=parameter.device, dtype=parameter.dtype)
         flat_ray_direction = ray_direction[valid].to(device=parameter.device)
+        flat_stokes_basis = stokes_basis[valid].to(
+            device=parameter.device, dtype=parameter.dtype
+        )
         if flat_coords.numel() == 0:
             raise ValueError(
                 "No valid observation pixels remain for atmosphere visualization."
@@ -207,9 +298,8 @@ class AtmosphereEvaluator:
 
         was_training = model.training
         model.eval()
-        chunks = {"tau500_ray": [], "geometric_height": []}
+        chunks = {"tau_line_ray": [], "tau500_ray": [], "geometric_height": []}
         traced_spherical = []
-        sampled_depth_grid = None
         try:
             with torch.no_grad():
                 for start in range(
@@ -218,16 +308,16 @@ class AtmosphereEvaluator:
                     batch_coords = flat_coords[
                         start : start + self.ray_evaluation_batch_size
                     ]
-                    atmosphere, ray_trace = (
-                        pl_module.forward_composition.trace_atmosphere(
-                            batch_coords,
-                            flat_ray_direction[
-                                start : start + self.ray_evaluation_batch_size
-                            ],
-                            pl_module.sample_depth_grid(randomize=False),
-                        )
+                    (
+                        atmosphere,
+                        ray_trace,
+                    ) = pl_module.forward_composition.trace_atmosphere(
+                        batch_coords,
+                        flat_ray_direction[
+                            start : start + self.ray_evaluation_batch_size
+                        ],
+                        pl_module.sample_depth_grid(randomize=False),
                     )
-                    sampled_depth_grid = atmosphere.log_tau500.detach().float().cpu()
                     gas_pressure = atmosphere.gas_pressure
                     if gas_pressure is None:
                         raise RuntimeError(
@@ -236,21 +326,33 @@ class AtmosphereEvaluator:
                     alpha500 = pl_module.synthesizer.continuum_opacity.volume_extinction_at_5000(
                         atmosphere.temperature, gas_pressure
                     )
+                    line_extinction = self._line_core_extinction(
+                        pl_module,
+                        atmosphere,
+                        flat_stokes_basis[
+                            start : start + self.ray_evaluation_batch_size
+                        ],
+                    )
                     distance_interval_m = (
                         ray_trace.distance_m[..., 1:] - ray_trace.distance_m[..., :-1]
                     )
-                    tau_increment = (
-                        0.5
-                        * (alpha500[..., :-1] + alpha500[..., 1:])
-                        * distance_interval_m
-                    )
-                    tau500_ray = torch.cat(
-                        (
-                            torch.zeros_like(alpha500[..., :1]),
-                            torch.cumsum(tau_increment, dim=-1),
-                        ),
-                        dim=-1,
-                    )
+
+                    def integrate(extinction):
+                        increment = (
+                            0.5
+                            * (extinction[..., :-1] + extinction[..., 1:])
+                            * distance_interval_m
+                        )
+                        return torch.cat(
+                            (
+                                torch.zeros_like(extinction[..., :1]),
+                                torch.cumsum(increment, dim=-1),
+                            ),
+                            dim=-1,
+                        )
+
+                    tau500_ray = integrate(alpha500)
+                    tau_line_ray = integrate(line_extinction)
                     spherical = cartesian_to_spherical(ray_trace.position_m, torch)
                     scene_center_spherical = cartesian_to_spherical(
                         model.scene_basis[2].to(spherical), torch
@@ -268,6 +370,7 @@ class AtmosphereEvaluator:
                         .float()
                         .cpu()
                     )
+                    chunks["tau_line_ray"].append(tau_line_ray.detach().float().cpu())
                     chunks["tau500_ray"].append(tau500_ray.detach().float().cpu())
                     chunks["geometric_height"].append(
                         (ray_trace.geometric_height_m / 1.0e6).detach().float().cpu()
@@ -303,10 +406,7 @@ class AtmosphereEvaluator:
             map_longitude_deg[valid.numpy()] = np.rad2deg(spherical[..., 2])
             map_latitude_deg[valid.numpy()] = 90.0 - np.rad2deg(spherical[..., 1])
         shell_height_levels_m = np.nanmedian(fields["geometric_height"], axis=0) * 1.0e6
-        if sampled_depth_grid is None:
-            raise RuntimeError("Ray optical-depth sampling produced no depth grid.")
         return {
-            "log_tau500": sampled_depth_grid.numpy(),
             "solar_radius_m": float(model.solar_radius_m.detach().cpu()),
             "shell_height_levels_m": shell_height_levels_m,
             "profile_fields": fields,
@@ -354,6 +454,7 @@ class AtmosphereEvaluator:
         position_m: torch.Tensor,
         *,
         observer_basis: torch.Tensor | None = None,
+        time_hours: torch.Tensor | float | None = None,
     ) -> dict[str, np.ndarray]:
         """Evaluate plot fields at explicitly supplied Carrington positions."""
 
@@ -384,10 +485,18 @@ class AtmosphereEvaluator:
                 for start in range(
                     0, flat_position.shape[0], self.slice_evaluation_batch_size
                 ):
-                    position = flat_position[
-                        start : start + self.slice_evaluation_batch_size
-                    ].detach().requires_grad_(True)
-                    atmosphere = model.evaluate_position_points(position)
+                    position = (
+                        flat_position[start : start + self.slice_evaluation_batch_size]
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    atmosphere = (
+                        model.evaluate_position_points(position)
+                        if time_hours is None
+                        else model.evaluate_position_points(
+                            position, time_hours=time_hours
+                        )
+                    )
                     pressure = atmosphere["gas_pressure"]
                     density = model.thermodynamic_eos.mass_density(
                         atmosphere["temperature"], pressure
@@ -404,9 +513,7 @@ class AtmosphereEvaluator:
                     )
                     magnetic = atmosphere["magnetic_field"]
                     observer = (
-                        None
-                        if observer_basis is None
-                        else observer_basis.to(magnetic)
+                        None if observer_basis is None else observer_basis.to(magnetic)
                     )
                     magnetic_observer = (
                         None
@@ -434,20 +541,16 @@ class AtmosphereEvaluator:
                     )[0].movedim(0, 1)
                     curl_magnetic_gauss_per_m = torch.stack(
                         (
-                            magnetic_jacobian[:, 2, 1]
-                            - magnetic_jacobian[:, 1, 2],
-                            magnetic_jacobian[:, 0, 2]
-                            - magnetic_jacobian[:, 2, 0],
-                            magnetic_jacobian[:, 1, 0]
-                            - magnetic_jacobian[:, 0, 1],
+                            magnetic_jacobian[:, 2, 1] - magnetic_jacobian[:, 1, 2],
+                            magnetic_jacobian[:, 0, 2] - magnetic_jacobian[:, 2, 0],
+                            magnetic_jacobian[:, 1, 0] - magnetic_jacobian[:, 0, 1],
                         ),
                         dim=-1,
                     )
                     # J = curl(B) / mu_0, with the learned magnetic field in
                     # gauss and physical position derivatives in metres.
                     current_density = torch.linalg.vector_norm(
-                        curl_magnetic_gauss_per_m * 1.0e-4
-                        / (4.0 * math.pi * 1.0e-7),
+                        curl_magnetic_gauss_per_m * 1.0e-4 / (4.0 * math.pi * 1.0e-7),
                         dim=-1,
                     )
                     values = {
@@ -468,12 +571,14 @@ class AtmosphereEvaluator:
                             magnetic_observer, dim=-1
                         )
                         valid_field = field_strength > 0.0
-                        valid_azimuth = torch.linalg.vector_norm(
-                            magnetic_observer[..., :2], dim=-1
-                        ) > 0.0
+                        valid_azimuth = (
+                            torch.linalg.vector_norm(magnetic_observer[..., :2], dim=-1)
+                            > 0.0
+                        )
                         cos_inclination = torch.where(
                             valid_field,
-                            magnetic_observer[..., 2] / field_strength.clamp_min(
+                            magnetic_observer[..., 2]
+                            / field_strength.clamp_min(
                                 torch.finfo(field_strength.dtype).tiny
                             ),
                             torch.nan,
@@ -506,6 +611,20 @@ class AtmosphereEvaluator:
             name: torch.cat(values).numpy().reshape(leading_shape)
             for name, values in chunks.items()
         }
+
+    @staticmethod
+    def _raster_time_hours(raster) -> float:
+        """Return the single model time represented by an observation raster."""
+
+        valid = materialize_array(raster.valid_mask).detach().cpu().bool()
+        times = raster.coordinates[..., 2].detach().float().cpu()[valid]
+        if times.numel() < 1 or not torch.isfinite(times).all():
+            raise ValueError("Physical slices require a finite raster time.")
+        time = float(torch.median(times))
+        tolerance = max(1.0e-6, abs(time) * 1.0e-6)
+        if float(torch.max(torch.abs(times - time))) > tolerance:
+            raise ValueError("Physical slices require one time per observation raster.")
+        return time
 
     def evaluate_shell_layers(
         self, pl_module, raster, shell_height_levels_m: np.ndarray
@@ -545,6 +664,7 @@ class AtmosphereEvaluator:
             pl_module,
             position,
             observer_basis=self._central_observer_basis(raster),
+            time_hours=self._raster_time_hours(raster),
         )
         map_longitude = np.broadcast_to(
             np.rad2deg(longitude_grid.numpy())[..., None], position.shape[:-1]
@@ -609,6 +729,7 @@ class AtmosphereEvaluator:
             pl_module,
             position,
             observer_basis=self._central_observer_basis(raster),
+            time_hours=self._raster_time_hours(raster),
         )
         shape = (self.slice_latitude_points, 1, self.slice_radial_points)
         return {

@@ -5,62 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from prom3theus.training.assembly import build_physics_assembly
-from prom3theus.training.configuration import (
-    resolve_coordinate_grids,
+from prom3theus.inversion.assembly import build_physics_assembly
+from prom3theus.inversion.configuration import (
     resolve_depth_sampling,
-    resolve_learning_rate,
     resolve_objective_weighting,
-    resolve_vector_regularization,
 )
-
-
-def test_coordinate_grids_are_float32_and_strictly_increasing():
-    grids = resolve_coordinate_grids([-5.0, -1.0, 1.0], [6301.0, 6302.0])
-
-    assert grids.log_tau500.dtype == torch.float32
-    assert grids.wavelength_angstrom.dtype == torch.float32
-    with pytest.raises(ValueError, match="top to bottom"):
-        resolve_coordinate_grids([-5.0, -5.0], [6301.0, 6302.0])
-    with pytest.raises(ValueError, match="strictly increasing"):
-        resolve_coordinate_grids([-5.0, 1.0], [6302.0, 6301.0])
-
-
-def test_depth_and_vector_option_sets_reject_unknown_fields():
-    depth = {
-        "sample_count": 8,
-        "coarse_to_fine": {
-            "enabled": True,
-            "fine_sample_count": 4,
-            "uniform_weight_floor": 0.05,
-        },
-    }
-    vector = {
-        "enabled": True,
-        "magnetic_weight": 1.0,
-        "velocity_weight": 0.0,
-        "decay_steps": 10,
-    }
-    with pytest.raises(TypeError, match="coarse_to_fine"):
-        resolve_depth_sampling(
-            {
-                **depth,
-                "coarse_to_fine": {
-                    **depth["coarse_to_fine"],
-                    "unexpected": True,
-                },
-            },
-        )
-    with pytest.raises(TypeError, match="vector_regularization_config"):
-        resolve_vector_regularization({**vector, "unexpected": 1.0})
-    with pytest.raises(ValueError, match="positive magnetic or velocity"):
-        resolve_vector_regularization(
-            {**vector, "magnetic_weight": 0.0, "velocity_weight": 0.0}
-        )
-    with pytest.raises(TypeError, match="sample_count must be an integer"):
-        resolve_depth_sampling({**depth, "sample_count": 8.5})
-    with pytest.raises(TypeError, match="enabled must be boolean"):
-        resolve_vector_regularization({**vector, "enabled": "true"})
 
 
 def test_physics_collocation_counts_are_strict_integers():
@@ -72,29 +21,37 @@ def test_physics_collocation_counts_are_strict_integers():
                 "magnetohydrostatic_equilibrium",
                 "momentum",
                 "magnetic_divergence",
+                "magnetic_force_free",
+                "magnetic_current_free",
                 "induction",
                 "continuity",
                 "adiabatic_pressure",
+                "coronal_energy",
+                "upper_boundary_current_free",
+                "side_boundary_current_free",
+                "upper_boundary_no_inflow",
+                "side_boundary_no_inflow",
                 "upper_boundary_open_velocity",
                 "side_boundary_open_velocity",
-                "side_boundary_current_free",
+                "side_boundary_tangential_magnetic_neumann",
                 "upper_domain_microturbulence_prior",
                 "upper_domain_temperature_prior",
                 "radial_magnetic_energy_gradient",
-                "upper_boundary_current_free",
+                "radial_magnetic_field",
+                "upper_boundary_tangential_magnetic_neumann",
                 "upper_boundary_gas_pressure_prior",
             )
         },
         "gravity_m_per_s2": None,
         "adiabatic_index": 5.0 / 3.0,
-        "upper_boundary_current_free_ramp_steps": 0,
+        "magnetic_current_free_steps": 0,
         "volume_points_per_step": 16.5,
         "height_layers_per_step": 4,
         "upper_volume_points_per_step": 0,
         "upper_height_layers_per_step": 0,
         "upper_boundary_points_per_step": 4,
         "side_boundary_points_per_step": 0,
-        "side_height_layers_per_step": 0,
+        "validation_side_boundary_points": 0,
         "validation_height_layers": 2,
         "validation_upper_height_layers": 0,
         "validation_points_per_height": 4,
@@ -122,7 +79,7 @@ def test_objective_weighting_applies_exclusions_and_preserves_component_order():
     )
 
     torch.testing.assert_close(
-        weighting.stokes_weights, torch.tensor([0.1, 0.2, 0.3, 0.4])
+        weighting.stokes_weights, torch.tensor([1., 2., 3., 4.])
     )
     torch.testing.assert_close(
         weighting.wavelength_weights, torch.tensor([1.0, 0.0, 3.0])
@@ -137,7 +94,7 @@ def test_objective_weighting_applies_exclusions_and_preserves_component_order():
         continuum_indices=[0, 2],
         atlas_continuum_radiance_w_m3_sr=3.06e13,
     )
-    torch.testing.assert_close(rescaled.stokes_weights, weighting.stokes_weights)
+    torch.testing.assert_close(rescaled.stokes_weights, 10 * weighting.stokes_weights)
     with pytest.raises(KeyError, match="Stokes weights must contain exactly"):
         resolve_objective_weighting(
             wavelength,
@@ -156,28 +113,3 @@ def test_objective_weighting_applies_exclusions_and_preserves_component_order():
             continuum_indices=[0.5, 2.0],
             atlas_continuum_radiance_w_m3_sr=3.06e13,
         )
-
-
-def test_learning_rate_is_an_exact_closed_schedule():
-    scheduled = resolve_learning_rate(
-        {"start": 1.0e-3, "end": 1.0e-4, "iterations": "auto"}
-    )
-    assert scheduled.schedule == {
-        "start": 1.0e-3,
-        "end": 1.0e-4,
-        "iterations": "auto",
-    }
-    assert scheduled.model_configuration == scheduled.schedule
-    with pytest.raises(TypeError, match="contain exactly"):
-        resolve_learning_rate(
-            {
-                "start": 1.0e-3,
-                "end": 1.0e-4,
-                "iterations": 10,
-                "warmup": 2,
-            }
-        )
-    with pytest.raises(TypeError, match="schedule mapping"):
-        resolve_learning_rate(1.0e-4)
-    with pytest.raises(ValueError, match="positive or 'auto'"):
-        resolve_learning_rate({"start": 1.0e-3, "end": 1.0e-4, "iterations": True})

@@ -28,7 +28,7 @@ class _Opacity:
 
 def _model():
     return StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, 9),
+        shell_height_bounds_Mm=(1.5, -0.1),
         scene_geometry_config={
             "solar_radius_m": 695_700_000.0,
             "scene_basis": torch.eye(3),
@@ -45,7 +45,7 @@ def _model():
 
 def _time_model():
     return StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, 9),
+        shell_height_bounds_Mm=(1.5, -0.1),
         time_dependent=True,
         time_coordinate_center_hours=12.0,
         time_coordinate_scale_hours=12.0,
@@ -157,13 +157,132 @@ def test_magnetic_divergence_uses_cartesian_float32_state_and_backpropagates():
         },
         vector_basis_matches_spatial_coordinates=True,
     )
-    height = model.depth_to_height(q)
+    height = torch.linspace(1.0e6, 0.0, q.numel())
     result = _volume(module, model, _Opacity(), coords, height, return_state=True)
     assert torch.isfinite(result.losses["magnetic_divergence"])
     assert result.state.position_m.dtype == torch.float32
     result.losses["magnetic_divergence"].backward()
     assert any(
         p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()
+    )
+
+
+@pytest.mark.parametrize("equation", ["magnetic_current_free", "magnetic_force_free"])
+def test_magnetic_curl_constraints_backpropagate(equation):
+    model = _model()
+    coords = torch.tensor([[-0.2, 0.3, 0.0], [0.4, -0.1, 0.0]])
+    height = torch.tensor([8.0e5, 0.0])
+    module = MagnetofluidConstraints(
+        {equation: {"enabled": True}},
+        vector_basis_matches_spatial_coordinates=True,
+    )
+
+    result = _volume(module, model, _Opacity(), coords, height, return_state=True)
+    loss = result.losses[equation]
+
+    assert torch.isfinite(loss)
+    assert "magnetic" in result.state.primitive_derivatives.slices
+    loss.backward()
+    assert any(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in model.parameters()
+    )
+
+
+@pytest.mark.parametrize("transverse_field", [0.0, 1.0])
+def test_force_free_allows_parallel_current_but_penalizes_lorentz_force(transverse_field):
+    class HelicalField(torch.nn.Module):
+        solar_radius_m = 1.0
+
+        def __init__(self):
+            super().__init__()
+            self.amplitude = torch.nn.Parameter(torch.tensor(2.0))
+
+        def evaluate_position_rsun(self, position_rsun, time_hours=None):
+            z = position_rsun[:, 2]
+            zero = z * 0.0
+            # curl B = (-A cos z, -A sin z, 0), parallel to B when Bz=0.
+            return {
+                "temperature": zero + 5000.0,
+                "gas_pressure": zero + 1.0,
+                "magnetic_field": torch.stack((
+                    self.amplitude * z.cos(), self.amplitude * z.sin(),
+                    zero + transverse_field,
+                ), dim=-1),
+                "velocity_field": torch.stack((zero, zero, zero), dim=-1),
+            }
+
+    model = HelicalField()
+    constraints = MagnetofluidConstraints(
+        {name: {"enabled": True} for name in (
+            "magnetic_force_free", "magnetic_current_free", "magnetic_divergence"
+        )},
+        normalization={"length_m": 1.0},
+        vector_basis_matches_spatial_coordinates=True,
+    )
+    result = constraints.volume(
+        model, torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.7]]),
+        torch.zeros(2, 1), height_group_shape=(1, 2),
+    )
+    assert result.losses["magnetic_divergence"] == 0.0
+    assert result.losses["magnetic_current_free"] > 0.0
+    loss = result.losses["magnetic_force_free"]
+    if transverse_field == 0.0:
+        torch.testing.assert_close(loss, torch.zeros(()), atol=1e-12, rtol=0)
+    else:
+        assert loss > 0.0
+    loss.backward()
+    assert torch.isfinite(model.amplitude.grad)
+
+
+def test_radial_magnetic_field_penalizes_only_the_tangential_component():
+    class TiltedField(torch.nn.Module):
+        solar_radius_m = 1.0
+
+        def __init__(self):
+            super().__init__()
+            self.tangential = torch.nn.Parameter(torch.tensor(3.0))
+
+        def evaluate_position_rsun(self, position_rsun, time_hours=None):
+            x = position_rsun[:, 0]
+            zero = x * 0.0
+            # At (1, 0, 0), r_hat = (1, 0, 0): Bx is purely radial and
+            # self.tangential is purely tangential.
+            return {
+                "temperature": zero + 5000.0,
+                "gas_pressure": zero + 1.0,
+                "magnetic_field": torch.stack(
+                    (zero + 5.0, zero + self.tangential, zero), dim=-1
+                ),
+                "velocity_field": torch.stack((zero, zero, zero), dim=-1),
+            }
+
+    model = TiltedField()
+    constraints = MagnetofluidConstraints(
+        {"radial_magnetic_field": {"enabled": True}},
+        normalization={"length_m": 1.0},
+        vector_basis_matches_spatial_coordinates=True,
+    )
+    position_m = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    time_hours = torch.zeros(2, 1)
+    result = constraints.volume(
+        model, position_m, time_hours, height_group_shape=(1, 2),
+    )
+    loss = result.losses["radial_magnetic_field"]
+    assert loss > 0.0
+    loss.backward()
+    assert torch.isfinite(model.tangential.grad) and model.tangential.grad != 0.0
+
+    with torch.no_grad():
+        model.tangential.zero_()
+    radial_only = constraints.volume(
+        model, position_m, time_hours, height_group_shape=(1, 2),
+    )
+    torch.testing.assert_close(
+        radial_only.losses["radial_magnetic_field"],
+        torch.zeros(()),
+        atol=1e-12,
+        rtol=0,
     )
 
 
@@ -174,7 +293,7 @@ def test_magnetic_normalization_floor_bounds_near_null_gradients():
         model.network.out_layer.weight[4:7].mul_(1.0e-8)
         model.network.out_layer.bias[4:7].mul_(1.0e-8)
     coords = torch.tensor([[-0.2, 0.3, 0.0], [0.4, -0.1, 0.0]])
-    height = model.depth_to_height(torch.tensor([-4.0, 0.0]))
+    height = torch.tensor([8.0e5, 0.0])
     constraints = MagnetofluidConstraints(
         {"magnetic_divergence": {"enabled": True}},
         vector_basis_matches_spatial_coordinates=True,
@@ -201,7 +320,7 @@ def test_magnetic_normalization_floor_bounds_near_null_gradients():
 def test_hydrostatic_equilibrium_uses_only_pressure_density_and_gravity():
     model = _model()
     coords = torch.tensor([[-0.2, 0.3, 0.0], [0.4, -0.1, 0.0]])
-    height = model.depth_to_height(torch.tensor([-4.0, 0.0]))
+    height = torch.tensor([8.0e5, 0.0])
     module = MagnetofluidConstraints(
         {"hydrostatic_equilibrium": {"enabled": True, "weight": 1.0e-5}},
         gravity_m_per_s2=275.0,
@@ -222,7 +341,7 @@ def test_hydrostatic_equilibrium_uses_only_pressure_density_and_gravity():
 def test_magnetohydrostatic_equilibrium_combines_pressure_gravity_and_lorentz_force():
     model = _model()
     coords = torch.tensor([[-0.2, 0.3, 0.0], [0.4, -0.1, 0.0]])
-    height = model.depth_to_height(torch.tensor([-4.0, 0.0]))
+    height = torch.tensor([8.0e5, 0.0])
     module = MagnetofluidConstraints(
         {
             "magnetohydrostatic_equilibrium": {
@@ -245,6 +364,67 @@ def test_magnetohydrostatic_equilibrium_combines_pressure_gravity_and_lorentz_fo
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in model.parameters()
     )
+
+
+@pytest.mark.parametrize("equation", ["hydrostatic_equilibrium", "magnetohydrostatic_equilibrium"])
+@pytest.mark.parametrize("fixed_scale", [None, 1.0e4])
+def test_force_balance_normalization_matches_si_residual_and_gradients(equation, fixed_scale):
+    model = _model()
+    coords = torch.tensor([[-.2, .3, 0.], [.4, -.1, 0.]])
+    height = torch.tensor([8e5, 0.])
+    normalization = {} if fixed_scale is None else {
+        "force_balance_pressure_scale_pa": fixed_scale,
+    }
+    module = MagnetofluidConstraints(
+        {equation: {"enabled": True}},
+        vector_basis_matches_spatial_coordinates=True,
+        normalization=normalization,
+        gravity_m_per_s2=275.0,
+    )
+    result = _volume(module, model, _Opacity(), coords, height, return_state=True)
+    state = result.state
+    gravity = module.gravity_m_per_s2 * (
+        model.solar_radius_m / state.position_m.norm(dim=-1)
+    ).square()
+    grad_p = state.derivative("pressure")[:, 0]
+    if equation == "hydrostatic_equilibrium":
+        force = (grad_p * state.radial_unit).sum(-1) + state.mass_density * gravity
+    else:
+        lorentz = torch.linalg.cross(
+            _curl(state.derivative("magnetic") * 1e-4),
+            state.magnetic_field_gauss * 1e-4,
+            dim=-1,
+        ) / magnetofluid.VACUUM_PERMEABILITY_H_PER_M
+        force = grad_p + (state.mass_density * gravity)[:, None] * state.radial_unit - lorentz
+    if fixed_scale is None:
+        scale = state.gas_pressure + state.mass_density * gravity * 1e6
+        if equation == "magnetohydrostatic_equilibrium":
+            scale = scale + (
+                state.magnetic_field_gauss * 1e-4
+            ).square().sum(dim=-1) / magnetofluid.VACUUM_PERMEABILITY_H_PER_M
+        scale = scale.detach()
+    else:
+        scale = force.new_tensor(fixed_scale)
+    if force.ndim == 2:
+        scale = scale.reshape(-1, 1)
+    expected = (force * 1e6 / scale).square().mean()
+    actual = result.losses[equation]
+    torch.testing.assert_close(actual, expected)
+    parameters = tuple(model.parameters())
+    actual_grad = torch.autograd.grad(actual, parameters, retain_graph=True, allow_unused=True)
+    expected_grad = torch.autograd.grad(expected, parameters, allow_unused=True)
+    for left, right in zip(actual_grad, expected_grad):
+        if left is None or right is None:
+            assert left is right
+        else:
+            torch.testing.assert_close(left, right)
+    assert any(g is not None and g.abs().sum() > 0 for g in actual_grad)
+
+
+@pytest.mark.parametrize("scale", [0., -1., float("inf"), float("nan")])
+def test_fixed_force_balance_scale_requires_finite_positive_pressure(scale):
+    with pytest.raises(ValueError, match="finite and positive"):
+        PhysicsNormalization(force_balance_pressure_scale_pa=scale)
 
 
 def test_upper_boundary_pressure_prior_matches_reference_initially_and_backpropagates():
@@ -276,6 +456,8 @@ def test_normalization_accepts_physical_time_scale_and_rejects_unknown_keys():
         "time_s": 3_600.0,
         "magnetic_field_floor_gauss": 1.0,
         "velocity_scale_m_per_s": 1_000.0,
+        "magnetic_field_scale_gauss": None,
+        "force_balance_pressure_scale_pa": None,
     }
     assert PhysicsNormalization.from_config({"time_s": 60.0}).time_s == 60.0
     assert PhysicsNormalization().transport_time_s == pytest.approx(
@@ -283,6 +465,8 @@ def test_normalization_accepts_physical_time_scale_and_rejects_unknown_keys():
     )
     with pytest.raises(TypeError, match="Unknown physics normalization"):
         PhysicsNormalization.from_config({"cadence_s": 1000.0})
+    with pytest.raises(TypeError, match="Unknown physics normalization"):
+        PhysicsNormalization.from_config({"force_balance_reference_field_gauss": 0.1})
     with pytest.raises(TypeError, match="must be numeric"):
         PhysicsNormalization(time_s=True)
     with pytest.raises(ValueError, match="finite and positive"):
@@ -398,7 +582,8 @@ def test_relative_scale_is_detached_when_residual_uses_the_same_field():
     torch.testing.assert_close(gradient, torch.tensor(2_500.0, dtype=torch.float64))
 
 
-def test_height_group_robust_loss_averages_components_and_is_quadratic_near_zero():
+@pytest.mark.parametrize("amplitude", [1.0e-3, 1.0, 100.0])
+def test_height_group_mse_averages_components_and_is_quadratic(amplitude):
     state = PhysicsState(
         position_m=torch.zeros(1, 3),
         gas_pressure=torch.ones(1),
@@ -409,12 +594,14 @@ def test_height_group_robust_loss_averages_components_and_is_quadratic_near_zero
         radial_unit=torch.zeros(1, 3),
         height_group_shape=(1, 1),
     )
-    epsilon = torch.tensor(1.0e-3, dtype=torch.float64)
+    epsilon = torch.tensor(amplitude, dtype=torch.float64, requires_grad=True)
     grouped_residual = torch.stack(
         (epsilon, torch.zeros_like(epsilon), torch.zeros_like(epsilon))
     ).reshape(1, 1, 3)
 
-    loss = state.height_group_robust_loss(grouped_residual)
+    loss = state.height_group_mse(grouped_residual)
+    loss.backward()
+    torch.testing.assert_close(epsilon.grad, 2 * epsilon.detach() / 3)
 
     torch.testing.assert_close(
         loss,
@@ -448,7 +635,7 @@ def test_gravity_must_be_finite_positive_and_numeric_at_physics_boundary():
 def test_all_dynamic_equations_share_one_base_output_jacobian(monkeypatch):
     model = _time_model()
     coords = torch.tensor([[-0.2, 0.3, 1.0], [0.4, -0.1, 20.0]])
-    height = model.depth_to_height(torch.tensor([-4.0, 0.0]))
+    height = torch.tensor([8.0e5, 0.0])
     module = MagnetofluidConstraints(
         {
             "momentum": {"enabled": True},
@@ -510,7 +697,7 @@ def test_temporal_equations_reject_static_atmosphere():
             model,
             _Opacity(),
             torch.tensor([[0.0, 0.0, 0.0]]),
-            model.depth_to_height(torch.tensor([-2.0])),
+            torch.tensor([3.0e5]),
         )
 
 
@@ -698,7 +885,6 @@ def test_induction_and_continuity_match_an_exact_expanding_flow_solution():
 
 def test_upper_domain_and_boundary_losses_backpropagate():
     model = StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, 7),
         shell_height_bounds_Mm=(3.0, -0.1),
         line_formation_height_bounds_Mm=(1.5, -0.1),
         upper_atmosphere_config={
@@ -730,7 +916,10 @@ def test_upper_domain_and_boundary_losses_backpropagate():
                 "enabled": True,
                 "weight": 1e-5,
             },
-            "upper_boundary_current_free": {"enabled": True, "weight": 1e-3},
+            "upper_boundary_tangential_magnetic_neumann": {
+                "enabled": True,
+                "weight": 1e-3,
+            },
             "upper_boundary_gas_pressure_prior": {
                 "enabled": True,
                 "weight": 1e-4,
@@ -885,9 +1074,7 @@ def test_upper_boundary_open_velocity_penalizes_normal_velocity_gradient():
         normalization={"length_m": 2.0, "velocity_scale_m_per_s": 4.0},
         vector_basis_matches_spatial_coordinates=True,
     )
-    position_m = torch.tensor(
-        [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]
-    )
+    position_m = torch.tensor([[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
     time_hours = torch.zeros(3, 1)
 
     constant = RadialLinearVelocityAtmosphere(0.0)
@@ -914,7 +1101,7 @@ def test_upper_boundary_open_velocity_penalizes_normal_velocity_gradient():
     assert varying.radial_slope_per_s.grad > 0.0
 
 
-def test_side_boundary_applies_open_velocity_and_current_free_losses():
+def test_side_boundary_applies_open_velocity_and_magnetic_neumann_losses():
     class LinearSideAtmosphere(torch.nn.Module):
         solar_radius_m = 10.0
 
@@ -941,7 +1128,7 @@ def test_side_boundary_applies_open_velocity_and_current_free_losses():
     constraints = MagnetofluidConstraints(
         {
             "side_boundary_open_velocity": {"enabled": True},
-            "side_boundary_current_free": {"enabled": True},
+            "side_boundary_tangential_magnetic_neumann": {"enabled": True},
         },
         normalization={
             "length_m": 2.0,
@@ -963,12 +1150,123 @@ def test_side_boundary_applies_open_velocity_and_current_free_losses():
         position_m,
         time_hours,
         normal,
-        height_group_shape=(1, 4),
     )
 
     assert set(result.losses) == set(SIDE_BOUNDARY_EQUATIONS)
     assert result.losses["side_boundary_open_velocity"] > 0.0
-    assert result.losses["side_boundary_current_free"] > 0.0
+    assert result.losses["side_boundary_tangential_magnetic_neumann"] > 0.0
     sum(result.losses.values()).backward()
     assert torch.isfinite(model.velocity_slope.grad)
     assert torch.isfinite(model.magnetic_slope.grad)
+
+
+def test_magnetic_neumann_boundary_leaves_normal_field_derivative_free():
+    class NormalLinearMagneticAtmosphere(torch.nn.Module):
+        solar_radius_m = 10.0
+
+        def __init__(self):
+            super().__init__()
+            self.slope = torch.nn.Parameter(torch.tensor(3.0))
+
+        def evaluate_position_rsun(self, position_rsun, time_hours=None):
+            del time_hours
+            position_m = position_rsun * self.solar_radius_m
+            x = position_m[:, 0]
+            zero = 0.0 * x
+            return {
+                "temperature": torch.full_like(x, 5_000.0),
+                "gas_pressure": torch.ones_like(x),
+                "magnetic_field": torch.stack((self.slope * x, zero, zero), dim=-1),
+                "velocity_field": torch.stack((zero, zero, zero), dim=-1),
+            }
+
+    model = NormalLinearMagneticAtmosphere()
+    constraints = MagnetofluidConstraints(
+        {
+            "side_boundary_tangential_magnetic_neumann": {"enabled": True},
+        },
+        vector_basis_matches_spatial_coordinates=True,
+    )
+    result = constraints.side_boundary(
+        model,
+        torch.tensor([[10.0, 0.0, 0.0], [10.0, 1.0, 0.0]]),
+        torch.zeros(2, 1),
+        torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+    )
+    torch.testing.assert_close(
+        result.losses["side_boundary_tangential_magnetic_neumann"],
+        torch.zeros(()),
+    )
+
+
+@pytest.mark.parametrize('equation', ['magnetic_divergence', 'magnetic_current_free'])
+def test_cached_magnetic_normalization_controls_loss_without_denominator_gradients(equation):
+    model = _model()
+    coords = torch.tensor([[-.2, .3, 0.], [.4, -.1, 0.]])
+    height = torch.tensor([8e5, 0.])
+    constraints = MagnetofluidConstraints({equation: {'enabled': True}},
+                                         vector_basis_matches_spatial_coordinates=True)
+    scale = torch.tensor([10., 20.], requires_grad=True)
+    result = _volume(constraints, model, _Opacity(), coords, height, return_state=True,
+                     magnetic_normalization_gauss=scale)
+    derivative = result.state.derivative('magnetic')
+    residual = magnetofluid._divergence(derivative) if equation == 'magnetic_divergence' else _curl(derivative)
+    denominator = (scale.detach().square() + 1).sqrt()
+    expected = (residual.reshape(2, -1) * 1e6 / denominator[:, None]).square().mean()
+    torch.testing.assert_close(result.losses[equation], expected)
+    result.losses[equation].backward()
+    assert scale.grad is None
+    assert any(p.grad is not None for p in model.parameters())
+
+
+def test_fixed_divergence_normalization_matches_physical_residual_and_scale():
+    model = _model()
+    coords = torch.tensor([[-.2, .3, 0.], [.4, -.1, 0.]])
+    height = torch.tensor([8e5, 0.])
+    losses = []
+    for scale in (100., 200.):
+        constraints = MagnetofluidConstraints(
+            {"magnetic_divergence": {"enabled": True}},
+            vector_basis_matches_spatial_coordinates=True,
+            normalization={"magnetic_field_scale_gauss": scale},
+        )
+        result = _volume(constraints, model, _Opacity(), coords, height, return_state=True)
+        divergence = magnetofluid._divergence(result.state.derivative("magnetic"))
+        expected = (divergence * 1e6 / scale).square().mean()
+        loss = result.losses["magnetic_divergence"]
+        torch.testing.assert_close(loss, expected)
+        losses.append(loss)
+    torch.testing.assert_close(losses[0], 4 * losses[1])
+    losses[0].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
+
+
+@pytest.mark.parametrize("scale", [0., -1., float("inf"), float("nan")])
+def test_fixed_magnetic_scale_must_be_finite_and_positive(scale):
+    with pytest.raises(ValueError, match="finite and positive"):
+        PhysicsNormalization(magnetic_field_scale_gauss=scale)
+
+
+@pytest.mark.parametrize('equation', [
+    'hydrostatic_equilibrium', 'magnetohydrostatic_equilibrium', 'momentum',
+    'magnetic_divergence', 'magnetic_current_free', 'magnetic_force_free',
+    'radial_magnetic_energy_gradient', 'radial_magnetic_field',
+    'induction', 'continuity', 'adiabatic_pressure',
+])
+def test_equation_diagnostics_reconstruct_training_loss(equation):
+    model = _time_model()
+    constraints = MagnetofluidConstraints(
+        {equation: {'enabled': True, 'weight': .003}},
+        gravity_m_per_s2=275., vector_basis_matches_spatial_coordinates=True,
+        normalization={'magnetic_field_scale_gauss': 100.},
+    )
+    coords = torch.tensor([[-.2, .3, 12.], [.4, -.1, 12.], [.2, .1, 12.], [0., 0., 12.]])
+    height = torch.tensor([8e5, 8e5, 0., 0.])
+    result = _volume(constraints, model, _Opacity(), coords, height,
+                     height_group_shape=(2, 2), create_graph=False, return_diagnostics=True)
+    assert set(result.equation_diagnostics) == {equation}
+    data = result.equation_diagnostics[equation]
+    torch.testing.assert_close(sum(data['terms'].values()), data['residual'])
+    torch.testing.assert_close(sum(data['normalized_terms'].values()), data['normalized_residual'])
+    torch.testing.assert_close(data['normalized_residual'].square().mean(), result.losses[equation])
+    assert not data['normalized_residual'].requires_grad

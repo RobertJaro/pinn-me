@@ -37,6 +37,7 @@ class AtmosphereRenderer:
         self.evaluator = evaluator
         self.atmosphere_plots = AtmospherePlotter()
         self.stokes_plots = StokesPlotter()
+        self.media_groups: dict[str, list[str]] = {}
 
     @staticmethod
     def _log_figure(trainer, key: str, figure: Figure, path: Path) -> None:
@@ -64,6 +65,7 @@ class AtmosphereRenderer:
         self.output_directory.mkdir(parents=True, exist_ok=True)
         path = self.output_directory / filename
         figure.savefig(path, dpi=self.dpi, facecolor="white")
+        self.media_groups.setdefault(key, []).append(str(path))
         self._log_figure(trainer, key, figure, path)
         figure.clear()
         return path
@@ -148,7 +150,7 @@ class AtmosphereRenderer:
             self._save_figure(
                 trainer,
                 self.atmosphere_plots.tau_figure(ray_evaluated, label),
-                f"{label}_tau500.png",
+                f"{label}_tau.png",
                 "Optical depth",
             )
         )
@@ -232,6 +234,7 @@ class AtmosphereRenderer:
         *,
         rows: np.ndarray,
         columns: np.ndarray,
+        objective_config=None,
         exclusion_windows_angstrom=(),
         line_centers_angstrom=(),
     ) -> Path:
@@ -246,11 +249,43 @@ class AtmosphereRenderer:
                 label,
                 rows=rows,
                 columns=columns,
+                objective_config=objective_config,
                 exclusion_windows_angstrom=exclusion_windows_angstrom,
                 line_centers_angstrom=line_centers_angstrom,
             ),
             f"{label}_stokes_validation.png",
             "Stokes comparison",
+        )
+
+    def render_disambiguation_phase(
+        self,
+        trainer,
+        outputs,
+        raster,
+        label: str,
+        *,
+        rows: np.ndarray,
+        columns: np.ndarray,
+        step: int,
+        cold_steps: int,
+        handoff_step: int,
+    ) -> Path:
+        """Render and save the validation phase map used by Stokes fitting."""
+
+        return self._save_figure(
+            trainer,
+            self.stokes_plots.phase_figure(
+                outputs,
+                raster,
+                label,
+                rows=rows,
+                columns=columns,
+                step=step,
+                cold_steps=cold_steps,
+                handoff_step=handoff_step,
+            ),
+            f"{label}_disambiguation_phase.png",
+            "Disambiguation phase",
         )
 
 

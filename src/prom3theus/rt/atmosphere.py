@@ -13,12 +13,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+from numbers import Real
 from typing import Mapping
 
 import torch
 from torch import nn
 
-from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN, MLPModel, SPEED_OF_LIGHT
+from prom3theus.core import (
+    ATOMIC_MASS_UNIT,
+    ELECTRON_VOLT,
+    H_PLANCK,
+    K_BOLTZMANN,
+    M_ELECTRON,
+    MLPModel,
+    SIRENModel,
+    SPEED_OF_LIGHT,
+)
 from prom3theus.resources import verify_manifest_resource
 from .atomic import AtomicDatabase
 from .plasma import SolarPlasmaTable
@@ -28,11 +38,83 @@ from .geometry import (
 )
 
 
+# Hydrogen ionization energy expressed as a temperature, for the partial
+# ionization adiabatic gradient below.
+HYDROGEN_IONIZATION_K = 13.598_434_599_702 * ELECTRON_VOLT / K_BOLTZMANN
+
+# Height step of the adiabatic interior continuation.  Two kilometres resolves
+# the sub-photospheric adiabat far past convergence while keeping the one-time
+# construction of even a several-megametre shell inexpensive.
+INTERIOR_CONTINUATION_STEP_M = 2.0e3
+
+
 def _open_text(resource):
     return (
         resource.open("r", encoding="utf-8")
         if hasattr(resource, "open")
         else open(resource, encoding="utf-8")
+    )
+
+
+def _hydrogen_ionization_fraction(
+    thermodynamic_eos: SolarPlasmaTable,
+    temperature: torch.Tensor,
+    gas_pressure: torch.Tensor,
+) -> torch.Tensor:
+    """Return the LTE hydrogen ionization degree.
+
+    Saha, closed with the hydrogen nucleus density from the shared EoS mass
+    density.  Inside the STiC table this reproduces the tabulated electron
+    density to better than one percent, so it is not a competing ionization
+    balance: it is that same LTE physics continued past the table's 10 kK
+    ceiling.  Reading the runtime electron density instead would be wrong
+    exactly where the interior continuation needs it, because above 10 kK the
+    EoS blends toward CHIANTI coronal equilibrium -- right for the corona, and
+    several-fold too neutral for a dense convective interior, which would
+    leave the adiabat far too steep.
+
+    That ceiling cannot be lifted by regenerating the table.  It is set by the
+    STiC/CHIANTI charge bridge, not by the continuum package: at the table's
+    thin, hot corner LTE is already fully ionized while coronal equilibrium is
+    not, so the bridge's monotone logit margin peaks at exactly 10 kK and turns
+    negative by 12.6 kK.  This closure is therefore permanent, not a stopgap.
+    """
+
+    mass_density = thermodynamic_eos.mass_density(temperature, gas_pressure)
+    hydrogen_density = mass_density / (
+        thermodynamic_eos.eos.mass_u_per_h_nucleus * ATOMIC_MASS_UNIT
+    )
+    # Saha with the ground-state partition functions U(H II)/U(H I) = 1/2
+    # cancelling the ionized-state spin degeneracy of two.
+    equilibrium = (
+        (2.0 * math.pi * M_ELECTRON * K_BOLTZMANN / H_PLANCK**2) * temperature
+    ).pow(1.5) * torch.exp(-HYDROGEN_IONIZATION_K / temperature)
+    ratio = equilibrium / hydrogen_density
+    return 0.5 * (torch.sqrt(ratio.square() + 4.0 * ratio) - ratio)
+
+
+def _adiabatic_gradient(
+    thermodynamic_eos: SolarPlasmaTable,
+    temperature: torch.Tensor,
+    gas_pressure: torch.Tensor,
+) -> torch.Tensor:
+    """Return ``dlnT/dlnP`` along an adiabat for a partly ionized hydrogen gas.
+
+    This is the Kippenhahn & Weigert result: latent heat of ionization flattens
+    the adiabat wherever hydrogen is partly ionized, and the expression returns
+    to the ideal ``2/5`` where the gas is either neutral or fully ionized.
+    Assuming the ideal ``2/5`` instead would make the continuation roughly
+    twice too steep through the hydrogen ionization zone, which is exactly the
+    region a sub-photospheric shell floor reaches.
+    """
+
+    fraction = _hydrogen_ionization_fraction(
+        thermodynamic_eos, temperature, gas_pressure
+    )
+    neutral_ionized_product = fraction * (1.0 - fraction)
+    excitation = 2.5 + HYDROGEN_IONIZATION_K / temperature
+    return (2.0 + neutral_ionized_product * excitation) / (
+        5.0 + neutral_ionized_product * excitation.square()
     )
 
 
@@ -99,6 +181,7 @@ class RadialReferenceAtmosphere(nn.Module):
         *,
         upper_atmosphere_config: Mapping | None = None,
         maximum_height_m: float | None = None,
+        minimum_height_m: float | None = None,
         solar_radius_m: float | None = None,
         thermodynamic_eos: SolarPlasmaTable | None = None,
         atomic_database: AtomicDatabase | None = None,
@@ -396,6 +479,112 @@ class RadialReferenceAtmosphere(nn.Module):
                 "pressure": "hydrostatic integral using the hybrid solar EoS",
                 "microturbulence": "native FALC-top value held constant",
             }
+        self.lower_atmosphere_metadata = None
+        base_bottom_m = float(thermodynamic_height[0])
+        if minimum_height_m is not None and float(minimum_height_m) < base_bottom_m:
+            if solar_radius_m is None or thermodynamic_eos is None:
+                raise ValueError(
+                    "An adiabatic interior continuation requires the solar radius "
+                    "and thermodynamic EoS."
+                )
+            minimum_height_m = float(minimum_height_m)
+            if not math.isfinite(minimum_height_m):
+                raise ValueError("minimum_height_m must be finite.")
+            if minimum_height_m <= -float(solar_radius_m):
+                raise ValueError("minimum_height_m must stay above the solar centre.")
+            interval_count = max(
+                1,
+                math.ceil(
+                    (base_bottom_m - minimum_height_m) / INTERIOR_CONTINUATION_STEP_M
+                ),
+            )
+            interior_height = torch.linspace(
+                base_bottom_m,
+                minimum_height_m,
+                interval_count + 1,
+                dtype=height.dtype,
+            )
+            reference_gravity = thermodynamic_eos.reference_gravity_m_per_s2
+            solar_radius = float(solar_radius_m)
+            log_temperature = thermodynamic_logs[0, 0]
+            log_pressure = thermodynamic_logs[0, 1]
+            interior_logs = []
+
+            def interior_derivatives(log_t, log_p, gravity):
+                """Return ``(dlnT/dh, dlnP/dh)`` for a hydrostatic adiabat."""
+
+                temperature_k = torch.exp(log_t)[None]
+                pressure_pa = torch.exp(log_p)[None]
+                mean_particle_mass_u = thermodynamic_eos.mean_molecular_weight(
+                    temperature_k, pressure_pa
+                )[0]
+                pressure_slope = -(
+                    mean_particle_mass_u
+                    * ATOMIC_MASS_UNIT
+                    * gravity
+                    / (K_BOLTZMANN * temperature_k[0])
+                )
+                gradient = _adiabatic_gradient(
+                    thermodynamic_eos, temperature_k, pressure_pa
+                )[0]
+                return gradient * pressure_slope, pressure_slope
+
+            # Midpoint marching, matching the hydrostatic upper extension: the
+            # gradient and mean particle mass both vary strongly through the
+            # hydrogen ionization zone, so a single endpoint evaluation per
+            # step would bias the whole stratification.
+            for index in range(interval_count):
+                step_m = interior_height[index + 1] - interior_height[index]
+                midpoint_height = 0.5 * (
+                    interior_height[index] + interior_height[index + 1]
+                )
+                gravity = (
+                    reference_gravity
+                    * (solar_radius / (solar_radius + float(midpoint_height))) ** 2
+                )
+                predicted_t, predicted_p = interior_derivatives(
+                    log_temperature, log_pressure, gravity
+                )
+                midpoint_t, midpoint_p = interior_derivatives(
+                    log_temperature + 0.5 * predicted_t * step_m,
+                    log_pressure + 0.5 * predicted_p * step_m,
+                    gravity,
+                )
+                log_temperature = log_temperature + midpoint_t * step_m
+                log_pressure = log_pressure + midpoint_p * step_m
+                interior_logs.append(
+                    torch.stack(
+                        (log_temperature, log_pressure, thermodynamic_logs[0, 2])
+                    )
+                )
+            # Built from the top down, but the stored table ascends in height.
+            interior_logs = torch.stack(interior_logs).flip(0)
+            interior_height = interior_height[1:].flip(0)
+            thermodynamic_height = torch.cat((interior_height, thermodynamic_height))
+            thermodynamic_logs = torch.cat((interior_logs, thermodynamic_logs))
+            self.lower_atmosphere_metadata = {
+                "type": "adiabatic_interior",
+                "native_atmosphere_bottom_m": base_bottom_m,
+                "native_atmosphere_bottom_temperature_k": float(
+                    torch.exp(thermodynamic_logs[interval_count, 0])
+                ),
+                "minimum_height_m": minimum_height_m,
+                "height_step_m": INTERIOR_CONTINUATION_STEP_M,
+                "interval_count": interval_count,
+                "temperature": (
+                    "adiabatic dlnT/dlnP for a partly ionized hydrogen gas "
+                    "(Kippenhahn & Weigert), with the LTE Saha ionization "
+                    "degree closed on the shared EoS mass density"
+                ),
+                "gravity": "spherical inverse-square",
+                "pressure": "hydrostatic integral using the hybrid solar EoS",
+                "microturbulence": "native FALC-bottom value held constant",
+                "limitation": (
+                    "a strict adiabat; the superadiabatic excess of the upper "
+                    "convection zone is not reproduced"
+                ),
+            }
+
         self.register_buffer("log_tau500", q)
         self.register_buffer("height_descending_m", height)
         self.register_buffer("height_ascending_m", height.flip(0))
@@ -450,6 +639,7 @@ class RadialReferenceAtmosphere(nn.Module):
             ),
             "falc_resource_sha256": self.falc_resource_sha256,
             "upper_atmosphere": self.upper_atmosphere_metadata,
+            "lower_atmosphere": self.lower_atmosphere_metadata,
         }
 
 
@@ -515,15 +705,93 @@ def _coordinate_pair(value, *, name: str, positive: bool) -> torch.Tensor:
     return tensor
 
 
+def _batched_vector_jacobian(
+    vector: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    create_graph: bool,
+) -> torch.Tensor:
+    """Differentiate one three-vector output independently at each point."""
+
+    if (
+        vector.shape != coordinates.shape
+        or coordinates.ndim != 2
+        or coordinates.shape[-1] != 3
+    ):
+        raise ValueError("Vector-potential differentiation requires [point, 3] tensors.")
+    if not vector.requires_grad:
+        return coordinates.new_zeros((coordinates.shape[0], 3, 3))
+    basis = torch.eye(3, dtype=vector.dtype, device=vector.device)
+    grad_outputs = basis[:, None, :].expand(3, coordinates.shape[0], 3)
+    jacobian = torch.autograd.grad(
+        vector,
+        coordinates,
+        grad_outputs=grad_outputs,
+        create_graph=create_graph,
+        retain_graph=create_graph,
+        allow_unused=True,
+        is_grads_batched=True,
+    )[0]
+    if jacobian is None:
+        return coordinates.new_zeros((coordinates.shape[0], 3, 3))
+    return jacobian.movedim(0, 1)
+
+
+def _scalar_gradient(
+    scalar: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    create_graph: bool,
+) -> torch.Tensor:
+    """Differentiate one scalar output independently at each point."""
+
+    if (
+        scalar.shape != coordinates.shape[:-1]
+        or coordinates.ndim != 2
+        or coordinates.shape[-1] != 3
+    ):
+        raise ValueError(
+            "Scalar-potential differentiation requires a [point] scalar and a "
+            "[point, 3] coordinate tensor."
+        )
+    if not scalar.requires_grad:
+        return coordinates.new_zeros((coordinates.shape[0], 3))
+    gradient = torch.autograd.grad(
+        scalar,
+        coordinates,
+        grad_outputs=torch.ones_like(scalar),
+        create_graph=create_graph,
+        retain_graph=create_graph,
+        allow_unused=True,
+    )[0]
+    if gradient is None:
+        return coordinates.new_zeros((coordinates.shape[0], 3))
+    return gradient
+
+
+def _curl_from_jacobian(jacobian: torch.Tensor) -> torch.Tensor:
+    """Return curl for a ``[..., vector component, coordinate]`` Jacobian."""
+
+    return torch.stack(
+        (
+            jacobian[..., 2, 1] - jacobian[..., 1, 2],
+            jacobian[..., 0, 2] - jacobian[..., 2, 0],
+            jacobian[..., 1, 0] - jacobian[..., 0, 1],
+        ),
+        dim=-1,
+    )
+
+
 @dataclass(frozen=True)
 class StratifiedAtmosphere:
-    """Physical atmosphere sampled on a common optical-depth grid.
+    """Physical atmosphere sampled at ordered points along a path.
 
     Parameters
     ----------
-    log_tau500:
-        One-dimensional ``log10(tau_500)`` grid, strictly increasing from the
-        top of the atmosphere to the bottom, shape ``[depth]``.
+    depth_coordinate:
+        Ordered labels along the path, shape ``[depth]``. Physical shell rays
+        use sample indices; only an explicit optical-depth transfer path gives
+        these labels the meaning ``log10(tau_500)``.
     temperature:
         Temperature in kelvin, shape ``[..., depth]``.
     velocity_field:
@@ -535,6 +803,10 @@ class StratifiedAtmosphere:
         single-view Stokes spectrum without additional dynamical physics.
     microturbulence:
         Microturbulent speed in m/s, shape ``[..., depth]``.
+    vector_potential:
+        Optional magnetic vector potential in gauss-metres, shape
+        ``[..., depth, 3]``. It is present when the atmosphere model uses the
+        vector-potential magnetic representation.
     magnetic_field:
         Magnetic vector in gauss and with shape ``[..., depth, 3]``. It is in
         the Heliographic Carrington Cartesian frame when spherical geometry is
@@ -547,31 +819,32 @@ class StratifiedAtmosphere:
         solved iteratively inside radiative transfer.
     """
 
-    log_tau500: torch.Tensor
+    depth_coordinate: torch.Tensor
     temperature: torch.Tensor
     velocity_field: torch.Tensor
     microturbulence: torch.Tensor
     magnetic_field: torch.Tensor
+    vector_potential: torch.Tensor | None = None
     gas_pressure: torch.Tensor | None = None
     geometric_height_m: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
-        if self.log_tau500.ndim != 1:
-            raise ValueError("log_tau500 must be one-dimensional.")
-        if self.log_tau500.numel() < 2:
-            raise ValueError("log_tau500 must contain at least two depth points.")
-        if self.log_tau500.dtype not in (torch.float32, torch.float64):
-            raise TypeError("log_tau500 must use float32 or float64.")
-        if not torch.isfinite(self.log_tau500).all() or not torch.all(
-            self.log_tau500[1:] > self.log_tau500[:-1]
+        if self.depth_coordinate.ndim != 1:
+            raise ValueError("depth_coordinate must be one-dimensional.")
+        if self.depth_coordinate.numel() < 2:
+            raise ValueError("depth_coordinate must contain at least two depth points.")
+        if self.depth_coordinate.dtype not in (torch.float32, torch.float64):
+            raise TypeError("depth_coordinate must use float32 or float64.")
+        if not torch.isfinite(self.depth_coordinate).all() or not torch.all(
+            self.depth_coordinate[1:] > self.depth_coordinate[:-1]
         ):
             raise ValueError(
-                "log_tau500 must be finite and strictly increase from top to bottom."
+                "depth_coordinate must be finite and strictly increase from top to bottom."
             )
         if self.temperature.dtype not in (torch.float32, torch.float64):
             raise TypeError("Atmospheric fields must use float32 or float64.")
 
-        depth = self.log_tau500.numel()
+        depth = self.depth_coordinate.numel()
         scalar_fields = {
             "temperature": self.temperature,
             "microturbulence": self.microturbulence,
@@ -618,18 +891,32 @@ class StratifiedAtmosphere:
             )
         if self.magnetic_field.dtype != self.temperature.dtype:
             raise TypeError("magnetic_field and temperature must use the same dtype.")
-        if self.log_tau500.device != self.temperature.device:
+        if self.vector_potential is not None:
+            if self.vector_potential.shape != expected_vector_shape:
+                raise ValueError(
+                    "vector_potential must have shape [..., depth, 3]; "
+                    f"expected {expected_vector_shape}, got {tuple(self.vector_potential.shape)}."
+                )
+            if self.vector_potential.device != self.temperature.device:
+                raise ValueError(
+                    "vector_potential and temperature must be on the same device."
+                )
+            if self.vector_potential.dtype != self.temperature.dtype:
+                raise TypeError(
+                    "vector_potential and temperature must use the same dtype."
+                )
+        if self.depth_coordinate.device != self.temperature.device:
             raise ValueError(
-                "log_tau500 and atmospheric fields must be on the same device."
+                "depth_coordinate and atmospheric fields must be on the same device."
             )
-        if self.log_tau500.dtype != self.temperature.dtype:
+        if self.depth_coordinate.dtype != self.temperature.dtype:
             raise TypeError(
-                "log_tau500 and atmospheric fields must use the same dtype."
+                "depth_coordinate and atmospheric fields must use the same dtype."
             )
 
     @property
     def depth(self) -> int:
-        return int(self.log_tau500.numel())
+        return int(self.depth_coordinate.numel())
 
     @property
     def batch_shape(self) -> torch.Size:
@@ -643,21 +930,28 @@ class StratifiedAtmosphere:
 
 
 class StratifiedAtmosphereModel(nn.Module):
-    """Coordinate MLP producing a smooth stratified atmosphere.
+    """Coordinate network producing a smooth stratified atmosphere.
 
-    The MLP uses activation-aware variance-preserving random initialization.
+    The operational SIREN uses sinusoidal activations and canonical SIREN
+    initialization, with non-radial coordinate bandwidth tapered by radius.
     Thermodynamic readout rows start at zero so the initial state equals the
     radial reference; vector readout rows remain random.
     Positive thermodynamic variables use unbounded, reference-anchored linear
     residuals in natural-log space.  Finite-domain radiative-transfer tables
     validate their own inputs independently of this primary atmosphere model.
-    Magnetic vectors use a direct Cartesian decoder.
+    Training-side ``evaluate_position_rsun_normalized`` exposes the fixed
+    model-unit contract; the physical ``evaluate_position_*`` methods are
+    adapters for radiative transfer and external observations.
+    Magnetic vectors use either a direct Cartesian decoder or a Cartesian
+    vector-potential decoder. In the latter mode, the three magnetic readout
+    channels are an ``A`` field in G m and the exposed magnetic field is the
+    physical Cartesian curl ``B = curl(A)`` in G.
     Velocity components use a smooth arctangent bound with the configured
     local linear scale, preventing invalid relativistic Doppler factors while
     retaining nonzero gradients outside the ordinary photospheric range.
     """
 
-    output_names = (
+    _DIRECT_OUTPUT_NAMES = (
         "temperature",
         "v_x",
         "v_y",
@@ -668,21 +962,42 @@ class StratifiedAtmosphereModel(nn.Module):
         "microturbulence",
         "gas_pressure",
     )
+    _VECTOR_POTENTIAL_OUTPUT_NAMES = (
+        "temperature",
+        "v_x",
+        "v_y",
+        "v_z",
+        "a_x",
+        "a_y",
+        "a_z",
+        "microturbulence",
+        "gas_pressure",
+    )
+    # Same layout as the direct representation (b_x, b_y, b_z is read as the
+    # delta-field contribution), plus one trailing scalar-potential channel.
+    _POTENTIAL_DELTA_OUTPUT_NAMES = _DIRECT_OUTPUT_NAMES + ("psi",)
+    output_names = _DIRECT_OUTPUT_NAMES
+
     def __init__(
         self,
-        log_tau500,
+        *,
+        shell_height_bounds_Mm: tuple[float, float],
         temperature_log_scale: float = 0.2,
         velocity_scale_m_per_s: float = 1_000.0,
         velocity_max_m_per_s: float = 100_000.0,
         magnetic_scale_gauss: float = 100.0,
+        magnetic_representation: str = "direct",
+        magnetic_reference_height_megameter: float | None = None,
+        magnetic_potential_delta_cool_steps: int = 0,
+        magnetic_potential_delta_ramp_steps: int = 0,
         gas_pressure_log_scale: float = 1.0,
         spatial_coordinate_center_mm=(0.0, 0.0),
         spatial_coordinate_scale_mm=(1.0, 1.0),
         height_input_scale_m: float = 1_000_000.0,
+        uniform_spatial_scaling: bool = False,
         time_dependent: bool = False,
         time_coordinate_center_hours: float = 0.0,
         time_coordinate_scale_hours: float = 1.0,
-        shell_height_bounds_Mm: tuple[float, float] | None = None,
         line_formation_height_bounds_Mm: tuple[float, float] | None = None,
         tangent_margin_m: float = 1_000.0,
         reference_atmosphere_config: str | Mapping | None = "falc_82",
@@ -692,14 +1007,6 @@ class StratifiedAtmosphereModel(nn.Module):
         model_config: Mapping | None = None,
     ):
         super().__init__()
-        log_tau500 = _as_float_tensor(log_tau500, name="log_tau500")
-        if log_tau500.ndim != 1 or log_tau500.numel() < 2:
-            raise ValueError(
-                "log_tau500 must be a one-dimensional grid with at least two points."
-            )
-        if not torch.all(log_tau500[1:] > log_tau500[:-1]):
-            raise ValueError("log_tau500 must increase strictly from top to bottom.")
-
         scales = {
             "temperature_log_scale": temperature_log_scale,
             "velocity_scale_m_per_s": velocity_scale_m_per_s,
@@ -721,11 +1028,35 @@ class StratifiedAtmosphereModel(nn.Module):
                 "so every projected velocity is strictly subluminal."
             )
 
-        self.register_buffer("log_tau500", log_tau500)
         self.temperature_log_scale = float(temperature_log_scale)
         self.velocity_scale_m_per_s = float(velocity_scale_m_per_s)
         self.velocity_max_m_per_s = float(velocity_max_m_per_s)
         self.magnetic_scale_gauss = float(magnetic_scale_gauss)
+        if magnetic_representation not in {
+            "direct",
+            "vector_potential",
+            "potential_delta",
+        }:
+            raise ValueError(
+                "magnetic_representation must be 'direct', 'vector_potential', "
+                "or 'potential_delta'."
+            )
+        self.magnetic_representation = magnetic_representation
+        self.output_names = {
+            "vector_potential": self._VECTOR_POTENTIAL_OUTPUT_NAMES,
+            "potential_delta": self._POTENTIAL_DELTA_OUTPUT_NAMES,
+        }.get(magnetic_representation, self._DIRECT_OUTPUT_NAMES)
+        for name, value in (
+            ("magnetic_potential_delta_cool_steps", magnetic_potential_delta_cool_steps),
+            ("magnetic_potential_delta_ramp_steps", magnetic_potential_delta_ramp_steps),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer.")
+        self.magnetic_potential_delta_cool_steps = magnetic_potential_delta_cool_steps
+        self.magnetic_potential_delta_ramp_steps = magnetic_potential_delta_ramp_steps
+        self.register_buffer(
+            "current_step", torch.zeros((), dtype=torch.long), persistent=False
+        )
         self.gas_pressure_log_scale = float(gas_pressure_log_scale)
         self.microturbulence_log_scale = float(microturbulence_log_scale)
         self.register_buffer(
@@ -747,6 +1078,12 @@ class StratifiedAtmosphereModel(nn.Module):
         if not float(height_input_scale_m) > 0:
             raise ValueError("height_input_scale_m must be positive.")
         self.height_input_scale_m = float(height_input_scale_m)
+        self.vector_potential_scale_gauss_m = (
+            self.magnetic_scale_gauss * self.height_input_scale_m
+        )
+        if type(uniform_spatial_scaling) is not bool:
+            raise TypeError("uniform_spatial_scaling must be boolean")
+        self.uniform_spatial_scaling = uniform_spatial_scaling
         if type(time_dependent) is not bool:
             raise TypeError("time_dependent must be boolean.")
         self.time_dependent = time_dependent
@@ -765,10 +1102,6 @@ class StratifiedAtmosphereModel(nn.Module):
             )
         atomic_database = AtomicDatabase()
         self.thermodynamic_eos = SolarPlasmaTable(atomic_database)
-        self.reference_atmosphere = RadialReferenceAtmosphere(
-            reference_atmosphere_config,
-            atomic_database=atomic_database,
-        )
         tangent_margin_m = float(tangent_margin_m)
         if not math.isfinite(tangent_margin_m) or tangent_margin_m <= 0:
             raise ValueError("tangent_margin_m must be finite and positive.")
@@ -784,16 +1117,19 @@ class StratifiedAtmosphereModel(nn.Module):
         solar_radius_m = float(scene_config["solar_radius_m"])
         if not math.isfinite(solar_radius_m) or solar_radius_m <= 0:
             raise ValueError("scene_geometry_config.solar_radius_m must be positive.")
-        self.register_buffer("solar_radius_m", log_tau500.new_tensor(solar_radius_m))
+        self.register_buffer(
+            "solar_radius_m",
+            torch.tensor(solar_radius_m, dtype=torch.get_default_dtype()),
+        )
+        # Geometry used by the normalized training representation.  Operators
+        # such as div/curl differentiate with respect to x_hat = x / L0, so
+        # the only spherical conversion they need is the dimensionless ratio
+        # R_sun / L0.
+        self.register_buffer(
+            "solar_radius_model",
+            self.solar_radius_m / self.height_input_scale_m,
+        )
         self.solar_radius_value_m = solar_radius_m
-        reference_endpoint_heights = self.reference_atmosphere.height_from_log_tau(
-            self.log_tau500[[0, -1]]
-        )
-        reference_height_bounds_Mm = tuple(
-            float(height) / 1.0e6 for height in reference_endpoint_heights
-        )
-        if shell_height_bounds_Mm is None:
-            shell_height_bounds_Mm = reference_height_bounds_Mm
         shell_height_bounds_Mm = tuple(map(float, shell_height_bounds_Mm))
         if len(shell_height_bounds_Mm) != 2 or not (
             math.isfinite(shell_height_bounds_Mm[0])
@@ -804,14 +1140,28 @@ class StratifiedAtmosphereModel(nn.Module):
                 "shell_height_bounds_Mm must be [outer_height, inner_height] "
                 "as offsets from R_sun in Mm, with outer_height > inner_height."
             )
-        if self.log_tau500[0] < 0 < self.log_tau500[-1] and not (
-            shell_height_bounds_Mm[0] > 0 > shell_height_bounds_Mm[1]
+        self.shell_height_bounds_Mm = shell_height_bounds_Mm
+        if (
+            self.magnetic_representation in ("vector_potential", "potential_delta")
+            and magnetic_reference_height_megameter is not None
         ):
             raise ValueError(
-                "A shell whose depth grid crosses log_tau500=0 must have a positive "
-                "outer height and negative inner height."
+                "magnetic_reference_height_megameter is incompatible with the "
+                f"{self.magnetic_representation!r} magnetic representation."
             )
-        self.shell_height_bounds_Mm = shell_height_bounds_Mm
+        if magnetic_reference_height_megameter is not None:
+            if isinstance(magnetic_reference_height_megameter, bool) or not isinstance(
+                magnetic_reference_height_megameter, Real
+            ):
+                raise TypeError("magnetic_reference_height_megameter must be numeric or null")
+            magnetic_reference_height_megameter = float(magnetic_reference_height_megameter)
+            if not math.isfinite(magnetic_reference_height_megameter) or not (
+                shell_height_bounds_Mm[1]
+                <= magnetic_reference_height_megameter
+                <= shell_height_bounds_Mm[0]
+            ):
+                raise ValueError("magnetic_reference_height_megameter must be finite and lie within the shell")
+        self.magnetic_reference_height_megameter = magnetic_reference_height_megameter
         if line_formation_height_bounds_Mm is None:
             line_formation_height_bounds_Mm = shell_height_bounds_Mm
         line_formation_height_bounds_Mm = tuple(
@@ -831,41 +1181,70 @@ class StratifiedAtmosphereModel(nn.Module):
         self.extrapolation_enabled = (
             line_formation_height_bounds_Mm[0] < shell_height_bounds_Mm[0]
         )
-        if self.extrapolation_enabled:
-            if upper_atmosphere_config is None:
-                raise ValueError(
-                    "An extrapolated shell requires upper_atmosphere_config."
-                )
-            self.reference_atmosphere = RadialReferenceAtmosphere(
-                reference_atmosphere_config,
-                upper_atmosphere_config=upper_atmosphere_config,
-                maximum_height_m=shell_height_bounds_Mm[0] * 1.0e6,
-                solar_radius_m=solar_radius_m,
-                thermodynamic_eos=self.thermodynamic_eos,
-                atomic_database=atomic_database,
+        if self.extrapolation_enabled and upper_atmosphere_config is None:
+            raise ValueError("An extrapolated shell requires upper_atmosphere_config.")
+        if not self.extrapolation_enabled and upper_atmosphere_config is not None:
+            raise ValueError("upper_atmosphere_config requires an extrapolated shell.")
+        # The shell floor routinely sits below the FALC table, whose deepest
+        # node is only about 69 km under the surface.  Hand the floor to the
+        # reference so it continues adiabatically instead of extrapolating the
+        # tabulated gradient, which reaches absurd interior temperatures within
+        # a few hundred kilometres.
+        self.reference_atmosphere = RadialReferenceAtmosphere(
+            reference_atmosphere_config,
+            upper_atmosphere_config=upper_atmosphere_config,
+            maximum_height_m=(
+                shell_height_bounds_Mm[0] * 1.0e6
+                if self.extrapolation_enabled
+                else None
+            ),
+            minimum_height_m=shell_height_bounds_Mm[1] * 1.0e6,
+            solar_radius_m=solar_radius_m,
+            thermodynamic_eos=self.thermodynamic_eos,
+            atomic_database=atomic_database,
+        )
+        self.transition_region_top_m = (
+            float(upper_atmosphere_config["transition_region_top_megameter"]) * 1.0e6
+            if self.extrapolation_enabled
+            else None
+        )
+
+        # Fixed scales for the dimensionless training contract.  These are
+        # global reference scales, not local base-profile normalizers: actual
+        # learned T and P are divided by these constants, and the EOS/table
+        # adapter converts them to SI only while performing its query.
+        reference_scale_logs = self.reference_atmosphere.logs_at_height(
+            self.solar_radius_m.new_zeros(())
+        )
+        self.temperature_scale_k = float(torch.exp(reference_scale_logs[0]).item())
+        self.gas_pressure_scale_pa = float(torch.exp(reference_scale_logs[1]).item())
+        self.microturbulence_scale_m_per_s = float(
+            torch.exp(reference_scale_logs[2]).item()
+        )
+        with torch.no_grad():
+            scale_temperature = torch.as_tensor(
+                self.temperature_scale_k,
+                dtype=self.solar_radius_m.dtype,
             )
-            self.transition_region_top_m = (
-                float(upper_atmosphere_config["transition_region_top_megameter"])
-                * 1.0e6
+            scale_pressure = torch.as_tensor(
+                self.gas_pressure_scale_pa,
+                dtype=self.solar_radius_m.dtype,
             )
-        else:
-            if upper_atmosphere_config is not None:
-                raise ValueError(
-                    "upper_atmosphere_config requires an extrapolated shell."
-                )
-            self.transition_region_top_m = None
-        reference_outer_m, reference_inner_m = (
-            float(value) * 1.0e6 for value in reference_height_bounds_Mm
-        )
-        self.outer_height_scale = (
-            line_formation_height_bounds_Mm[0] * 1.0e6 / reference_outer_m
-        )
-        self.inner_height_scale = (
-            line_formation_height_bounds_Mm[1] * 1.0e6 / reference_inner_m
-        )
-        top_height = log_tau500.new_tensor(shell_height_bounds_Mm[0] * 1.0e6)
+            density_scale = self.thermodynamic_eos.mass_density(
+                scale_temperature,
+                scale_pressure,
+            )
+            electron_density_scale = self.thermodynamic_eos.electron_density(
+                scale_temperature,
+                scale_pressure,
+            )
+        self.density_scale_kg_m3 = float(density_scale.detach().item())
+        self.electron_density_scale_m3 = float(electron_density_scale.detach().item())
+        top_height = self.solar_radius_m.new_tensor(shell_height_bounds_Mm[0] * 1.0e6)
         top_reference_logs = self.reference_atmosphere.logs_at_height(top_height)
-        if top_reference_logs[1] <= math.log(torch.finfo(log_tau500.dtype).tiny):
+        if top_reference_logs[1] <= math.log(
+            torch.finfo(self.solar_radius_m.dtype).tiny
+        ):
             raise ValueError(
                 "The FALC pressure at the configured domain top is not "
                 "representable in the atmosphere dtype."
@@ -888,38 +1267,66 @@ class StratifiedAtmosphereModel(nn.Module):
         if not isinstance(model_config, Mapping):
             raise TypeError("model_config must be a mapping.")
         config = dict(model_config)
-        expected_model_fields = {
-            "type",
-            "dim",
-            "n_layers",
-            "activation",
-            "encoding_config",
-        }
-        if set(config) != expected_model_fields:
-            raise TypeError(
-                "model_config must contain exactly type, dim, n_layers, activation, "
-                "and encoding_config."
+        model_type = config.pop("type", None)
+        self.network_type = model_type
+        if model_type == "mlp":
+            expected_fields = {"dim", "n_layers", "activation", "encoding_config"}
+            if set(config) != expected_fields:
+                raise TypeError(
+                    "MLP model_config must contain exactly dim, n_layers, activation, "
+                    "and encoding_config."
+                )
+            activation = config["activation"]
+            if not isinstance(activation, str):
+                raise TypeError("model_config.activation must be a string.")
+            smooth_activations = {"silu", "gelu", "tanh"}
+            if activation not in smooth_activations:
+                raise ValueError(
+                    "The LTE atmosphere must use a smooth activation; choose one of "
+                    f"{sorted(smooth_activations)}, got {activation!r}."
+                )
+            self.network = MLPModel(
+                in_dim=len(self.network_input_names),
+                out_dim=len(self.output_names),
+                **config,
             )
-        model_type = config.pop("type")
-        if model_type != "mlp":
+            _initialize_smooth_coordinate_mlp(self.network, activation=activation)
+        elif model_type == "siren":
+            expected_fields = {
+                "dim",
+                "n_layers",
+                "first_omega_0",
+                "hidden_omega_0",
+                "radial_weighting_config",
+            }
+            if set(config) != expected_fields:
+                raise TypeError(
+                    "SIREN model_config must contain exactly dim, n_layers, "
+                    "first_omega_0, hidden_omega_0, and radial_weighting_config."
+                )
+            radial_weighting = config.pop("radial_weighting_config")
+            if radial_weighting is not None:
+                if not isinstance(radial_weighting, Mapping):
+                    raise TypeError("radial_weighting_config must be a mapping or null.")
+                radial_weighting = dict(radial_weighting)
+                radial_weighting.update(
+                    radial_dimension=2,
+                    radial_bounds=(
+                        shell_height_bounds_Mm[1] * 1.0e6 / self.height_input_scale_m,
+                        shell_height_bounds_Mm[0] * 1.0e6 / self.height_input_scale_m,
+                    ),
+                )
+            self.network = SIRENModel(
+                in_dim=len(self.network_input_names),
+                out_dim=len(self.output_names),
+                radial_weighting_config=radial_weighting,
+                **config,
+            )
+        else:
             raise ValueError(
-                "StratifiedAtmosphereModel currently supports model type 'mlp' only."
+                "StratifiedAtmosphereModel supports model types 'siren' and legacy "
+                "'mlp'."
             )
-        activation = config["activation"]
-        if not isinstance(activation, str):
-            raise TypeError("model_config.activation must be a string.")
-        smooth_activations = {"silu", "gelu", "tanh"}
-        if activation not in smooth_activations:
-            raise ValueError(
-                "The LTE atmosphere must use a smooth activation; choose one of "
-                f"{sorted(smooth_activations)}, got {activation!r}."
-            )
-        self.network = MLPModel(
-            in_dim=len(self.network_input_names),
-            out_dim=len(self.output_names),
-            **config,
-        )
-        _initialize_smooth_coordinate_mlp(self.network, activation=activation)
         # Exact initial radial thermodynamics; velocity and magnetic rows retain
         # random readouts so polarized gradients do not start at a symmetry point.
         with torch.no_grad():
@@ -927,63 +1334,65 @@ class StratifiedAtmosphereModel(nn.Module):
                 self.network.out_layer.weight[index].zero_()
                 self.network.out_layer.bias[index].zero_()
 
-    def _evaluation_grid(self, log_tau500=None) -> torch.Tensor:
-        """Return a validated evaluation grid in the model's dtype/device.
+    def set_step(self, step: int) -> None:
+        """Set the current training step for the ``potential_delta`` alpha ramp."""
 
-        ``self.log_tau500`` defines the represented optical-depth interval and
-        the reference quadrature grid.  It does not define trainable nodes: the
-        coordinate MLP may be evaluated at any strictly increasing points
-        inside the same interval.
+        if type(step) is not int or step < 0:
+            raise ValueError("Atmosphere model step must be a non-negative integer.")
+        self.current_step.fill_(step)
+
+    def _potential_delta_alpha(self) -> float:
+        """Return the current delta-field contribution weight in [0, 1].
+
+        Zero for ``magnetic_potential_delta_cool_steps``, then ramps linearly
+        to one over the following ``magnetic_potential_delta_ramp_steps``.
         """
 
-        if log_tau500 is None:
-            return self.log_tau500
-        grid = torch.as_tensor(
-            log_tau500,
-            dtype=self.log_tau500.dtype,
-            device=self.log_tau500.device,
-        )
-        if grid.ndim != 1 or grid.numel() < 2:
-            raise ValueError(
-                "log_tau500 must be a one-dimensional grid with at least two points."
-            )
-        if not torch.isfinite(grid).all() or not torch.all(grid[1:] > grid[:-1]):
-            raise ValueError(
-                "log_tau500 must be finite and strictly increase from top to bottom."
-            )
-        tolerance = 2.0 * torch.finfo(grid.dtype).eps
-        if grid[0] < self.log_tau500[0] - tolerance or (
-            grid[-1] > self.log_tau500[-1] + tolerance
-        ):
-            raise ValueError(
-                "Evaluation log_tau500 must stay inside the represented depth interval."
-            )
-        return grid
+        step = int(self.current_step)
+        cool_steps = self.magnetic_potential_delta_cool_steps
+        if step < cool_steps:
+            return 0.0
+        ramp_steps = self.magnetic_potential_delta_ramp_steps
+        if ramp_steps <= 0:
+            return 1.0
+        return min(1.0, (step - cool_steps) / ramp_steps)
 
-    def _network_inputs(
-        self,
-        coords: torch.Tensor,
-        log_tau500: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if coords.ndim < 1 or coords.shape[-1] != 3:
+    def _height_grid(self, geometric_height_m) -> torch.Tensor:
+        """Validate physical sampling heights, ordered from outer to inner."""
+        height = torch.as_tensor(geometric_height_m).to(self.solar_radius_m)
+        if height.ndim != 1 or height.numel() < 2:
             raise ValueError(
-                f"coords must end in [x, y, time]; got {tuple(coords.shape)}."
+                "geometric_height_m must be a one-dimensional grid with at least two points."
             )
-        if not torch.is_floating_point(coords):
-            coords = coords.float()
-        geometric_height = self.depth_to_height(log_tau500, coords.shape[:-1])
-        return self._network_inputs_at_height(
-            coords, geometric_height
-        ), geometric_height
+        if not torch.isfinite(height).all() or not torch.all(height[1:] < height[:-1]):
+            raise ValueError(
+                "geometric_height_m must be finite and strictly decrease inward."
+            )
+        outer, inner = self.shell_height_bounds_Mm
+        tolerance = (
+            2 * torch.finfo(height.dtype).eps * max(abs(outer), abs(inner)) * 1e6
+        )
+        if height[0] > outer * 1e6 + tolerance or height[-1] < inner * 1e6 - tolerance:
+            raise ValueError("Evaluation heights must stay inside the spherical shell.")
+        return height
 
     def _network_inputs_at_height(
         self,
         coords: torch.Tensor,
         geometric_height_m: torch.Tensor,
     ) -> torch.Tensor:
+        if coords.ndim < 1 or coords.shape[-1] != 3:
+            raise ValueError("coords must end in [x, y, time].")
+        # Scene chart geometry is unchanged. Only neural input normalization
+        # uses the same physical length for x, y, and radial height.
+        spatial_scale_mm = (
+            self.height_input_scale_m / 1e6
+            if getattr(self, "uniform_spatial_scaling", False)
+            else self.spatial_coordinate_scale_mm.to(coords)
+        )
         normalized_xy = (
             coords[..., :2] - self.spatial_coordinate_center_mm.to(coords)
-        ) / self.spatial_coordinate_scale_mm.to(coords)
+        ) / spatial_scale_mm
         if geometric_height_m.shape[:-1] != coords.shape[:-1]:
             raise ValueError(
                 "geometric_height_m must have shape coords.shape[:-1]+[points]."
@@ -1004,47 +1413,40 @@ class StratifiedAtmosphereModel(nn.Module):
             represented = torch.cat((represented, temporal), dim=-1)
         return represented
 
-    def depth_to_height(
-        self,
-        depth_coordinate: torch.Tensor,
-        leading_shape=(),
-    ) -> torch.Tensor:
-        """Map the shell parameter monotonically from outer to inner height.
+    def _network_raw(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Evaluate stratified channels and an optional fixed-height magnetic readout.
 
-        In ``physical_shell`` mode the ``log_tau500`` sampling grid
-        is only a dimensionless, ordered quadrature parameter.  It has no
-        optical-depth meaning; tau500 is derived from the predicted opacity.
+        The magnetic reference preserves the input angular position and time;
+        only its height coordinate is replaced. Thus the native Cartesian field
+        is constant along a radial column, while oblique rays can still cross
+        angular structure. The default path performs the unchanged single query.
         """
-
-        q = torch.as_tensor(
-            depth_coordinate, device=self.log_tau500.device, dtype=self.log_tau500.dtype
-        )
-        reference_height = self.reference_atmosphere.height_from_log_tau(q)
-        height = torch.where(
-            q <= 0,
-            reference_height * self.outer_height_scale,
-            reference_height * self.inner_height_scale,
-        )
-        if q.ndim == 1 and leading_shape:
-            height = height.reshape(*([1] * len(leading_shape)), q.numel()).expand(
-                *leading_shape, q.numel()
-            )
-        return height
-
-    def forward(self, coords: torch.Tensor, log_tau500=None) -> StratifiedAtmosphere:
-        """Evaluate the continuous atmosphere at an arbitrary depth grid."""
-
-        grid = self._evaluation_grid(log_tau500)
-        inputs, geometric_height = self._network_inputs(coords, grid)
         raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
             *inputs.shape[:-1], -1
         )
-        fields = self._decode_raw(
-            raw,
-            geometric_height_m=geometric_height,
+        if self.magnetic_reference_height_megameter is None:
+            return raw
+        reference_height = self.magnetic_reference_height_megameter * 1e6 / self.height_input_scale_m
+        magnetic_inputs = torch.cat((
+            inputs[..., :2],
+            torch.full_like(inputs[..., 2:3], reference_height),
+            inputs[..., 3:],
+        ), dim=-1)
+        magnetic_raw = self.network(magnetic_inputs.reshape(-1, magnetic_inputs.shape[-1])).reshape(
+            *magnetic_inputs.shape[:-1], -1
         )
+        return torch.cat((raw[..., :4], magnetic_raw[..., 4:7], raw[..., 7:]), dim=-1)
+
+    def forward(self, coords: torch.Tensor, geometric_height_m) -> StratifiedAtmosphere:
+        """Evaluate the continuous atmosphere at explicitly supplied physical heights."""
+        coords = coords.to(self.solar_radius_m)
+        height = self._height_grid(geometric_height_m)
+        geometric_height = height.expand(*coords.shape[:-1], height.numel())
+        fields = self.evaluate_at_height(coords, geometric_height)
         return StratifiedAtmosphere(
-            log_tau500=grid,
+            depth_coordinate=torch.arange(
+                height.numel(), device=height.device, dtype=height.dtype
+            ),
             geometric_height_m=geometric_height,
             **fields,
         )
@@ -1054,6 +1456,8 @@ class StratifiedAtmosphereModel(nn.Module):
         raw: torch.Tensor,
         *,
         geometric_height_m: torch.Tensor | None = None,
+        magnetic_field_gauss: torch.Tensor | None = None,
+        vector_potential: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Decode network channels into physical quantities."""
 
@@ -1069,20 +1473,110 @@ class StratifiedAtmosphereModel(nn.Module):
         velocity_field = (
             self.velocity_max_m_per_s * (2.0 / math.pi) * torch.atan(velocity_argument)
         )
-        magnetic_field = self.magnetic_scale_gauss * raw[..., 4:7]
+        if self.magnetic_representation == "vector_potential":
+            if magnetic_field_gauss is None or vector_potential is None:
+                raise RuntimeError(
+                    "Vector-potential decoding requires the derived magnetic field "
+                    "and vector potential."
+                )
+            magnetic_field = magnetic_field_gauss
+        elif self.magnetic_representation == "potential_delta":
+            if magnetic_field_gauss is None:
+                raise RuntimeError(
+                    "Potential-plus-delta decoding requires the derived magnetic field."
+                )
+            magnetic_field = magnetic_field_gauss
+        else:
+            magnetic_field = self.magnetic_scale_gauss * raw[..., 4:7]
         microturbulence_log = reference_logs[2] + (
             self.microturbulence_log_scale * raw[..., 7]
         )
         gas_pressure_log = reference_logs[1] + (
             self.gas_pressure_log_scale * raw[..., 8]
         )
-        return {
+        fields = {
             "temperature": torch.exp(temperature_log),
             "velocity_field": velocity_field,
             "microturbulence": torch.exp(microturbulence_log),
             "magnetic_field": magnetic_field,
             "gas_pressure": torch.exp(gas_pressure_log),
         }
+        if vector_potential is not None:
+            fields["vector_potential"] = vector_potential
+        return fields
+
+    def _decode_raw_normalized(
+        self,
+        raw: torch.Tensor,
+        *,
+        geometric_height_m: torch.Tensor | None = None,
+        magnetic_field_model: torch.Tensor | None = None,
+        vector_potential_model: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Decode network channels directly into dimensionless model units."""
+
+        if geometric_height_m is None:
+            raise RuntimeError("Radial-reference decoding requires geometric height.")
+        reference_logs = self.reference_atmosphere.logs_at_height(
+            geometric_height_m.to(raw)
+        )
+        temperature = (
+            torch.exp(
+                reference_logs[0]
+                - math.log(self.temperature_scale_k)
+                + self.temperature_log_scale * raw[..., 0]
+            )
+        )
+        velocity_argument = raw[..., 1:4] * (
+            0.5 * math.pi * self.velocity_scale_m_per_s / self.velocity_max_m_per_s
+        )
+        velocity = (
+            self.velocity_max_m_per_s
+            / self.velocity_scale_m_per_s
+            * (2.0 / math.pi)
+            * torch.atan(velocity_argument)
+        )
+        if self.magnetic_representation == "vector_potential":
+            if magnetic_field_model is None or vector_potential_model is None:
+                raise RuntimeError(
+                    "Vector-potential decoding requires the derived normalized "
+                    "magnetic field and vector potential."
+                )
+            magnetic = magnetic_field_model
+        elif self.magnetic_representation == "potential_delta":
+            if magnetic_field_model is None:
+                raise RuntimeError(
+                    "Potential-plus-delta decoding requires the derived normalized "
+                    "magnetic field."
+                )
+            magnetic = magnetic_field_model
+        else:
+            magnetic = raw[..., 4:7]
+        microturbulence = (
+            torch.exp(
+                reference_logs[2]
+                - math.log(self.microturbulence_scale_m_per_s)
+                + self.microturbulence_log_scale * raw[..., 7]
+            )
+        )
+        gas_pressure = (
+            torch.exp(
+                reference_logs[1]
+                - math.log(self.gas_pressure_scale_pa)
+                + self.gas_pressure_log_scale * raw[..., 8]
+            )
+        )
+        fields = {
+            "temperature": temperature,
+            "velocity_field": velocity,
+            "microturbulence": microturbulence,
+            "magnetic_field": magnetic,
+            "gas_pressure": gas_pressure,
+            "geometric_height_m": geometric_height_m / self.height_input_scale_m,
+        }
+        if vector_potential_model is not None:
+            fields["vector_potential"] = vector_potential_model
+        return fields
 
     def evaluate_at_height(
         self,
@@ -1091,12 +1585,31 @@ class StratifiedAtmosphereModel(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Evaluate ``F(x,y,z)`` at paired physical heights in metres."""
 
-        coords = coords.to(device=self.log_tau500.device, dtype=self.log_tau500.dtype)
-        height = geometric_height_m.to(device=coords.device, dtype=coords.dtype)
-        inputs = self._network_inputs_at_height(coords, height)
-        raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
-            *inputs.shape[:-1], -1
+        coords = coords.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
         )
+        height = geometric_height_m.to(device=coords.device, dtype=coords.dtype)
+        if self.magnetic_representation in ("vector_potential", "potential_delta"):
+            if height.ndim < 1 or height.shape[:-1] != coords.shape[:-1]:
+                raise ValueError(
+                    "geometric_height_m must have shape coords.shape[:-1]+[points]."
+                )
+            depth = height.shape[-1]
+            paired_coords = coords.unsqueeze(-2).expand(
+                *coords.shape[:-1], depth, coords.shape[-1]
+            )
+            fields = self.evaluate_chart_height_points(
+                paired_coords.reshape(-1, paired_coords.shape[-1]),
+                height.reshape(-1),
+            )
+            return {
+                name: value.reshape(
+                    (*coords.shape[:-1], depth, *value.shape[1:])
+                )
+                for name, value in fields.items()
+            }
+        inputs = self._network_inputs_at_height(coords, height)
+        raw = self._network_raw(inputs)
         return self._decode_raw(
             raw,
             geometric_height_m=height,
@@ -1114,17 +1627,23 @@ class StratifiedAtmosphereModel(nn.Module):
         Each coordinate is evaluated at exactly its paired height.
         """
 
-        coords = coords.to(device=self.log_tau500.device, dtype=self.log_tau500.dtype)
+        coords = coords.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
         height = geometric_height_m.to(device=coords.device, dtype=coords.dtype)
         if coords.shape[-1] != 3 or height.shape != coords.shape[:-1]:
             raise ValueError(
                 "Paired chart coordinates must end in three values and height "
                 "must match their leading dimensions."
             )
+        if self.magnetic_representation in ("vector_potential", "potential_delta"):
+            position = self.position_from_coords_height(coords, height)
+            return self.evaluate_position_rsun(
+                position / self.solar_radius_m,
+                time_hours=coords[..., 2],
+            )
         inputs = self._network_inputs_at_height(coords, height[..., None])[..., 0, :]
-        raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
-            *inputs.shape[:-1], -1
-        )
+        raw = self._network_raw(inputs)
         return self._decode_raw(
             raw,
             geometric_height_m=height,
@@ -1135,7 +1654,9 @@ class StratifiedAtmosphereModel(nn.Module):
     ) -> torch.Tensor:
         """Map chart coordinates and radial height directly to Cartesian points."""
 
-        coords = coords.to(device=self.log_tau500.device, dtype=self.log_tau500.dtype)
+        coords = coords.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
         height = geometric_height_m.to(device=coords.device, dtype=coords.dtype)
         return (
             self._chart_direction(coords[..., :2])
@@ -1167,6 +1688,361 @@ class StratifiedAtmosphereModel(nn.Module):
         height = (radius_rsun - 1.0) * self.solar_radius_m
         return chart, height
 
+    def _evaluate_vector_potential_only(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> torch.Tensor:
+        """Evaluate the physical vector potential without taking its curl."""
+
+        if self.magnetic_representation != "vector_potential":
+            raise RuntimeError(
+                "Vector-potential evaluation requires the vector_potential representation."
+            )
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            vector_potential = self.vector_potential_scale_gauss_m * raw[..., 4:7]
+        if not need_graph:
+            vector_potential = vector_potential.detach()
+        return vector_potential.reshape((*output_shape, 3))
+
+    def _evaluate_vector_potential_only_normalized(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> torch.Tensor:
+        """Evaluate A_hat directly, without constructing a physical A tensor."""
+
+        if self.magnetic_representation != "vector_potential":
+            raise RuntimeError(
+                "Vector-potential evaluation requires the vector_potential representation."
+            )
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            vector_potential = raw[..., 4:7]
+        if not need_graph:
+            vector_potential = vector_potential.detach()
+        return vector_potential.reshape((*output_shape, 3))
+
+    def _evaluate_vector_potential_position_normalized(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> dict[str, torch.Tensor]:
+        """Evaluate normalized A and B = curl_xhat(A_hat)."""
+
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            vector_potential = raw[..., 4:7]
+            jacobian = _batched_vector_jacobian(
+                vector_potential,
+                flat_position,
+                create_graph=need_graph,
+            )
+            magnetic_field = _curl_from_jacobian(jacobian) / self.solar_radius_model
+            fields = self._decode_raw_normalized(
+                raw,
+                geometric_height_m=height,
+                magnetic_field_model=magnetic_field,
+                vector_potential_model=vector_potential,
+            )
+        if not need_graph:
+            fields = {name: value.detach() for name, value in fields.items()}
+        return {
+            name: value.reshape((*output_shape, *value.shape[1:]))
+            for name, value in fields.items()
+        }
+
+    def _evaluate_vector_potential_position(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> dict[str, torch.Tensor]:
+        """Evaluate ``A`` and derive ``B = curl(A)`` in physical Cartesian space."""
+
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                # ``@torch.inference_mode`` inputs cannot be made grad-bearing
+                # by detaching alone; clone into an ordinary autograd tensor.
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            vector_potential = (
+                self.vector_potential_scale_gauss_m * raw[..., 4:7]
+            )
+            jacobian = _batched_vector_jacobian(
+                vector_potential,
+                flat_position,
+                create_graph=need_graph,
+            )
+            magnetic_field = _curl_from_jacobian(jacobian) / self.solar_radius_m
+            fields = self._decode_raw(
+                raw,
+                geometric_height_m=height,
+                magnetic_field_gauss=magnetic_field,
+                vector_potential=vector_potential,
+            )
+        if not need_graph:
+            fields = {name: value.detach() for name, value in fields.items()}
+        return {
+            name: value.reshape((*output_shape, *value.shape[1:]))
+            for name, value in fields.items()
+        }
+
+    def _evaluate_potential_delta_position(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> dict[str, torch.Tensor]:
+        """Evaluate ``B = grad(psi) + alpha * B_delta`` in physical Cartesian space.
+
+        ``psi`` uses the same physical scale as the vector potential (it is a
+        first spatial derivative away from a field, exactly like ``curl(A)``),
+        so its gradient is directly comparable in Gauss.  ``B_delta`` reuses
+        the direct representation's own field scale and channels.  ``alpha``
+        is a step-scheduled scalar (see ``_potential_delta_alpha``), not a
+        learned quantity: at alpha=0 the field is exactly curl-free by
+        construction, regardless of what the network has learned.
+        """
+
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            psi = self.vector_potential_scale_gauss_m * raw[..., 9]
+            gradient = _scalar_gradient(psi, flat_position, create_graph=need_graph)
+            potential_field = gradient / self.solar_radius_m
+            delta_field = self.magnetic_scale_gauss * raw[..., 4:7]
+            magnetic_field = (
+                potential_field + self._potential_delta_alpha() * delta_field
+            )
+            fields = self._decode_raw(
+                raw,
+                geometric_height_m=height,
+                magnetic_field_gauss=magnetic_field,
+            )
+        if not need_graph:
+            fields = {name: value.detach() for name, value in fields.items()}
+        return {
+            name: value.reshape((*output_shape, *value.shape[1:]))
+            for name, value in fields.items()
+        }
+
+    def _evaluate_potential_delta_position_normalized(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None,
+    ) -> dict[str, torch.Tensor]:
+        """Evaluate ``B_hat = grad(psi_hat) + alpha * B_delta_hat`` in model units."""
+
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        output_shape = position.shape[:-1]
+        need_graph = torch.is_grad_enabled()
+        with torch.inference_mode(False), torch.enable_grad():
+            flat_position = position.reshape(-1, 3)
+            if not flat_position.requires_grad:
+                flat_position = flat_position.detach().clone().requires_grad_(True)
+            chart, height = self._position_chart_height(flat_position)
+            if time_hours is None:
+                time = torch.full(
+                    (*output_shape, 1),
+                    self.time_coordinate_center_hours,
+                    dtype=position.dtype,
+                    device=position.device,
+                )
+            else:
+                time = torch.as_tensor(
+                    time_hours, dtype=position.dtype, device=position.device
+                )
+                if time.ndim == len(output_shape):
+                    time = time[..., None]
+                try:
+                    time = torch.broadcast_to(time, (*output_shape, 1))
+                except RuntimeError as error:
+                    raise ValueError(
+                        "time_hours must broadcast to the position leading dimensions."
+                    ) from error
+            coordinates = torch.cat((chart, time.reshape(-1, 1)), dim=-1)
+            inputs = self._network_inputs_at_height(
+                coordinates, height.reshape(-1, 1)
+            )[..., 0, :]
+            raw = self._network_raw(inputs)
+            psi = raw[..., 9]
+            gradient = _scalar_gradient(psi, flat_position, create_graph=need_graph)
+            potential_field = gradient / self.solar_radius_model
+            delta_field = raw[..., 4:7]
+            magnetic_field = (
+                potential_field + self._potential_delta_alpha() * delta_field
+            )
+            fields = self._decode_raw_normalized(
+                raw,
+                geometric_height_m=height,
+                magnetic_field_model=magnetic_field,
+            )
+        if not need_graph:
+            fields = {name: value.detach() for name, value in fields.items()}
+        return {
+            name: value.reshape((*output_shape, *value.shape[1:]))
+            for name, value in fields.items()
+        }
+
     @staticmethod
     def _near_sphere_offset(
         point_rsun: torch.Tensor,
@@ -1188,8 +2064,13 @@ class StratifiedAtmosphereModel(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Evaluate the field at Carrington Cartesian positions in solar radii."""
 
+        if self.magnetic_representation == "vector_potential":
+            return self._evaluate_vector_potential_position(position_rsun, time_hours)
+        if self.magnetic_representation == "potential_delta":
+            return self._evaluate_potential_delta_position(position_rsun, time_hours)
+
         position = position_rsun.to(
-            device=self.log_tau500.device, dtype=self.log_tau500.dtype
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
         )
         chart, height = self._position_chart_height(position)
         if time_hours is None:
@@ -1206,13 +2087,146 @@ class StratifiedAtmosphereModel(nn.Module):
                 ) from error
         coords = torch.cat((chart, time), dim=-1)
         inputs = self._network_inputs_at_height(coords, height[..., None])
-        raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
-            *inputs.shape[:-1], -1
-        )[..., 0, :]
+        raw = self._network_raw(inputs)[..., 0, :]
         return self._decode_raw(
             raw,
             geometric_height_m=height,
         )
+
+    def normalize_atmosphere_fields(
+        self,
+        fields: Mapping[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Convert physical atmosphere outputs to dimensionless model units.
+
+        ``evaluate_position_*`` remains a physical adapter for radiative
+        transfer and observation synthesis.  Differentiable training terms
+        should use this normalized representation instead.
+        """
+        normalized = dict(fields)
+        normalized["temperature"] = fields["temperature"] / self.temperature_scale_k
+        normalized["gas_pressure"] = (
+            fields["gas_pressure"] / self.gas_pressure_scale_pa
+        )
+        normalized["microturbulence"] = (
+            fields["microturbulence"] / self.microturbulence_scale_m_per_s
+        )
+        normalized["velocity_field"] = (
+            fields["velocity_field"] / self.velocity_scale_m_per_s
+        )
+        normalized["magnetic_field"] = (
+            fields["magnetic_field"] / self.magnetic_scale_gauss
+        )
+        if "vector_potential" in fields:
+            normalized["vector_potential"] = (
+                fields["vector_potential"] / self.vector_potential_scale_gauss_m
+            )
+        if "geometric_height_m" in fields:
+            normalized["geometric_height_m"] = (
+                fields["geometric_height_m"] / self.height_input_scale_m
+            )
+        return normalized
+
+    def denormalize_atmosphere_fields(
+        self,
+        fields: Mapping[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Convert a normalized atmosphere to the physical RT adapter view."""
+        physical = dict(fields)
+        physical["temperature"] = fields["temperature"] * self.temperature_scale_k
+        physical["gas_pressure"] = (
+            fields["gas_pressure"] * self.gas_pressure_scale_pa
+        )
+        physical["microturbulence"] = (
+            fields["microturbulence"] * self.microturbulence_scale_m_per_s
+        )
+        physical["velocity_field"] = (
+            fields["velocity_field"] * self.velocity_scale_m_per_s
+        )
+        physical["magnetic_field"] = (
+            fields["magnetic_field"] * self.magnetic_scale_gauss
+        )
+        if "vector_potential" in fields:
+            physical["vector_potential"] = (
+                fields["vector_potential"] * self.vector_potential_scale_gauss_m
+            )
+        if "geometric_height_m" in fields:
+            physical["geometric_height_m"] = (
+                fields["geometric_height_m"] * self.height_input_scale_m
+            )
+        return physical
+
+    def evaluate_position_rsun_normalized(
+        self,
+        position_rsun: torch.Tensor,
+        time_hours: torch.Tensor | float | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Evaluate the atmosphere directly in dimensionless model units."""
+
+        if self.magnetic_representation == "vector_potential":
+            return self._evaluate_vector_potential_position_normalized(
+                position_rsun, time_hours
+            )
+        if self.magnetic_representation == "potential_delta":
+            return self._evaluate_potential_delta_position_normalized(
+                position_rsun, time_hours
+            )
+        position = position_rsun.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
+        chart, height = self._position_chart_height(position)
+        if time_hours is None:
+            time = torch.full_like(chart[..., :1], self.time_coordinate_center_hours)
+        else:
+            time = torch.as_tensor(time_hours, dtype=chart.dtype, device=chart.device)
+            if time.ndim == chart.ndim - 1:
+                time = time[..., None]
+            try:
+                time = torch.broadcast_to(time, (*chart.shape[:-1], 1))
+            except RuntimeError as error:
+                raise ValueError(
+                    "time_hours must broadcast to the position leading dimensions."
+                ) from error
+        coords = torch.cat((chart, time), dim=-1)
+        inputs = self._network_inputs_at_height(coords, height[..., None])
+        raw = self._network_raw(inputs)[..., 0, :]
+        return self._decode_raw_normalized(
+            raw,
+            geometric_height_m=height,
+        )
+
+    def mass_density_normalized(
+        self,
+        temperature: torch.Tensor,
+        gas_pressure: torch.Tensor,
+    ) -> torch.Tensor:
+        """Query the EOS in SI and return the density in model units.
+
+        Inputs and output are dimensionless.  The two conversions surrounding
+        the table call are deliberately kept in this adapter rather than in
+        the physics residuals.
+        """
+        temperature_si = temperature * self.temperature_scale_k
+        gas_pressure_si = gas_pressure * self.gas_pressure_scale_pa
+        density_si = self.thermodynamic_eos.mass_density(
+            temperature_si,
+            gas_pressure_si,
+        )
+        return density_si / self.density_scale_kg_m3
+
+    def electron_density_normalized(
+        self,
+        temperature: torch.Tensor,
+        gas_pressure: torch.Tensor,
+    ) -> torch.Tensor:
+        """Query electron density through the SI table adapter and normalize it."""
+        temperature_si = temperature * self.temperature_scale_k
+        gas_pressure_si = gas_pressure * self.gas_pressure_scale_pa
+        density_si = self.thermodynamic_eos.electron_density(
+            temperature_si,
+            gas_pressure_si,
+        )
+        return density_si / self.electron_density_scale_m3
 
     def evaluate_position_points(
         self, position_m: torch.Tensor, time_hours: torch.Tensor | float | None = None
@@ -1220,7 +2234,7 @@ class StratifiedAtmosphereModel(nn.Module):
         """Evaluate the unique solar-Cartesian field at physical 3-D points."""
 
         position = position_m.to(
-            device=self.log_tau500.device, dtype=self.log_tau500.dtype
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
         )
         return self.evaluate_position_rsun(
             position / self.solar_radius_m, time_hours=time_hours
@@ -1230,11 +2244,13 @@ class StratifiedAtmosphereModel(nn.Module):
         self,
         coords: torch.Tensor,
         ray_direction: torch.Tensor,
-        log_tau500: torch.Tensor,
+        geometric_height_m: torch.Tensor,
     ) -> tuple[StratifiedAtmosphere, RayTraceResult]:
         """Sample physical points along observer rays through the atmosphere."""
 
-        coords = coords.to(device=self.log_tau500.device, dtype=self.log_tau500.dtype)
+        coords = coords.to(
+            device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype
+        )
         if coords.ndim < 1 or coords.shape[-1] != 3 or not torch.isfinite(coords).all():
             raise ValueError("coords must end in finite [x, y, time] values.")
         direction = ray_direction.to(device=coords.device, dtype=coords.dtype)
@@ -1242,7 +2258,8 @@ class StratifiedAtmosphereModel(nn.Module):
         if not torch.isfinite(direction).all() or torch.any(direction_norm <= 0):
             raise ValueError("Ray directions must be finite non-zero vectors.")
         direction = direction / direction_norm
-        grid = self._evaluation_grid(log_tau500)
+        height = self._height_grid(geometric_height_m)
+        grid = torch.arange(height.numel(), device=height.device, dtype=height.dtype)
         if direction.shape != (*coords.shape[:-1], 3):
             raise ValueError("Ray directions must match coords leading dimensions.")
 
@@ -1251,7 +2268,7 @@ class StratifiedAtmosphereModel(nn.Module):
         # O(shell thickness / R_sun), preserving both in float32.
         surface_reference_rsun = self._chart_direction(coords[..., :2])
 
-        requested_height = self.depth_to_height(grid, coords.shape[:-1])
+        requested_height = height.expand(*coords.shape[:-1], height.numel())
         # The impact parameter belongs to the ray, not to a depth sample.
         # Compute it once before broadcasting the ray across the shell grid.
         impact = torch.linalg.vector_norm(
@@ -1299,7 +2316,7 @@ class StratifiedAtmosphereModel(nn.Module):
         evaluation_coords = torch.cat((chart, ray_time[..., None]), dim=-1)
         fields = self.evaluate_chart_height_points(evaluation_coords, actual_height)
         atmosphere = StratifiedAtmosphere(
-            log_tau500=grid,
+            depth_coordinate=grid,
             geometric_height_m=actual_height.to(coords),
             **fields,
         )
@@ -1319,10 +2336,16 @@ class StratifiedAtmosphereModel(nn.Module):
                 "pinned STiC FALC_82 thermodynamics; no magnetic or velocity seed"
             ),
             "network_initialization": (
-                "activation-aware variance-preserving random hidden weights, "
+                ("SIREN initialization with unwarped coordinates, "
+                 "zero thermodynamic perturbation readouts and random vector readouts"
+                 if isinstance(self.network.coordinate_weighting, nn.Identity)
+                 else "SIREN initialization with radius-weighted non-radial input "
+                 "bandwidth, zero thermodynamic perturbation readouts and "
+                 "random vector readouts")
+                if self.network_type == "siren"
+                else "activation-aware variance-preserving random hidden weights, "
                 "zero thermodynamic perturbation readouts and random vector readouts"
             ),
-            "log_tau500": self.log_tau500.detach().cpu().tolist(),
             "temperature_log_scale": self.temperature_log_scale,
             "temperature_parameterization": (
                 "unbounded linear natural-log residual around radial reference"
@@ -1336,6 +2359,25 @@ class StratifiedAtmosphereModel(nn.Module):
             "gas_pressure_parameterization": (
                 "unbounded linear natural-log residual around radial reference"
             ),
+            "model_units": {
+                "contract": (
+                    "x_hat=x/L0, t_hat=t/T0, T_hat=T/T0, P_hat=P/P0, "
+                    "rho_hat=rho/rho0, v_hat=v/V0, B_hat=B/B0, "
+                    "A_hat=A/(B0 L0)"
+                ),
+                "length_scale_m": self.height_input_scale_m,
+                "temperature_scale_k": self.temperature_scale_k,
+                "gas_pressure_scale_pa": self.gas_pressure_scale_pa,
+                "density_scale_kg_m3": self.density_scale_kg_m3,
+                "electron_density_scale_m3": self.electron_density_scale_m3,
+                "velocity_scale_m_per_s": self.velocity_scale_m_per_s,
+                "magnetic_scale_gauss": self.magnetic_scale_gauss,
+                "vector_potential_scale_gauss_m": self.vector_potential_scale_gauss_m,
+                "training_physical_units": (
+                    "SI is restricted to table/forward-model adapters; residuals "
+                    "consume dimensionless model-unit fields"
+                ),
+            },
             "line_formation_height_bounds_Mm": list(
                 self.line_formation_height_bounds_Mm
             ),
@@ -1353,11 +2395,57 @@ class StratifiedAtmosphereModel(nn.Module):
             "velocity_scale_m_per_s": self.velocity_scale_m_per_s,
             "velocity_max_m_per_s": self.velocity_max_m_per_s,
             "magnetic_scale_gauss": self.magnetic_scale_gauss,
+            "magnetic_representation": self.magnetic_representation,
+            **(
+                {
+                    "vector_potential_scale_gauss_m": self.vector_potential_scale_gauss_m,
+                    "magnetic_parameterization": (
+                        "network outputs Cartesian A in G m; physical Cartesian "
+                        "B in G is derived as curl(A)"
+                    ),
+                }
+                if self.magnetic_representation == "vector_potential"
+                else {
+                    "vector_potential_scale_gauss_m": self.vector_potential_scale_gauss_m,
+                    "magnetic_parameterization": (
+                        "network outputs a scalar potential psi (G m) and a "
+                        "direct delta field B_delta (G); physical Cartesian B "
+                        "in G is grad(psi) + alpha*B_delta, alpha ramping "
+                        f"linearly from 0 to 1 over steps "
+                        f"[{self.magnetic_potential_delta_cool_steps}, "
+                        f"{self.magnetic_potential_delta_cool_steps + self.magnetic_potential_delta_ramp_steps}]"
+                    ),
+                }
+                if self.magnetic_representation == "potential_delta"
+                else {
+                    "magnetic_parameterization": (
+                        "network outputs physical Cartesian B directly in G"
+                    )
+                }
+            ),
+            **({
+                "magnetic_reference_height_megameter": self.magnetic_reference_height_megameter,
+                "magnetic_height_dependence": (
+                    "native Cartesian B readout evaluated at the reference height for the "
+                    "same angular coordinates and time; constant along radial columns"
+                ),
+            } if self.magnetic_reference_height_megameter is not None else {}),
             "vector_decoder": (
                 "velocity uses a smoothly bounded component-wise arctangent output "
                 "with the configured local linear scale and nonzero tail gradients; "
-                "magnetic field uses an unbounded Cartesian decoder; "
-                "output weights and biases remain randomly initialized; both vectors "
+                + (
+                    "magnetic field is the physical Cartesian curl of an unbounded "
+                    "Cartesian vector-potential decoder; "
+                    if self.magnetic_representation == "vector_potential"
+                    else (
+                        "magnetic field is the gradient of a scalar potential "
+                        "decoder plus a step-scheduled unbounded Cartesian delta "
+                        "decoder; "
+                        if self.magnetic_representation == "potential_delta"
+                        else "magnetic field uses an unbounded Cartesian decoder; "
+                    )
+                )
+                + "output weights and biases remain randomly initialized; both vectors "
                 "always have three components"
             ),
             "velocity_observability": (
@@ -1371,7 +2459,7 @@ class StratifiedAtmosphereModel(nn.Module):
                 "expressed in the instantaneous Carrington Cartesian basis; it is "
                 "not a Carrington coordinate time derivative"
             ),
-            "depth_coordinate_role": "ordered computational shell parameter; tau500 is derived from opacity",
+            "coordinate_system": "physical spherical shell; heights in metres above R_sun",
             "shell_height_bounds_Mm": list(self.shell_height_bounds_Mm),
             "tangent_margin_m": self.tangent_margin_m,
             "spherical_geometry": {
@@ -1392,12 +2480,15 @@ class StratifiedAtmosphereModel(nn.Module):
                 "network_center_mm": self.spatial_coordinate_center_mm.detach()
                 .cpu()
                 .tolist(),
-                "network_scale_mm": self.spatial_coordinate_scale_mm.detach()
-                .cpu()
-                .tolist(),
+                "network_scale_mm": (
+                    [self.height_input_scale_m / 1e6] * 2
+                    if getattr(self, "uniform_spatial_scaling", False)
+                    else self.spatial_coordinate_scale_mm.detach().cpu().tolist()
+                ),
                 "network_transform": "(xy_mm - center_mm) / scale_mm",
             },
             "network_inputs": list(self.network_input_names),
+            "network_type": self.network_type,
             "time_dependent": self.time_dependent,
             "time_network_transform": (
                 "(time_hours-time_coordinate_center_hours)/time_coordinate_scale_hours"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
 import math
+from numbers import Real
 from pathlib import Path
 from typing import Any, Literal
 
@@ -74,18 +75,6 @@ def _quantiles(values: tuple[float, float], name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class SolverConfig(ConfigNode):
-    kind: Literal["lte"]
-    output_directory: Path
-    work_directory: Path
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceConfig(ConfigNode):
-    bundle: Literal["packaged"]
-
-
-@dataclass(frozen=True, slots=True)
 class SlitSliceConfig(ConfigNode):
     start: int
     stop: int
@@ -101,7 +90,7 @@ class DataLoaderConfig(ConfigNode):
     validation_batch_size: int | None = None
     validation_stride: int = 1
     preparation_workers: int = 1
-    workers: int = 0
+    workers: int = 2
     pin_memory: bool = False
     progress: bool = True
 
@@ -112,6 +101,8 @@ class DataLoaderConfig(ConfigNode):
         _positive(self.validation_stride, "validation_stride")
         _positive(self.preparation_workers, "preparation_workers")
         _positive(self.workers, "workers", allow_zero=True)
+        if type(self.pin_memory) is not bool:
+            raise TypeError("pin_memory must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,19 +195,6 @@ ObservationConfig = HinodeObservationConfig | HMIObservationConfig
 
 
 @dataclass(frozen=True, slots=True)
-class DepthGridConfig(ConfigNode):
-    coordinate: Literal["log_tau500"]
-    minimum: float
-    maximum: float
-    count: int
-
-    def __post_init__(self) -> None:
-        _ordered_pair((self.minimum, self.maximum), "depth grid bounds")
-        if self.count < 2:
-            raise ValueError("depth grid count must be at least two")
-
-
-@dataclass(frozen=True, slots=True)
 class AtmosphereGeometryConfig(ConfigNode):
     type: Literal["spherical_shell"]
     time_dependent: bool
@@ -225,6 +203,7 @@ class AtmosphereGeometryConfig(ConfigNode):
     inner_height_megameter: float
     tangent_margin_m: float
     line_formation_outer_height_megameter: float | None = None
+    uniform_spatial_scaling: bool = False
 
     def __post_init__(self) -> None:
         if self.line_formation_outer_height_megameter is None:
@@ -233,6 +212,8 @@ class AtmosphereGeometryConfig(ConfigNode):
                 "line_formation_outer_height_megameter",
                 self.outer_height_megameter,
             )
+        if type(self.uniform_spatial_scaling) is not bool:
+            raise TypeError("uniform_spatial_scaling must be boolean")
         _positive(self.height_input_scale_m, "height_input_scale_m")
         _finite(self.outer_height_megameter, "outer_height_megameter")
         _finite(
@@ -300,9 +281,40 @@ class VelocityParameterConfig(ConfigNode):
 @dataclass(frozen=True, slots=True)
 class MagneticParameterConfig(ConfigNode):
     scale_gauss: float
+    representation: Literal["direct", "vector_potential", "potential_delta"] = "direct"
+    reference_height_megameter: float | None = None
+    # Only meaningful for representation="potential_delta": the delta-field
+    # contribution's weight alpha stays 0 for potential_delta_cool_steps, then
+    # ramps linearly to 1 over the following potential_delta_ramp_steps. At
+    # alpha=0 the field is exactly grad(psi), i.e. curl-free by construction.
+    potential_delta_cool_steps: int = 0
+    potential_delta_ramp_steps: int = 0
 
     def __post_init__(self) -> None:
         _positive(self.scale_gauss, "scale_gauss")
+        if self.representation not in {
+            "direct",
+            "vector_potential",
+            "potential_delta",
+        }:
+            raise ValueError(
+                "magnetic representation must be 'direct', 'vector_potential', "
+                "or 'potential_delta'"
+            )
+        if self.reference_height_megameter is not None:
+            value = self.reference_height_megameter
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError("magnetic reference_height_megameter must be numeric or null")
+            _finite(value, "magnetic reference_height_megameter")
+            if self.representation in ("vector_potential", "potential_delta"):
+                raise ValueError(
+                    "magnetic reference_height_megameter is incompatible with "
+                    f"{self.representation} representation"
+                )
+        for name in ("potential_delta_cool_steps", "potential_delta_ramp_steps"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"magnetic {name} must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,21 +345,48 @@ class EncodingConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
+class RadialWeightingConfig(ConfigNode):
+    """Initial SIREN bandwidth envelope from the solar surface outward."""
+
+    near_sun_weight: float = 1.0
+    outer_weight: float = 0.1
+    exponent: float = 1.0
+
+    def __post_init__(self) -> None:
+        _positive(self.near_sun_weight, "near_sun_weight")
+        _positive(self.outer_weight, "outer_weight")
+        _positive(self.exponent, "exponent")
+        if self.outer_weight > self.near_sun_weight:
+            raise ValueError("outer_weight must not exceed near_sun_weight")
+
+
+@dataclass(frozen=True, slots=True)
 class NetworkConfig(ConfigNode):
-    type: Literal["mlp"]
+    type: Literal["mlp", "siren"]
     hidden_dimension: int
     hidden_layers: int
-    activation: Literal["silu", "gelu", "tanh"]
-    encoding: EncodingConfig
+    activation: Literal["silu", "gelu", "tanh"] | None = None
+    encoding: EncodingConfig | None = None
+    first_omega_0: float = 30.0
+    hidden_omega_0: float = 1.0
+    radial_weighting: RadialWeightingConfig | None = field(
+        default_factory=RadialWeightingConfig
+    )
 
     def __post_init__(self) -> None:
         _positive(self.hidden_dimension, "hidden_dimension")
         _positive(self.hidden_layers, "hidden_layers")
+        if self.type == "mlp":
+            if self.activation is None or self.encoding is None:
+                raise ValueError("MLP networks require activation and encoding")
+        elif self.activation is not None or self.encoding is not None:
+            raise ValueError("SIREN networks do not use activation or encoding")
+        _positive(self.first_omega_0, "first_omega_0")
+        _positive(self.hidden_omega_0, "hidden_omega_0")
 
 
 @dataclass(frozen=True, slots=True)
 class AtmosphereConfig(ConfigNode):
-    depth_grid: DepthGridConfig
     geometry: AtmosphereGeometryConfig
     reference_atmosphere: Literal["falc_82"]
     parameters: AtmosphereParameterConfig
@@ -356,22 +395,22 @@ class AtmosphereConfig(ConfigNode):
 
     def __post_init__(self) -> None:
         expected_dimensions = 4 if self.geometry.time_dependent else 3
-        frequency_dimensions = len(self.network.encoding.num_frequencies)
-        if frequency_dimensions != expected_dimensions:
+        frequency_dimensions = (
+            len(self.network.encoding.num_frequencies)
+            if self.network.encoding is not None
+            else expected_dimensions
+        )
+        if self.network.type == "mlp" and frequency_dimensions != expected_dimensions:
             raise ValueError(
                 "Fourier frequency lists must contain one entry per atmosphere "
                 f"coordinate ({expected_dimensions}); got {frequency_dimensions}"
             )
-        if self.depth_grid.minimum < 0.0 < self.depth_grid.maximum and not (
-            self.geometry.outer_height_megameter
-            > 0.0
-            > self.geometry.inner_height_megameter
-        ):
-            raise ValueError(
-                "An atmosphere depth grid crossing log_tau500=0 requires a shell "
-                "with positive outer height and negative inner height"
-            )
         geometry = self.geometry
+        magnetic_height = self.parameters.magnetic_field.reference_height_megameter
+        if magnetic_height is not None and not (
+            geometry.inner_height_megameter <= magnetic_height <= geometry.outer_height_megameter
+        ):
+            raise ValueError("magnetic reference_height_megameter must lie within the atmosphere shell")
         extrapolation = (
             geometry.line_formation_outer_height_megameter
             < geometry.outer_height_megameter
@@ -505,40 +544,18 @@ class CoarseToFineConfig(ConfigNode):
 class DepthSamplingConfig(ConfigNode):
     sample_count: int
     coarse_to_fine: CoarseToFineConfig
+    reference_log_tau500_bounds: tuple[float, float] = (-5.0, 1.0)
 
     def __post_init__(self) -> None:
+        _ordered_pair(self.reference_log_tau500_bounds, "reference_log_tau500_bounds")
+        if (
+            not self.reference_log_tau500_bounds[0]
+            < 0
+            < self.reference_log_tau500_bounds[1]
+        ):
+            raise ValueError("reference_log_tau500_bounds must straddle zero")
         if self.sample_count < 2:
             raise ValueError("sample_count must be at least two")
-
-
-@dataclass(frozen=True, slots=True)
-class VectorRegularizationConfig(ConfigNode):
-    enabled: bool = False
-    magnetic_weight: float = 0.0
-    velocity_weight: float = 0.0
-    decay_steps: int = 0
-
-    def __post_init__(self) -> None:
-        _positive(self.magnetic_weight, "magnetic_weight", allow_zero=True)
-        _positive(self.velocity_weight, "velocity_weight", allow_zero=True)
-        _positive(self.decay_steps, "decay_steps", allow_zero=not self.enabled)
-        if self.enabled and self.decay_steps == 0:
-            raise ValueError(
-                "enabled vector regularization requires positive decay_steps"
-            )
-        if self.enabled and self.magnetic_weight == self.velocity_weight == 0.0:
-            raise ValueError("enabled vector regularization requires a positive weight")
-        if not self.enabled and any(
-            value != 0
-            for value in (
-                self.magnetic_weight,
-                self.velocity_weight,
-                self.decay_steps,
-            )
-        ):
-            raise ValueError(
-                "disabled vector regularization requires zero weights and decay_steps"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,8 +568,35 @@ class CollocationConfig(ConfigNode):
     upper_volume_points_per_step: int = 0
     upper_height_layers_per_step: int = 0
     side_boundary_points_per_step: int = 0
-    side_height_layers_per_step: int = 0
+    validation_side_boundary_points: int = 0
     validation_upper_height_layers: int = 0
+    height_sampling_power: float = 1.0
+    # "height_grouped" draws height_layers_per_step discrete heights, each
+    # shared by volume_points_per_step / height_layers_per_step points (the
+    # original behavior; height_layers_per_step must divide evenly and is
+    # otherwise unused). "fully_random" draws volume_points_per_step fully
+    # independent points across the whole volume instead -- no discrete
+    # height layers at all -- and every per-height-group normalization scale
+    # in magnetofluid.py becomes a per-point local scale as a result (a group
+    # of one point). height_layers_per_step is still validated but ignored
+    # in this mode. Required by hard_example_enabled below.
+    volume_sampling: Literal["height_grouped", "fully_random"] = "height_grouped"
+    residual_adaptive_enabled: bool = False
+    residual_adaptive_candidate_multiplier: int = 2
+    residual_adaptive_fraction: float = 0.5
+    residual_adaptive_start_step: int = 500
+    residual_adaptive_update_every_n_steps: int = 250
+    # Persistent hard-example carry-forward: each step keeps the
+    # highest-residual points from the previous step (jittered) instead of
+    # redrawing every collocation point from scratch, so a thin high-error
+    # layer/region cannot simply be missed by the sampler. Independent of
+    # residual_adaptive_* above, which only re-ranks candidates within one
+    # already-selected discrete height layer.
+    hard_example_enabled: bool = False
+    hard_example_count: int = 0
+    hard_example_start_step: int = 0
+    hard_example_jitter_length_m: float = 50_000.0
+    hard_example_jitter_time_hours: float = 0.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -567,10 +611,59 @@ class CollocationConfig(ConfigNode):
             "upper_height_layers_per_step",
             "upper_boundary_points_per_step",
             "side_boundary_points_per_step",
-            "side_height_layers_per_step",
+            "validation_side_boundary_points",
             "validation_upper_height_layers",
         ):
             _positive(getattr(self, name), name, allow_zero=True)
+        _positive(self.height_sampling_power, "height_sampling_power")
+        if type(self.residual_adaptive_enabled) is not bool:
+            raise TypeError("residual_adaptive_enabled must be boolean")
+        _positive(
+            self.residual_adaptive_candidate_multiplier,
+            "residual_adaptive_candidate_multiplier",
+        )
+        _positive(
+            self.residual_adaptive_fraction,
+            "residual_adaptive_fraction",
+            allow_zero=True,
+        )
+        if self.residual_adaptive_fraction > 1.0:
+            raise ValueError("residual_adaptive_fraction must not exceed one")
+        _positive(self.residual_adaptive_start_step, "residual_adaptive_start_step", allow_zero=True)
+        _positive(
+            self.residual_adaptive_update_every_n_steps,
+            "residual_adaptive_update_every_n_steps",
+        )
+        if type(self.hard_example_enabled) is not bool:
+            raise TypeError("hard_example_enabled must be boolean")
+        _positive(self.hard_example_count, "hard_example_count", allow_zero=True)
+        if self.hard_example_enabled and self.hard_example_count < 1:
+            raise ValueError("Enabled hard-example sampling requires hard_example_count > 0")
+        if self.hard_example_count > self.volume_points_per_step:
+            raise ValueError(
+                "hard_example_count cannot exceed volume_points_per_step"
+            )
+        _positive(self.hard_example_start_step, "hard_example_start_step", allow_zero=True)
+        _positive(
+            self.hard_example_jitter_length_m, "hard_example_jitter_length_m", allow_zero=True
+        )
+        _positive(
+            self.hard_example_jitter_time_hours,
+            "hard_example_jitter_time_hours",
+            allow_zero=True,
+        )
+        if self.hard_example_enabled and self.volume_sampling != "fully_random":
+            raise ValueError(
+                "hard_example_enabled requires volume_sampling: fully_random "
+                "(carrying forward the globally hardest points only makes "
+                "sense without fixed discrete height groups)"
+            )
+        if self.volume_sampling == "fully_random" and self.residual_adaptive_enabled:
+            raise ValueError(
+                "residual_adaptive_enabled assumes more than one point per "
+                "height group to rank within, which volume_sampling: "
+                "fully_random does not have; use hard_example_enabled instead"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,12 +672,27 @@ class PhysicsNormalizationConfig(ConfigNode):
     time_s: float
     magnetic_field_floor_gauss: float = 1.0
     velocity_scale_m_per_s: float = 1_000.0
+    magnetic_field_scale_gauss: float | None = None
+    force_balance_pressure_scale_pa: float | None = None
+    force_balance_pressure_floor_pa: float = 0.0
+    detach_normalization_scale: bool = True
 
     def __post_init__(self) -> None:
         _positive(self.length_m, "length_m")
         _positive(self.time_s, "time_s")
         _positive(self.magnetic_field_floor_gauss, "magnetic_field_floor_gauss")
         _positive(self.velocity_scale_m_per_s, "velocity_scale_m_per_s")
+        if self.magnetic_field_scale_gauss is not None:
+            _positive(self.magnetic_field_scale_gauss, "magnetic_field_scale_gauss")
+        if self.force_balance_pressure_scale_pa is not None:
+            _positive(self.force_balance_pressure_scale_pa, "force_balance_pressure_scale_pa")
+        _positive(
+            self.force_balance_pressure_floor_pa,
+            "force_balance_pressure_floor_pa",
+            allow_zero=True,
+        )
+        if type(self.detach_normalization_scale) is not bool:
+            raise TypeError("detach_normalization_scale must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -605,6 +713,47 @@ def _disabled_equation() -> EquationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CoronalEnergyConfig(EquationConfig):
+    cooling_table: Path | None = None
+    minimum_height_megameter: float = 3.0
+    conductivity_w_m_k72: float = 1.0e-11
+    magnetic_floor_gauss: float = 0.1
+    heating_w_m3: float = 1.0e-5
+    heating_scale_height_megameter: float = 30.0
+
+    def __post_init__(self) -> None:
+        EquationConfig.__post_init__(self)
+        for name in (
+            "minimum_height_megameter",
+            "conductivity_w_m_k72",
+            "magnetic_floor_gauss",
+            "heating_scale_height_megameter",
+        ):
+            _positive(getattr(self, name), name)
+        _positive(self.heating_w_m3, "heating_w_m3", allow_zero=True)
+        if self.enabled and self.cooling_table is None:
+            raise ValueError("coronal_energy requires a prepared cooling_table")
+
+    def validate_domain(self, atmosphere) -> None:
+        if not self.enabled:
+            return
+        if atmosphere.upper_atmosphere is None:
+            raise ValueError("coronal_energy requires a coronal atmosphere extension")
+        lower = max(
+            atmosphere.geometry.line_formation_outer_height_megameter,
+            atmosphere.upper_atmosphere.transition_region_top_megameter,
+        )
+        if (
+            not lower
+            < self.minimum_height_megameter
+            < atmosphere.geometry.outer_height_megameter
+        ):
+            raise ValueError(
+                "coronal_energy minimum height must lie above the transition region and below the outer shell"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicsEquationConfig(ConfigNode):
     hydrostatic_equilibrium: EquationConfig
     magnetohydrostatic_equilibrium: EquationConfig
@@ -614,27 +763,128 @@ class PhysicsEquationConfig(ConfigNode):
     continuity: EquationConfig
     upper_boundary_gas_pressure_prior: EquationConfig
     adiabatic_pressure: EquationConfig = field(default_factory=_disabled_equation)
+    coronal_energy: CoronalEnergyConfig = field(
+        default_factory=lambda: CoronalEnergyConfig(enabled=False, weight=0.0)
+    )
+    magnetic_force_free: EquationConfig = field(default_factory=_disabled_equation)
+    magnetic_current_free: EquationConfig = field(default_factory=_disabled_equation)
     radial_magnetic_energy_gradient: EquationConfig = field(
         default_factory=_disabled_equation
     )
+    radial_magnetic_field: EquationConfig = field(default_factory=_disabled_equation)
     upper_boundary_open_velocity: EquationConfig = field(
         default_factory=_disabled_equation
     )
+    upper_boundary_current_free: EquationConfig = field(
+        default_factory=_disabled_equation
+    )
+    side_boundary_current_free: EquationConfig = field(
+        default_factory=_disabled_equation
+    )
+    upper_boundary_no_inflow: EquationConfig = field(default_factory=_disabled_equation)
+    side_boundary_no_inflow: EquationConfig = field(default_factory=_disabled_equation)
     upper_domain_microturbulence_prior: EquationConfig = field(
         default_factory=_disabled_equation
     )
     upper_domain_temperature_prior: EquationConfig = field(
         default_factory=_disabled_equation
     )
-    upper_boundary_current_free: EquationConfig = field(
+    upper_boundary_tangential_magnetic_neumann: EquationConfig = field(
         default_factory=_disabled_equation
     )
     side_boundary_open_velocity: EquationConfig = field(
         default_factory=_disabled_equation
     )
-    side_boundary_current_free: EquationConfig = field(
+    side_boundary_tangential_magnetic_neumann: EquationConfig = field(
         default_factory=_disabled_equation
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PotentialPhotosphereConfig(ConfigNode):
+    """Temporary horizontal disambiguation prior on photospheric source cells."""
+
+    enabled: bool = False
+    batch_size: int = 256
+    weight: float = 0.1
+    minimum_horizontal_field_gauss: float = 50.0
+    start_step: int = 500
+    ramp_steps: int = 500
+    end_step: int = 8000
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise TypeError("potential photosphere enabled must be boolean")
+        _positive(self.weight, "photosphere weight")
+        if isinstance(self.minimum_horizontal_field_gauss, bool):
+            raise TypeError("photosphere minimum horizontal field must be numeric")
+        _positive(self.minimum_horizontal_field_gauss, "photosphere minimum horizontal field")
+        for name in ("batch_size", "start_step", "ramp_steps", "end_step"):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise TypeError(f"potential photosphere {name} must be an integer")
+            _positive(value, name, allow_zero=name in ("start_step", "ramp_steps"))
+        if not self.start_step + self.ramp_steps < self.end_step:
+            raise ValueError("Potential photosphere requires ramp end < end step")
+
+
+@dataclass(frozen=True, slots=True)
+class PotentialBoundaryConfig(ConfigNode):
+    """Progressive full-vector targets from a spherical photospheric potential field."""
+
+    enabled: bool = False
+    geometry: Literal["spherical_neumann"] = "spherical_neumann"
+    start_step: int = 1000
+    ramp_steps: int = 2000
+    update_every_n_steps: int = 500
+    freeze_step: int = 10000
+    blend: float = 0.5
+    weight: float = 1.0
+    source_height_megameter: float = 0.0
+    grid_size: int = 64
+    source_supersampling: int = 2
+    top_grid_size: int = 16
+    side_horizontal_points: int = 32
+    side_height_points: int = 16
+    jitter_fraction: float = 1.0
+    seed: int = 0
+    batch_size: int = 256
+    field_floor_gauss: float = 1.0
+    photosphere: PotentialPhotosphereConfig = field(default_factory=PotentialPhotosphereConfig)
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise TypeError("potential_boundary.enabled must be boolean")
+        if self.photosphere.enabled and (not self.enabled or self.photosphere.start_step < self.start_step):
+            raise ValueError("Potential photosphere requires enabled boundary references before its start")
+        if self.geometry != "spherical_neumann":
+            raise ValueError("potential_boundary.geometry must be spherical_neumann")
+        for name in ("start_step", "ramp_steps", "freeze_step"):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"potential_boundary.{name} must be an integer")
+            _positive(getattr(self, name), name, allow_zero=True)
+        for name in ("update_every_n_steps", "grid_size", "source_supersampling",
+                     "top_grid_size", "side_horizontal_points", "side_height_points", "batch_size"):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"potential_boundary.{name} must be an integer")
+            _positive(getattr(self, name), name)
+        if self.grid_size < 4:
+            raise ValueError("Potential grid_size >= 4 is required")
+        _finite(self.jitter_fraction, "jitter_fraction")
+        if not 0 <= self.jitter_fraction <= 1:
+            raise ValueError("Potential jitter_fraction must be between zero and one")
+        if type(self.seed) is not int or self.seed < 0:
+            raise ValueError("Potential seed must be a non-negative integer")
+        if self.freeze_step < self.start_step:
+            raise ValueError("Potential freeze_step must not precede source capture")
+        _positive(self.blend, "blend")
+        if self.blend > 1:
+            raise ValueError("Potential blend must be <= 1")
+        _positive(self.weight, "weight")
+        _positive(self.field_floor_gauss, "field_floor_gauss")
+        _finite(self.source_height_megameter, "source_height_megameter")
+        if self.source_height_megameter != 0:
+            raise ValueError("Potential source_height_megameter must be 0 (photosphere)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,25 +894,50 @@ class PhysicsConfig(ConfigNode):
     normalization: PhysicsNormalizationConfig
     equations: PhysicsEquationConfig
     adiabatic_index: float = 5.0 / 3.0
-    upper_boundary_current_free_ramp_steps: int = 0
+    magnetic_current_free_steps: int = 0
+    magnetic_current_free_final_factor: float = 0.0
+    potential_boundary: PotentialBoundaryConfig = field(default_factory=PotentialBoundaryConfig)
+    loss_start_step: int = 0
+    loss_ramp_steps: int = 0
+    robust_loss_delta: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.potential_boundary.enabled:
+            for name in ("upper_boundary_current_free", "side_boundary_current_free",
+                         "upper_boundary_tangential_magnetic_neumann", "side_boundary_tangential_magnetic_neumann"):
+                equation = getattr(self.equations, name)
+                if equation.enabled and equation.weight > 0:
+                    raise ValueError(f"potential_boundary replaces {name}")
         _finite(self.adiabatic_index, "adiabatic_index")
-        if self.adiabatic_index <= 1.0:
-            raise ValueError("adiabatic_index must be greater than one")
-        if self.upper_boundary_current_free_ramp_steps < 0:
-            raise ValueError(
-                "upper_boundary_current_free_ramp_steps must be non-negative"
-            )
         if (
-            not (
-                self.equations.upper_boundary_current_free.enabled
-                or self.equations.side_boundary_current_free.enabled
-            )
-            and self.upper_boundary_current_free_ramp_steps != 0
+            self.equations.coronal_energy.enabled
+            and self.equations.adiabatic_pressure.enabled
         ):
             raise ValueError(
-                "Disabled current-free boundaries require zero ramp steps"
+                "coronal_energy and global adiabatic_pressure are mutually exclusive"
+            )
+        if self.adiabatic_index <= 1.0:
+            raise ValueError("adiabatic_index must be greater than one")
+        if self.magnetic_current_free_steps < 0:
+            raise ValueError("magnetic_current_free_steps must be non-negative")
+        _finite(self.magnetic_current_free_final_factor, "magnetic_current_free_final_factor")
+        if not 0.0 <= self.magnetic_current_free_final_factor <= 1.0:
+            raise ValueError("magnetic_current_free_final_factor must be between zero and one")
+        if self.magnetic_current_free_final_factor > 0 and self.magnetic_current_free_steps == 0:
+            raise ValueError("magnetic_current_free_final_factor requires positive magnetic_current_free_steps")
+        _positive(self.loss_start_step, "physics.loss_start_step", allow_zero=True)
+        _positive(self.loss_ramp_steps, "physics.loss_ramp_steps", allow_zero=True)
+        _positive(
+            self.robust_loss_delta,
+            "physics.robust_loss_delta",
+            allow_zero=True,
+        )
+        if self.equations.magnetic_current_free.enabled != (
+            self.magnetic_current_free_steps > 0
+        ):
+            raise ValueError(
+                "magnetic_current_free must be enabled exactly when "
+                "magnetic_current_free_steps is positive"
             )
         force_balance_equations = (
             self.equations.hydrostatic_equilibrium,
@@ -685,7 +960,10 @@ class PhysicsConfig(ConfigNode):
             self.equations.magnetohydrostatic_equilibrium,
             self.equations.momentum,
             self.equations.magnetic_divergence,
+            self.equations.magnetic_force_free,
+            self.equations.magnetic_current_free,
             self.equations.radial_magnetic_energy_gradient,
+            self.equations.radial_magnetic_field,
             self.equations.induction,
             self.equations.continuity,
             self.equations.adiabatic_pressure,
@@ -699,14 +977,21 @@ class PhysicsConfig(ConfigNode):
                 self.equations.magnetohydrostatic_equilibrium,
                 self.equations.momentum,
                 self.equations.magnetic_divergence,
+                self.equations.magnetic_force_free,
+                self.equations.magnetic_current_free,
                 self.equations.radial_magnetic_energy_gradient,
                 self.equations.induction,
                 self.equations.continuity,
                 self.equations.adiabatic_pressure,
-                self.equations.upper_boundary_open_velocity,
+                self.equations.coronal_energy,
                 self.equations.upper_boundary_current_free,
-                self.equations.side_boundary_open_velocity,
                 self.equations.side_boundary_current_free,
+                self.equations.upper_boundary_no_inflow,
+                self.equations.side_boundary_no_inflow,
+                self.equations.upper_boundary_open_velocity,
+                self.equations.upper_boundary_tangential_magnetic_neumann,
+                self.equations.side_boundary_open_velocity,
+                self.equations.side_boundary_tangential_magnetic_neumann,
             )
         )
         if (
@@ -737,6 +1022,7 @@ class PhysicsConfig(ConfigNode):
             for equation in (
                 self.equations.upper_domain_microturbulence_prior,
                 self.equations.upper_domain_temperature_prior,
+                self.equations.coronal_energy,
             )
         )
         if upper_volume_active and (
@@ -753,53 +1039,22 @@ class PhysicsConfig(ConfigNode):
         side_boundary_active = any(
             equation.enabled and equation.weight > 0.0
             for equation in (
-                self.equations.side_boundary_open_velocity,
                 self.equations.side_boundary_current_free,
+                self.equations.side_boundary_no_inflow,
+                self.equations.side_boundary_open_velocity,
+                self.equations.side_boundary_tangential_magnetic_neumann,
             )
-        )
-        side_points_per_height = (
-            self.collocation.side_boundary_points_per_step
-            // max(self.collocation.side_height_layers_per_step, 1)
         )
         if side_boundary_active and (
-            self.collocation.side_height_layers_per_step < 1
-            or self.collocation.side_boundary_points_per_step
-            % self.collocation.side_height_layers_per_step
-            != 0
-            or side_points_per_height < 4
-            or side_points_per_height % 4 != 0
-            or self.collocation.validation_height_layers < 2
-            or self.collocation.validation_points_per_height < 4
-            or self.collocation.validation_points_per_height % 4 != 0
+            self.collocation.side_boundary_points_per_step < 4
+            or self.collocation.side_boundary_points_per_step % 4 != 0
+            or self.collocation.validation_side_boundary_points < 4
+            or self.collocation.validation_side_boundary_points % 4 != 0
         ):
             raise ValueError(
-                "Active side-boundary physics requires positive height layers, "
-                "at least four points per height, and training/validation points "
-                "per height divisible by four"
+                "Active side-boundary physics requires at least four flat training "
+                "and validation samples divisible by four"
             )
-
-
-@dataclass(frozen=True, slots=True)
-class LearningRateConfig(ConfigNode):
-    start: float
-    end: float
-    iterations: int | Literal["auto"]
-
-    def __post_init__(self) -> None:
-        _positive(self.start, "learning-rate start")
-        _positive(self.end, "learning-rate end")
-        if isinstance(self.iterations, int) and self.iterations <= 0:
-            raise ValueError("learning-rate iterations must be positive or 'auto'")
-
-
-@dataclass(frozen=True, slots=True)
-class TrainingConfig(ConfigNode):
-    depth_sampling: DepthSamplingConfig
-    physics: PhysicsConfig
-    learning_rate: LearningRateConfig
-    vector_regularization: VectorRegularizationConfig = field(
-        default_factory=VectorRegularizationConfig
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,28 +1074,16 @@ class StokesWeightConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class StokesSigmaConfig(ConfigNode):
-    """Effective one-sigma errors in fixed atlas-continuum intensity units."""
-
-    i: float
-    q: float
-    u: float
-    v: float
-
-    def __post_init__(self) -> None:
-        for name in ("i", "q", "u", "v"):
-            _positive(getattr(self, name), f"Stokes {name.upper()} sigma")
-
-
-@dataclass(frozen=True, slots=True)
 class LossConfig(ConfigNode):
-    type: Literal["huber"]
+    type: Literal["mse", "asinh_mse"]
     stokes_weights: StokesWeightConfig
-    stokes_sigmas: StokesSigmaConfig
-    huber_delta: float = 1.0
+    asinh_scale: float = 1.0e-3
+    qu_warmup_steps: int = 0
 
-    def __post_init__(self) -> None:
-        _positive(self.huber_delta, "huber_delta")
+    def __post_init__(self):
+        _positive(self.asinh_scale, "Stokes asinh scale")
+        if type(self.qu_warmup_steps) is not int or self.qu_warmup_steps < 0:
+            raise ValueError("qu_warmup_steps must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -901,52 +1144,6 @@ class MeridionalSliceConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class VisualizationConfig(ConfigNode):
-    enabled: bool = False
-    every_n_validations: int = 5
-    ray_sampling: RaySamplingConfig = field(default_factory=RaySamplingConfig)
-    slice_sampling: SliceSamplingConfig = field(default_factory=SliceSamplingConfig)
-    dpi: int = 180
-    meridional_slice: MeridionalSliceConfig = field(
-        default_factory=MeridionalSliceConfig
-    )
-    include_initial: bool = True
-
-    def __post_init__(self) -> None:
-        _positive(self.every_n_validations, "every_n_validations")
-        if self.dpi < 50:
-            raise ValueError("dpi must be at least 50")
-
-
-@dataclass(frozen=True, slots=True)
-class DiagnosticsConfig(ConfigNode):
-    validation_every_n_epochs: int = 1
-    visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
-
-    def __post_init__(self) -> None:
-        _positive(self.validation_every_n_epochs, "validation_every_n_epochs")
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeConfig(ConfigNode):
-    max_epochs: int
-    log_every_n_steps: int = 50
-    gradient_clip_norm: float | None = 0.1
-    validation_check_interval_steps: int | None = None
-
-    def __post_init__(self) -> None:
-        _positive(self.max_epochs, "max_epochs")
-        _positive(self.log_every_n_steps, "log_every_n_steps")
-        if self.validation_check_interval_steps is not None:
-            _positive(
-                self.validation_check_interval_steps,
-                "validation_check_interval_steps",
-            )
-        if self.gradient_clip_norm is not None:
-            _positive(self.gradient_clip_norm, "gradient_clip_norm")
-
-
-@dataclass(frozen=True, slots=True)
 class LoggingConfig(ConfigNode):
     type: Literal["wandb", "disabled"]
     project: str | None = None
@@ -967,85 +1164,8 @@ class LoggingConfig(ConfigNode):
             raise ValueError("logging tags must not contain empty values")
 
 
-@dataclass(frozen=True, slots=True)
-class InversionConfig(ConfigNode):
-    """Complete, versioned configuration for one LTE inversion."""
-
-    schema_version: Literal[2]
-    solver: SolverConfig
-    resources: ResourceConfig
-    observation: ObservationConfig
-    atmosphere: AtmosphereConfig
-    synthesis: SynthesisConfig
-    instrument: InstrumentConfig
-    training: TrainingConfig
-    loss: LossConfig
-    diagnostics: DiagnosticsConfig
-    runtime: RuntimeConfig
-    logging: LoggingConfig
-
-    def __post_init__(self) -> None:
-        pair = (self.observation.type, self.instrument.type)
-        supported_pairs = {
-            ("hinode_sp", "hinode_sp"),
-            ("hmi_stokes", "hmi_filter_profiles"),
-        }
-        if pair not in supported_pairs:
-            raise ValueError(
-                "incompatible observation/instrument types: "
-                f"{self.observation.type!r} and {self.instrument.type!r}"
-            )
-        temporal_equations = (
-            self.training.physics.equations.momentum,
-            self.training.physics.equations.induction,
-            self.training.physics.equations.continuity,
-            self.training.physics.equations.adiabatic_pressure,
-        )
-        if (
-            any(
-                equation.enabled and equation.weight > 0.0
-                for equation in temporal_equations
-            )
-            and not self.atmosphere.geometry.time_dependent
-        ):
-            raise ValueError(
-                "Temporal LTE physics requires atmosphere.geometry.time_dependent=true"
-            )
-        if not self.atmosphere.geometry.time_dependent and (
-            self.instrument.optimize_line_of_sight_velocity_correction
-            or self.instrument.line_of_sight_velocity_correction_m_per_s != 0.0
-        ):
-            raise ValueError(
-                "Static inversions must leave the LOS velocity correction disabled"
-            )
-        induction = self.training.physics.equations.induction
-        if induction.enabled and induction.weight > 0.0:
-            if not self.instrument.optimize_line_of_sight_velocity_correction:
-                raise ValueError(
-                    "Dynamic induction inversions require "
-                    "instrument.optimize_line_of_sight_velocity_correction=true"
-                )
-        geometry = self.atmosphere.geometry
-        extrapolation_enabled = (
-            geometry.line_formation_outer_height_megameter
-            < geometry.outer_height_megameter
-        )
-        upper_equations = (
-            self.training.physics.equations.upper_domain_microturbulence_prior,
-            self.training.physics.equations.upper_domain_temperature_prior,
-            self.training.physics.equations.upper_boundary_open_velocity,
-            self.training.physics.equations.upper_boundary_current_free,
-        )
-        if not extrapolation_enabled and any(
-            equation.enabled for equation in upper_equations
-        ):
-            raise ValueError(
-                "Upper-domain and outer-boundary equations require an "
-                "atmospheric extension above the line-formation domain"
-            )
-
-
 __all__ = [
+    "PotentialBoundaryConfig",
     "AtmosphereConfig",
     "ConfigNode",
     "HMIInstrumentConfig",
@@ -1053,6 +1173,6 @@ __all__ = [
     "HinodeInstrumentConfig",
     "HinodeObservationConfig",
     "InstrumentConfig",
-    "InversionConfig",
     "ObservationConfig",
+    "RadialWeightingConfig",
 ]

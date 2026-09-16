@@ -23,6 +23,7 @@ class StokesPlotter(DiagnosticPlotter):
         *,
         rows: np.ndarray,
         columns: np.ndarray,
+        objective_config=None,
         exclusion_windows_angstrom=(),
         line_centers_angstrom=(),
     ) -> Figure:
@@ -122,10 +123,21 @@ class StokesPlotter(DiagnosticPlotter):
             0.985, 0.27, "predicted", rotation=-90, ha="center", va="center"
         )
         profile_figure.supxlabel(r"air wavelength [$\AA$]")
-        profile_figure.supylabel(r"Stokes component / $I_{c,\,atlas}(\mu=1)$")
-        scatter_figure.supxlabel(r"reference integral in atlas-$I_c$ units [$\AA$]")
-        scatter_figure.supylabel(r"predicted integral in atlas-$I_c$ units [$\AA$]")
+        asinh = (objective_config or {}).get("type") == "asinh_mse"
+        comparison_label = (
+            f"I linear; Q/U/V normalized asinh\na={objective_config['asinh_scale']:g}"
+            if asinh
+            else r"Stokes component / $I_{c,\,atlas}(\mu=1)$"
+        )
+        profile_figure.supylabel(comparison_label)
+        scatter_figure.supxlabel(r"reference absolute integral [$\AA$]")
+        scatter_figure.supylabel(r"predicted absolute integral [$\AA$]")
         for component, name in enumerate(("I", "Q", "U", "V")):
+            display_name = (
+                rf"\mathrm{{asinh}}({name}/a)/\mathrm{{asinh}}(1/a)"
+                if asinh and component
+                else name
+            )
             finite = reference_maps[..., component][
                 np.isfinite(reference_maps[..., component])
             ]
@@ -159,7 +171,7 @@ class StokesPlotter(DiagnosticPlotter):
                 map_figure,
                 map_image,
                 map_axes[:, component],
-                rf"fit-window $|{name}|$ integral [$\AA$]",
+                rf"fit-window $|{display_name}|$ integral [$\AA$]",
                 scientific_notation=False,
             )
             profile_axis = profile_axes[component]
@@ -269,13 +281,142 @@ class StokesPlotter(DiagnosticPlotter):
                 )
                 scatter_axis.set_xlim(lower, upper)
                 scatter_axis.set_ylim(lower, upper)
-            scatter_axis.set_title(f"integrated $|{name}|$ (all validation pixels)")
+            scatter_axis.set_title(f"integrated $|{display_name}|$")
             scatter_axis.grid(alpha=0.18)
         profile_axes[0].legend(loc="best", fontsize=8)
         figure.suptitle(
-            "Stokes validation — loss-space profiles with no plot-time "
-            "normalization; absolute calibration in fixed disk-center "
-            f"atlas-$I_c$ units — {label}"
+            f"Stokes validation — instrument-integrated samples — {label}\n"
+            "Profiles show comparison values; maps show their absolute wavelength integrals"
+        )
+        return figure
+
+    def phase_figure(
+        self,
+        outputs,
+        raster,
+        label: str,
+        *,
+        rows: np.ndarray,
+        columns: np.ndarray,
+        step: int,
+        cold_steps: int,
+        handoff_step: int,
+    ) -> Figure:
+        """Show the temporary Stokes disambiguation phase on the validation grid.
+
+        The phase is displayed in degrees because the two equivalent
+        transverse-field branches are separated by 180 degrees.  The second
+        panel shows the exact smooth binary objective used during warmup,
+        ``sin(phi)^2``.
+        """
+
+        if not isinstance(outputs, dict):
+            raise TypeError("Phase visualization requires the streamed callback payload.")
+
+        def as_numpy(value) -> np.ndarray:
+            if isinstance(value, torch.Tensor):
+                return value.detach().cpu().numpy()
+            return np.asarray(value)
+
+        phase = as_numpy(outputs["phase_rad"]).astype(np.float32, copy=False).reshape(-1)
+        pixel_index = as_numpy(outputs["pixel_index"])
+        if pixel_index.ndim != 2 or pixel_index.shape[1] != 2:
+            raise ValueError("Phase visualization pixel_index must have shape [N, 2].")
+        if pixel_index.shape[0] != phase.shape[0]:
+            raise ValueError(
+                "Phase visualization phase and pixel_index must contain the same samples."
+            )
+        sampled_rows = np.asarray(rows, dtype=np.int64)
+        sampled_columns = np.asarray(columns, dtype=np.int64)
+        selected = (
+            np.isin(pixel_index[:, 0], sampled_rows)
+            & np.isin(pixel_index[:, 1], sampled_columns)
+            & np.isfinite(phase)
+        )
+        if not np.any(selected):
+            raise ValueError(
+                "The shared visualization grid contains no finite phase samples."
+            )
+        pixel_index = pixel_index[selected]
+        phase = phase[selected]
+        compact_rows = np.searchsorted(sampled_rows, pixel_index[:, 0])
+        compact_columns = np.searchsorted(sampled_columns, pixel_index[:, 1])
+        phase_degrees = np.rad2deg(phase)
+        # The network output is an unconstrained real phase.  Wrap only for
+        # display so equivalent 0/360-degree branches share a cyclic color.
+        wrapped_phase_degrees = (phase_degrees + 180.0) % 360.0 - 180.0
+        binary_distance = np.square(np.sin(phase))
+        phase_map = np.full(
+            (sampled_rows.size, sampled_columns.size), np.nan, dtype=np.float32
+        )
+        binary_map = np.full_like(phase_map, np.nan)
+        phase_map[compact_rows, compact_columns] = wrapped_phase_degrees
+        binary_map[compact_rows, compact_columns] = binary_distance
+        map_x_mm, map_y_mm = map_coordinates(raster, sampled_rows, sampled_columns)
+        x_centers = np.nanmedian(map_x_mm, axis=0)
+        y_centers = np.nanmedian(map_y_mm, axis=1)
+
+        def outer_edges(centers: np.ndarray) -> tuple[float, float]:
+            if centers.size == 1:
+                return float(centers[0] - 0.5), float(centers[0] + 0.5)
+            return (
+                float(centers[0] - 0.5 * (centers[1] - centers[0])),
+                float(centers[-1] + 0.5 * (centers[-1] - centers[-2])),
+            )
+
+        image_extent = (*outer_edges(x_centers), *outer_edges(y_centers))
+        figure = Figure(figsize=(13.0, 6.2))
+        FigureCanvasAgg(figure)
+        axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
+        panels = (
+            (
+                phase_map,
+                "twilight",
+                -180.0,
+                180.0,
+                r"wrapped phase $\phi$ [deg] (mod 360°)",
+                "degrees",
+            ),
+            (
+                binary_map,
+                "viridis",
+                0.0,
+                1.0,
+                r"binary distance $\sin^2(\phi)$",
+                "dimensionless",
+            ),
+        )
+        for axis, (values, cmap, vmin, vmax, title, colorbar_label) in zip(
+            axes, panels, strict=True
+        ):
+            image = axis.imshow(
+                values,
+                origin="lower",
+                extent=image_extent,
+                interpolation="none",
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                rasterized=True,
+            )
+            axis.set_aspect("equal", adjustable="box")
+            axis.set_xlabel("Carrington chart X [Mm]")
+            axis.set_ylabel("Carrington chart Y [Mm]")
+            axis.set_title(title)
+            axis.grid(alpha=0.15)
+            colorbar = figure.colorbar(
+                image, ax=axis, orientation="horizontal", pad=0.10, fraction=0.08
+            )
+            colorbar.set_label(colorbar_label)
+
+        if step < cold_steps:
+            state = "cold start: binary penalty off"
+        elif step >= handoff_step:
+            state = "hard handoff: phase mask bypassed"
+        else:
+            state = "phase network active; physical field remains unrotated"
+        figure.suptitle(
+            f"Stokes disambiguation phase — {label} — step {step}\n{state}"
         )
         return figure
 

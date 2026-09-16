@@ -28,6 +28,11 @@ from .opacity import (
     integrated_line_opacity,
     planck_lambda,
 )
+from .optically_thin import (
+    SI_EMISSION_MEASURE_TO_CGS,
+    integrate_ne2_response,
+    integrate_optically_thin,
+)
 from .plasma import SolarPlasmaState, SolarPlasmaTable, THOMSON_CROSS_SECTION_M2
 from .polarization import PolarizedLineOpacity, PropagationDiagnostics
 from .profiles import VoigtFaraday, voigt_faraday
@@ -80,6 +85,7 @@ __all__ = [
     "StratifiedAtmosphere",
     "StratifiedAtmosphereModel",
     "SynthesisDiagnostics",
+    "SI_EMISSION_MEASURE_TO_CGS",
     "TransferPath",
     "THOMSON_CROSS_SECTION_M2",
     "VoigtFaraday",
@@ -95,6 +101,8 @@ __all__ = [
     "doppler_velocity",
     "doppler_width_frequency",
     "integrated_line_opacity",
+    "integrate_ne2_response",
+    "integrate_optically_thin",
     "intersect_sphere_near_side",
     "intersect_sphere_near_side_from_local_point",
     "load_solar_reference",

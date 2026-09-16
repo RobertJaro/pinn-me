@@ -22,6 +22,7 @@ from prom3theus.core import (
     project_cartesian_to_spherical,
 )
 from prom3theus.inversion.depth_sampling import (
+    reference_height_grid,
     importance_fine_distances,
     jitter_depth_grid,
     merge_depth_samples,
@@ -49,6 +50,13 @@ class ForwardSynthesisBackend(Protocol):
     emergent, high-resolution Stokes profiles.  The reference-extinction method
     supplies only an opacity-guided sampling proposal; its result is detached
     before selecting fine ray points.
+
+    A backend may additionally offer an optional, duck-typed
+    ``refinement_extinction(atmosphere)`` returning
+    ``(reference_extinction, line_centre_extinction)``, which lets refinement
+    resolve the line-core forming layers as well as the continuum.  It stays
+    off this protocol deliberately: a backend without it remains a valid
+    implementation and simply refines on the continuum alone.
     """
 
     @property
@@ -103,6 +111,14 @@ class LTESynthesisBackend:
             atmosphere.gas_pressure,
         )
 
+    def refinement_extinction(
+        self,
+        atmosphere: StratifiedAtmosphere,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if atmosphere.gas_pressure is None:
+            raise ValueError("LTE refinement requires atmospheric gas pressure.")
+        return self.synthesizer.refinement_extinction(atmosphere)
+
     def synthesize(
         self,
         atmosphere: StratifiedAtmosphere,
@@ -119,21 +135,54 @@ class LTESynthesisBackend:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class DepthRefinement:
-    """Opacity-guided fine-ray sampling configuration."""
+def rotate_transverse_stokes_field(
+    magnetic_field_observer: torch.Tensor,
+    phase_rad: torch.Tensor | float,
+) -> torch.Tensor:
+    """Rotate the observer-frame transverse field while preserving LOS field.
 
-    enabled: bool
-    sample_count: int
-    uniform_weight_floor: float
+    ``phase_rad`` may be specified for every sampled point or for the leading
+    ray dimensions.  A phase whose shape is a prefix of the field's leading
+    dimensions is broadcast over the remaining dimensions, which keeps one
+    observer-pixel phase constant through all of that ray's depth samples.
+    """
 
-    def __post_init__(self) -> None:
-        if type(self.enabled) is not bool:
-            raise TypeError("DepthRefinement.enabled must be boolean.")
-        if type(self.sample_count) is not int or self.sample_count < 1:
-            raise ValueError("DepthRefinement.sample_count must be a positive integer.")
-        if not 0.0 <= self.uniform_weight_floor <= 1.0:
-            raise ValueError("DepthRefinement.uniform_weight_floor must lie in [0, 1].")
+    if magnetic_field_observer.ndim < 1 or magnetic_field_observer.shape[-1] != 3:
+        raise ValueError("magnetic_field_observer must end in three components")
+    phase = torch.as_tensor(
+        phase_rad,
+        dtype=magnetic_field_observer.dtype,
+        device=magnetic_field_observer.device,
+    )
+    leading_shape = magnetic_field_observer.shape[:-1]
+    if phase.ndim > len(leading_shape):
+        raise ValueError(
+            "phase_rad cannot have more dimensions than the magnetic field leading shape"
+        )
+    if phase.ndim < len(leading_shape) and tuple(phase.shape) == tuple(
+        leading_shape[: phase.ndim]
+    ):
+        phase = phase.reshape(*phase.shape, *([1] * (len(leading_shape) - phase.ndim)))
+    try:
+        phase = torch.broadcast_to(phase, leading_shape)
+    except RuntimeError as error:
+        raise ValueError(
+            f"phase_rad shape {tuple(phase.shape)} is not broadcastable to "
+            f"{tuple(leading_shape)}"
+        ) from error
+    if not torch.isfinite(phase).all():
+        raise FloatingPointError("The magnetic azimuth phase must be finite")
+    cosine = torch.cos(phase)
+    sine = torch.sin(phase)
+    transverse = magnetic_field_observer[..., :2]
+    rotated = torch.stack(
+        (
+            cosine * transverse[..., 0] - sine * transverse[..., 1],
+            sine * transverse[..., 0] + cosine * transverse[..., 1],
+        ),
+        dim=-1,
+    )
+    return torch.cat((rotated, magnetic_field_observer[..., 2:]), dim=-1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +214,7 @@ class LTEForwardComposition:
         instrument: Any,
         velocity_synthesis_mode: str,
         depth_refinement: DepthRefinement,
+        reference_log_tau500_bounds: tuple[float, float] = (-5.0, 1.0),
     ):
         if not isinstance(backend, ForwardSynthesisBackend):
             raise TypeError("backend must implement ForwardSynthesisBackend.")
@@ -175,6 +225,7 @@ class LTEForwardComposition:
             velocity_synthesis_mode
         )
         self.depth_refinement = depth_refinement
+        self.reference_log_tau500_bounds = reference_log_tau500_bounds
 
     def prepare_wavelength_grid(
         self,
@@ -213,12 +264,21 @@ class LTEForwardComposition:
 
         refinement = self.depth_refinement
         with torch.no_grad():
-            alpha500 = self.backend.reference_extinction(coarse_atmosphere)
+            # Refine on the continuum and the line cores together where the
+            # backend can supply both; a core forms far above the tau500=1
+            # layer and would otherwise carry almost no proposal mass.
+            combined = getattr(self.backend, "refinement_extinction", None)
+            if callable(combined):
+                alpha500, line_extinction = combined(coarse_atmosphere)
+            else:
+                alpha500 = self.backend.reference_extinction(coarse_atmosphere)
+                line_extinction = None
             fine_distance_m = importance_fine_distances(
                 alpha500,
                 coarse_trace.distance_m,
                 refinement.sample_count,
                 refinement.uniform_weight_floor,
+                line_extinction=line_extinction,
             )
             direction = ray_direction.to(fine_distance_m)
             direction = direction / torch.linalg.vector_norm(
@@ -235,9 +295,10 @@ class LTEForwardComposition:
                 + (fine_distance_m / self.atmosphere_model.solar_radius_m)[..., None]
                 * direction[..., None, :]
             )
-            fine_chart_xy_mm, fine_geometric_height_m = (
-                self.atmosphere_model._position_chart_height(fine_position_rsun)
-            )
+            (
+                fine_chart_xy_mm,
+                fine_geometric_height_m,
+            ) = self.atmosphere_model._position_chart_height(fine_position_rsun)
             fine_position_m = fine_position_rsun * self.atmosphere_model.solar_radius_m
             combined_distance_m = torch.cat(
                 (coarse_trace.distance_m, fine_distance_m),
@@ -260,9 +321,7 @@ class LTEForwardComposition:
                 fine_geometric_height_m,
                 order,
             )
-            depth_grid = torch.linspace(
-                coarse_atmosphere.log_tau500[0],
-                coarse_atmosphere.log_tau500[-1],
+            depth_grid = torch.arange(
                 distance_m.shape[-1],
                 dtype=distance_m.dtype,
                 device=distance_m.device,
@@ -280,23 +339,26 @@ class LTEForwardComposition:
             fine_evaluation_coordinates,
             fine_geometric_height_m,
         )
+        field_names = [
+            "temperature",
+            "velocity_field",
+            "microturbulence",
+            "magnetic_field",
+            "gas_pressure",
+        ]
+        if coarse_atmosphere.vector_potential is not None:
+            field_names.append("vector_potential")
         fields = {
             name: merge_depth_samples(
                 getattr(coarse_atmosphere, name),
                 fine_fields[name],
                 order,
             )
-            for name in (
-                "temperature",
-                "velocity_field",
-                "microturbulence",
-                "magnetic_field",
-                "gas_pressure",
-            )
+            for name in field_names
         }
         atmosphere = replace(
             coarse_atmosphere,
-            log_tau500=depth_grid,
+            depth_coordinate=depth_grid,
             geometric_height_m=geometric_height_m,
             **fields,
         )
@@ -307,6 +369,11 @@ class LTEForwardComposition:
             geometric_height_m=geometric_height_m,
         )
         return atmosphere, trace
+
+    def sampling_heights(self, depth_grid: torch.Tensor) -> torch.Tensor:
+        return reference_height_grid(
+            self.atmosphere_model, depth_grid, self.reference_log_tau500_bounds
+        )
 
     def trace_atmosphere(
         self,
@@ -319,7 +386,7 @@ class LTEForwardComposition:
         atmosphere, trace = self.atmosphere_model.trace_rays(
             coordinates,
             ray_direction,
-            depth_grid,
+            self.sampling_heights(depth_grid),
         )
         if self.depth_refinement.enabled:
             atmosphere, trace = self._refine_ray_sampling(
@@ -432,6 +499,7 @@ class LTEForwardComposition:
         return_atmosphere: bool = False,
         return_details: bool = False,
         instrument_response: Mapping[str, torch.Tensor] | None = None,
+        magnetic_azimuth_phase_rad: torch.Tensor | float | None = None,
     ) -> dict[str, Any]:
         """Evaluate the complete atmosphere-to-observed-Stokes graph."""
 
@@ -452,8 +520,8 @@ class LTEForwardComposition:
         else:
             depth_grid = torch.as_tensor(
                 depth_grid,
-                dtype=self.atmosphere_model.log_tau500.dtype,
-                device=self.atmosphere_model.log_tau500.device,
+                dtype=self.atmosphere_model.solar_radius_m.dtype,
+                device=self.atmosphere_model.solar_radius_m.device,
             )
             if (
                 depth_grid.ndim != 1
@@ -499,9 +567,15 @@ class LTEForwardComposition:
             sampled_atmosphere.magnetic_field,
             stokes_basis,
         )
+        magnetic_field_phase_observer = magnetic_field_observer
+        if magnetic_azimuth_phase_rad is not None:
+            magnetic_field_phase_observer = rotate_transverse_stokes_field(
+                magnetic_field_observer,
+                magnetic_azimuth_phase_rad,
+            )
         magnetic_field_synthesis_observer = (
             self.instrument.polarization_convention.to_synthesis_frame(
-                magnetic_field_observer
+                magnetic_field_phase_observer
             )
         )
         velocity_field_corotating_observer = project_vectors_to_stokes(
@@ -604,6 +678,7 @@ class LTEForwardComposition:
                     runtime.instrument_line_of_sight_velocity_correction_m_per_s
                 ),
                 "magnetic_field_observer": magnetic_field_observer,
+                "magnetic_field_phase_observer": magnetic_field_phase_observer,
                 "magnetic_field_synthesis_observer": (
                     magnetic_field_synthesis_observer
                 ),
@@ -621,9 +696,9 @@ class LTEForwardComposition:
 
 
 __all__ = [
-    "DepthRefinement",
     "ForwardRuntime",
     "ForwardSynthesisBackend",
     "LTEForwardComposition",
     "LTESynthesisBackend",
+    "rotate_transverse_stokes_field",
 ]

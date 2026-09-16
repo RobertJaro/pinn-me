@@ -1,0 +1,1165 @@
+[
+  {
+    "suite": "p3s-data-audit-tests",
+    "counts": {
+      "passed": 149,
+      "failed": 4,
+      "skipped": 1
+    },
+    "tests": [
+      {
+        "test": "tests.observations.test_bulk.test_bulk_matches_samples_without_pixel_fetch_or_permutation",
+        "status": "passed",
+        "seconds": 0.029
+      },
+      {
+        "test": "tests.observations.test_bulk.test_resident_blocks_reused_and_budget_enforced",
+        "status": "passed",
+        "seconds": 0.007
+      },
+      {
+        "test": "tests.observations.test_bulk.test_sparse_diagnostics_read_slabs_and_keep_native_ids",
+        "status": "passed",
+        "seconds": 0.008
+      },
+      {
+        "test": "tests.observations.test_bulk.test_bulk_owns_payload_and_does_not_modify_maps",
+        "status": "passed",
+        "seconds": 0.013
+      },
+      {
+        "test": "tests.observations.test_bulk.test_reader_failure_reaches_consumer_and_closes",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_bulk.test_validation_in_slabs_preserves_invalid_geometry_checks",
+        "status": "passed",
+        "seconds": 0.007
+      },
+      {
+        "test": "tests.observations.test_bulk.test_auxiliary_partial_block_survives_reference_epochs",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_bulk.test_bulk_stokes_response_and_chronological_order",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_bulk.test_npy_mapping_is_copy_on_write_and_rejects_noncontiguous_store",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_bulk.test_unordered_explicit_pixel_selection_fails_without_hanging",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_bulk.test_dense_batches_slice_precompacted_storage",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_canonical_raster_dataset_and_batch_are_instrument_neutral",
+        "status": "passed",
+        "seconds": 0.007
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_observation_spec_records_explicit_velocity_gauge",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_raster_rejects_degenerate_valid_surface_geometry",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_raster_rejects_invalid_physical_values_at_valid_pixels",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_raster_requires_stokes_basis_to_share_the_ray_orientation",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_dataset_rejects_lossy_indices_and_reserved_auxiliary_names",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_sampling_bounds_require_explicit_consistent_solar_geometry",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_store_is_json_and_npy_with_checksum_and_signature",
+        "status": "passed",
+        "seconds": 0.008
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_multi_raster_store_rehydrates_training_and_hmi_response",
+        "status": "passed",
+        "seconds": 0.084
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_store_signature_excludes_resource_installation_directory",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_contracts_and_store.test_store_signature_changes_when_source_file_content_changes",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_restore_keeps_only_paths_and_reads_on_demand",
+        "status": "passed",
+        "seconds": 0.005
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_rank_zero_reuses_and_worker_never_builds",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_worker_timeout_does_not_prepare",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_prepared_training_loader_restores_without_preparation",
+        "status": "passed",
+        "seconds": 0.012
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_native_image_dataset_roundtrip_preserves_bulk_and_sparse_reads",
+        "status": "passed",
+        "seconds": 0.008
+      },
+      {
+        "test": "tests.observations.test_data_module_persistence.test_failed_save_keeps_previous_module",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_first_batches_mix_all_times_and_positions_without_pixel_fetch",
+        "status": "passed",
+        "seconds": 0.141
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_training_only_slices_prepared_tensors_and_randomizes_batch_order",
+        "status": "passed",
+        "seconds": 0.216
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_resume_preserves_next_batch_across_budgets_and_prefetch",
+        "status": "passed",
+        "seconds": 0.281
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_channels_always_present_and_each_pool_exhausts_before_repeating",
+        "status": "passed",
+        "seconds": 0.337
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_sequential_checkpoint_requires_explicit_order_migration",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_persistent_training_pool_reused_without_preparation_reads",
+        "status": "passed",
+        "seconds": 0.078
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_resume_with_changed_batch_size_restarts_chunks_but_preserves_data_checks",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_exactly_one_sample_shuffle_and_none_when_reusing_files",
+        "status": "passed",
+        "seconds": 0.155
+      },
+      {
+        "test": "tests.observations.test_global_shuffle.test_training_preparation_finishes_before_batch_iteration",
+        "status": "passed",
+        "seconds": 0.068
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_contract_preserves_channel_time_units_and_geometry",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_contract_rejects_nonphysical_values_and_fake_ray_orientation",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_emits_physical_fields_and_derived_indices",
+        "status": "passed",
+        "seconds": 0.003
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_diagnostic_indices_are_complete_or_spatially_distributed",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_normalizes_intensity_and_uncertainty_without_changing_raster",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_rejects_invalid_intensity_scale[0.0]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_rejects_invalid_intensity_scale[-1.0]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_rejects_invalid_intensity_scale[nan]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_dataset_rejects_invalid_intensity_scale[inf]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_image_data_shares_fixed_channel_scales_across_exposures_and_loaders",
+        "status": "passed",
+        "seconds": 0.003
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_stored_image_data_module_keeps_native_grids_and_complete_group",
+        "status": "passed",
+        "seconds": 0.251
+      },
+      {
+        "test": "tests.observations.test_image_contracts_and_data.test_stored_image_data_module_rejects_incomplete_or_misunit_group",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_image_scene.test_scene_transform_maps_physical_position_and_absolute_time",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.observations.test_image_scene.test_scene_validates_full_image_ray_support_to_outer_shell",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.observations.test_image_scene.test_scene_rejects_incompatible_radius_and_noncoronal_height_domain",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_scene.test_scene_transform_rejects_points_outside_chart_hemisphere",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_image_store.test_image_store_round_trip_is_json_npy_and_memory_mappable",
+        "status": "passed",
+        "seconds": 0.008
+      },
+      {
+        "test": "tests.observations.test_image_store.test_image_store_rejects_checksum_corruption_and_unsafe_paths",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.observations.test_image_store.test_image_store_signature_scopes_preparation_dependencies",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_image_store.test_image_store_rejects_duplicate_group_channel_identity",
+        "status": "passed",
+        "seconds": 0.008
+      },
+      {
+        "test": "tests.observations.test_loading.test_workers_prefetch_and_persist_without_pinned_memory",
+        "status": "passed",
+        "seconds": 6.136
+      },
+      {
+        "test": "tests.observations.test_loading.test_loader_settings_preserve_explicit_worker_and_pinning_choices",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_scene_rebase.test_rebase_changes_only_chart_and_time_coordinates",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.observations.test_scene_rebase.test_explicit_time_origin_does_not_require_duplicate_reference_time",
+        "status": "passed",
+        "seconds": 0.157
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_restored_setup_reuses_arrays_indexes_and_aliases",
+        "status": "passed",
+        "seconds": 0.108
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[source]",
+        "status": "passed",
+        "seconds": 0.017
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[array]",
+        "status": "passed",
+        "seconds": 0.016
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[snapshot]",
+        "status": "passed",
+        "seconds": 0.014
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[code]",
+        "status": "passed",
+        "seconds": 0.009
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[configuration]",
+        "status": "passed",
+        "seconds": 0.013
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_changed_inputs_invalidate_setup[added_file]",
+        "status": "passed",
+        "seconds": 0.014
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_joint_loader_reuses_cache_and_explicit_rebuild_bypasses_it",
+        "status": "failed",
+        "seconds": 0.022,
+        "message": "AssertionError: assert (LoadedJointStream(prepared=PreparedObservationStream(name='aia', descriptor=ObservationDescriptor(observation_id='aia'...metadata=mappingproxy({}), setup_metadata=mappingproxy({'scales': (1.0,)}), scene_contract=None, sampling_support=None) is LoadedJointStream(prepared=PreparedObservationStream(name='aia', descriptor=ObservationDescriptor(observation_id='aia'...metadata=mappingproxy({}), setup_metadata=mappingproxy({'scales': (1.0,)}), scene_contract=None, sampling_support=None) and LoadedJointStream(prepared=PreparedObservationStream(name='aia', descriptor=ObservationDescriptor(observation_id='aia'...metadata=mappingproxy({}), setup_metadata=mappingproxy({'scales': (1.0,)}), scene_contract=None, sampling_support=None) is not LoadedJointStream(prepared=PreparedObservationStream(name='aia', descriptor=ObservationDescriptor(observation_id='aia'...metadata=mappingproxy({}), setup_metadata=mappingproxy({'scales': (1.0,)}), scene_contract=None, sampling_support=None))"
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_setup_restores_in_a_fresh_python_process",
+        "status": "passed",
+        "seconds": 3.008
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_stokes_setup_reuses_dataset_sampling_bounds_and_auxiliary_arrays",
+        "status": "passed",
+        "seconds": 0.015
+      },
+      {
+        "test": "tests.observations.test_startup_cache.test_preparation_fingerprint_ignores_trainer_and_diagnostic_edits",
+        "status": "passed",
+        "seconds": 0.005
+      },
+      {
+        "test": "tests.observations.test_streams.test_descriptor_normalizes_image_spec_without_sharing_array_schema",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.observations.test_streams.test_prepared_stream_collection_is_ordered_immutable_and_sets_up_all",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_streams.test_prepared_stream_requires_a_real_store_and_valid_signature",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_joint_shuffle_disk_reload_and_batch_resize",
+        "status": "passed",
+        "seconds": 0.127
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_invalid_shapes_never_publish_partial_store",
+        "status": "passed",
+        "seconds": 0.01
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_serialized_dataset_contains_only_file_metadata_and_reopens_without_array_load",
+        "status": "passed",
+        "seconds": 0.02
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_batch_reads_readonly_maps_and_copies_only_the_selected_slice[0-64]",
+        "status": "passed",
+        "seconds": 0.021
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_batch_reads_readonly_maps_and_copies_only_the_selected_slice[70-64]",
+        "status": "passed",
+        "seconds": 0.022
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_batch_reads_readonly_maps_and_copies_only_the_selected_slice[156-17]",
+        "status": "passed",
+        "seconds": 0.021
+      },
+      {
+        "test": "tests.observations.test_tensor_dataset.test_read_closes_mapping_if_batch_copy_fails",
+        "status": "passed",
+        "seconds": 0.01
+      },
+      {
+        "test": "tests.application.test_aia_render_sampling.test_aia_render_uses_shared_lte_grid_and_normalized_targets[6]",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.application.test_aia_render_sampling.test_aia_render_uses_shared_lte_grid_and_normalized_targets[100]",
+        "status": "passed",
+        "seconds": 0.007
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_stokes_diagnostics_reuse_lte_renderers",
+        "status": "passed",
+        "seconds": 7.927
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_online_wandb_logger_and_validation_uploads",
+        "status": "passed",
+        "seconds": 0.034
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_default_stokes_builder_converts_yaml_component_keys",
+        "status": "failed",
+        "seconds": 0.021,
+        "message": "TypeError: StokesObjective.__init__() got an unexpected keyword argument 'qu_warmup_steps'"
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_inversion_optimizes_both_streams_and_resumes[0.0-False]",
+        "status": "passed",
+        "seconds": 0.162
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_inversion_optimizes_both_streams_and_resumes[0.0-True]",
+        "status": "passed",
+        "seconds": 0.101
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_inversion_optimizes_both_streams_and_resumes[0.1-False]",
+        "status": "passed",
+        "seconds": 0.087
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_joint_inversion_optimizes_both_streams_and_resumes[0.1-True]",
+        "status": "passed",
+        "seconds": 0.086
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_build_assembles_one_atmosphere_and_balanced_deterministic_batches",
+        "status": "passed",
+        "seconds": 0.018
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_evaluation_and_autograd_smoke_do_not_mutate_state_or_grad_fields",
+        "status": "passed",
+        "seconds": 0.019
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_gradient_smoke_checks_bounded_shared_physics_and_regularization",
+        "status": "passed",
+        "seconds": 0.019
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_configured_gradient_failure_is_fatal_and_preserves_grad_fields",
+        "status": "passed",
+        "seconds": 0.02
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_dry_run_writes_only_the_auditable_json_report",
+        "status": "passed",
+        "seconds": 0.023
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_runner_source_has_no_fitting_or_checkpoint_lifecycle",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_dry_run_routes_aia_payload_and_native_rasters_to_default_registry",
+        "status": "passed",
+        "seconds": 0.02
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_validation_cap_must_include_each_native_image_loader",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_contribution_ray_budget_is_global_balanced_and_capacity_aware",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_joint_runner.test_physics_bounds_conservatively_cover_complete_aia_ray_support",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_builder_uses_only_stokes_source_footprint[magnetic_divergence]",
+        "status": "passed",
+        "seconds": 0.616
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_builder_uses_only_stokes_source_footprint[induction]",
+        "status": "passed",
+        "seconds": 0.714
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options0]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options1]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options2]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options3]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options4]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options5]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options6]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options7]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options8]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_boundary_assembly.test_rejects_invalid_potential_schedule_or_grid[options9]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_times.test_observation_times_are_unique_sorted_shared_scene_hours",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_times.test_observation_times_reject_empty_or_nonfinite_support[values0]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_potential_times.test_observation_times_reject_empty_or_nonfinite_support[values1]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_time_selection.test_yaml_window_and_timezone_conversion",
+        "status": "passed",
+        "seconds": 0.014
+      },
+      {
+        "test": "tests.application.test_time_selection.test_invalid_window[bad-2011-02-14]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_time_selection.test_invalid_window[2011-02-14-2011-02-14]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_time_selection.test_invalid_window[2011-02-15-2011-02-14]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.application.test_time_selection.test_hmi_filters_actual_tai_times_before_loading[None-expected0]",
+        "status": "passed",
+        "seconds": 0.13
+      },
+      {
+        "test": "tests.application.test_time_selection.test_hmi_filters_actual_tai_times_before_loading[indices1-expected1]",
+        "status": "passed",
+        "seconds": 0.115
+      },
+      {
+        "test": "tests.application.test_time_selection.test_default_loader_passes_same_absolute_window_to_each_instrument",
+        "status": "passed",
+        "seconds": 0.015
+      },
+      {
+        "test": "tests.application.test_validation_batch_read_limit.test_validation_does_not_read_past_requested_limit",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_configuration.test_physics_collocation_counts_are_strict_integers",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_configuration.test_objective_weighting_applies_exclusions_and_preserves_component_order",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.training.test_cuda_prefetch.test_cuda_lookahead_matches_values_and_gradients",
+        "status": "skipped",
+        "seconds": 0.0,
+        "message": "CUDA is required for copy-stream validation"
+      },
+      {
+        "test": "tests.training.test_diagnostic_schedule.test_diagnostics_skip_startup_and_keep_interval_and_final_evaluation",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_checkpoint_contract_ignores_worker_policy_but_retains_batch_size",
+        "status": "failed",
+        "seconds": 0.0,
+        "message": "AssertionError: assert {'configuration': {'streams': [{'observation': {'loader': {}}}]}} != {'configuration': {'streams': [{'observation': {'loader': {}}}]}}\n +  where {'configuration': {'streams': [{'observation': {'loader': {}}}]}} = <function _scientific_contract at 0x14091be20>({'configuration': {'streams': [{'observation': {'loader': {'batch_size': 2, 'pin_memory': True, 'workers': 0}}}]}})\n +  and   {'configuration': {'streams': [{'observation': {'loader': {}}}]}} = <function _scientific_contract at 0x14091be20>({'configuration': {'streams': [{'observation': {'loader': {'batch_size': 4, 'pin_memory': False, 'workers': 1}}}]}})\n +    where {'configuration': {'streams': [{'observation': {'loader': {'batch_size': 4, 'pin_memory': False, 'workers': 1}}}]}} = <function test_checkpoint_contract_ignores_worker_policy_but_retains_batch_size.<locals>.contract at 0x1435b51c0>(1, False, 4)"
+      },
+      {
+        "test": "tests.training.test_metrics.test_gradient_checks_preserve_parameter_specific_errors[nan]",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.training.test_metrics.test_gradient_checks_preserve_parameter_specific_errors[inf]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_gradient_checks_preserve_parameter_specific_errors[-inf]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_same_modality_metrics_keep_both_streams",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_training_and_validation_have_distinct_minimal_summaries",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_training_logs_only_progress_summary",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_zero_weight_stream_is_not_logged_but_active_zero_loss_is",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_metrics.test_inactive_shared_term_does_not_create_a_training_series",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_resume_contract.test_training_changes_are_allowed_without_mutating_recorded_config",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_resume_contract.test_model_data_and_reference_geometry_changes_remain_incompatible",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_resume_contract.test_resume_keeps_new_loss_buffers_and_applies_requested_learning_rate",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_reference_defines_epoch_and_other_stream_continues",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_scheduler_rejects_invalid_reference_or_empty_stream[loaders0-a]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_scheduler_rejects_invalid_reference_or_empty_stream[loaders1-missing]",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_only_completed_batches_are_checkpointed",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_resume_seeks_without_reading_consumed_payloads",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_legacy_checkpoint_requires_explicit_migration",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_lightning_mid_epoch_checkpoint_commits_before_save",
+        "status": "passed",
+        "seconds": 0.024
+      },
+      {
+        "test": "tests.training.test_stream_scheduler.test_shuffle_contract_requires_explicit_migration_and_preserves_other_checks",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_public_p3s_roundtrip_without_observations_or_trainer[False]",
+        "status": "passed",
+        "seconds": 18.471
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_public_p3s_roundtrip_without_observations_or_trainer[True]",
+        "status": "passed",
+        "seconds": 18.486
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_snapshot_rejects_old_format",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_nonfinite_save_keeps_previous_snapshot",
+        "status": "passed",
+        "seconds": 6.169
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_third_observation_type_registers_without_runner_changes",
+        "status": "failed",
+        "seconds": 12.395,
+        "message": "AttributeError: Can't pickle local object 'test_third_observation_type_registers_without_runner_changes.<locals>.PointData'"
+      },
+      {
+        "test": "tests.artifacts.test_stream_state.test_stokes_snapshot_restores_prediction_and_export_facade",
+        "status": "passed",
+        "seconds": 6.944
+      }
+    ]
+  },
+  {
+    "suite": "p3s-data-audit-extended",
+    "counts": {
+      "passed": 74
+    },
+    "tests": [
+      {
+        "test": "tests.instruments.test_hmi_observation.test_detector_basis_tracks_rotated_ccd_up_and_is_right_handed",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_observer_velocity_projection_preserves_component_signs",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_observer_velocity_requires_all_keywords_and_identical_segments",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_detector_grid_rejects_coordinates_outside_the_physical_ccd",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_calibration_shifts_atlas_without_shifting_filter_grid",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_grouping_rejects_incomplete_sets",
+        "status": "passed",
+        "seconds": 0.005
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_hmi_acquisition_selection_uses_source_sequence_indices",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_grouping_accepts_jsoc_lowercase_series_filename",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_grouping_accepts_all_camera_filenames[1]",
+        "status": "passed",
+        "seconds": 0.003
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_grouping_accepts_all_camera_filenames[2]",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_grouping_accepts_all_camera_filenames[3]",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_physical_time_uses_t_obs_while_record_identity_uses_t_rec",
+        "status": "passed",
+        "seconds": 0.045
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_jsoc_time_conversion_preserves_timezone_aware_instants",
+        "status": "passed",
+        "seconds": 0.006
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_header_requires_explicit_tai_record_time",
+        "status": "passed",
+        "seconds": 0.037
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-2-1]",
+        "status": "passed",
+        "seconds": 0.088
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-2-2]",
+        "status": "passed",
+        "seconds": 0.086
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-2-3]",
+        "status": "passed",
+        "seconds": 0.087
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-3-1]",
+        "status": "passed",
+        "seconds": 0.086
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-3-2]",
+        "status": "passed",
+        "seconds": 0.088
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[primary-3-3]",
+        "status": "passed",
+        "seconds": 0.085
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-2-1]",
+        "status": "passed",
+        "seconds": 0.251
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-2-2]",
+        "status": "passed",
+        "seconds": 0.247
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-2-3]",
+        "status": "passed",
+        "seconds": 0.242
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-3-1]",
+        "status": "passed",
+        "seconds": 0.251
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-3-2]",
+        "status": "passed",
+        "seconds": 0.253
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[extension-3-3]",
+        "status": "passed",
+        "seconds": 0.248
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-2-1]",
+        "status": "passed",
+        "seconds": 0.423
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-2-2]",
+        "status": "passed",
+        "seconds": 0.421
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-2-3]",
+        "status": "passed",
+        "seconds": 0.426
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-3-1]",
+        "status": "passed",
+        "seconds": 0.419
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-3-2]",
+        "status": "passed",
+        "seconds": 0.418
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_single_and_combined_camera_stokes_preserve_calibration_identity[compressed-3-3]",
+        "status": "passed",
+        "seconds": 0.419
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_stokes_loading_accepts_missing_quality",
+        "status": "passed",
+        "seconds": 0.081
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_acquisition_header_rejects_unknown_camera",
+        "status": "passed",
+        "seconds": 0.037
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_stokes_cube_rejects_segment_identity_mismatch",
+        "status": "passed",
+        "seconds": 0.051
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_filter_operator_uses_packaged_provenance_and_preserves_constant_stokes",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_hmi_observation.test_tiny_sequence_builds_calibrated_rasters_and_response_batches",
+        "status": "passed",
+        "seconds": 0.602
+      },
+      {
+        "test": "tests.instruments.test_hmi_header_scan.test_response_header_scan_is_parallel_and_deduplicated",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_adapter_preserves_statistics_and_complete_group",
+        "status": "passed",
+        "seconds": 0.015
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_channel_maxima_use_all_valid_exposures_and_preserve_negative_values",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_channel_maxima_are_estimated_after_time_selection",
+        "status": "passed",
+        "seconds": 0.03
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_adapter_rejects_response_calibration_mismatch",
+        "status": "passed",
+        "seconds": 0.01
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_legacy_uncertainty_store_uses_intensity_only_scales_without_rewriting",
+        "status": "passed",
+        "seconds": 0.011
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_channel_scale_depends_only_on_observed_intensity",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_adapter_rejects_unversioned_or_double_corrected_metadata",
+        "status": "passed",
+        "seconds": 0.02
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_adapter_rejects_missing_or_inconsistent_records",
+        "status": "passed",
+        "seconds": 0.02
+      },
+      {
+        "test": "tests.instruments.test_aia_observation.test_prepared_aia_adapter_rejects_time_geometry_unit_and_statistics_drift",
+        "status": "passed",
+        "seconds": 0.032
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_only_explicit_lte_instrument_and_observation_discriminators_are_registered",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_hinode_operator_preserves_constant_profiles_and_gradients",
+        "status": "passed",
+        "seconds": 0.005
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_hmi_operator_integrates_batch_local_profiles_and_preserves_gradients",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_instrument_polarization_conventions_are_explicit_and_hmi_only",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_hmi_production_quadrature_has_distinct_float32_continuum_endpoints",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_hmi_production_grid_prepares_the_assembled_float32_lte_forward_model",
+        "status": "passed",
+        "seconds": 0.317
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_public_factory_requires_an_exact_discriminator",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_shipped_observation_sections_construct_their_exact_adapter[hinode_lte_mhs.yaml-HinodeDataModule]",
+        "status": "passed",
+        "seconds": 0.013
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_shipped_observation_sections_construct_their_exact_adapter[hinode_lte_mhs_extrapolation.yaml-HinodeDataModule]",
+        "status": "passed",
+        "seconds": 0.01
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_shipped_observation_sections_construct_their_exact_adapter[hmi_lte_mhs.yaml-HMIDataModule]",
+        "status": "passed",
+        "seconds": 0.009
+      },
+      {
+        "test": "tests.instruments.test_registry_and_operators.test_shipped_observation_sections_construct_their_exact_adapter[hmi_lte_dynamic.yaml-HMIDataModule]",
+        "status": "passed",
+        "seconds": 0.011
+      },
+      {
+        "test": "tests.inversion.test_shell_sampling.test_random_grouped_uses_quadratic_radial_sampling_toward_inner_radius",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.inversion.test_shell_sampling.test_deterministic_grouped_keeps_uniform_radial_sampling",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.inversion.test_shell_sampling.test_random_sides_balances_four_angular_faces_and_returns_outward_normals",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.inversion.test_shell_sampling.test_deterministic_sides_are_repeatable_flat_and_cover_radial_domain",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.inversion.test_shell_sampling.test_random_samplers_allocate_in_bulk_without_point_or_face_loops",
+        "status": "passed",
+        "seconds": 0.004
+      },
+      {
+        "test": "tests.test_architecture.test_repository_contains_only_the_public_yaml_runs",
+        "status": "passed",
+        "seconds": 0.292
+      },
+      {
+        "test": "tests.test_architecture.test_source_tree_contains_only_the_current_package",
+        "status": "passed",
+        "seconds": 0.0
+      },
+      {
+        "test": "tests.test_architecture.test_preprocessing_lives_in_the_installed_package",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.test_architecture.test_radiative_transfer_has_no_application_layer_dependencies",
+        "status": "passed",
+        "seconds": 0.051
+      },
+      {
+        "test": "tests.test_architecture.test_inversion_has_no_training_or_application_dependencies",
+        "status": "passed",
+        "seconds": 0.042
+      },
+      {
+        "test": "tests.test_architecture.test_packaging_exposes_one_new_command_and_only_the_new_namespace",
+        "status": "passed",
+        "seconds": 0.001
+      },
+      {
+        "test": "tests.test_architecture.test_root_import_does_not_load_optional_scientific_stacks",
+        "status": "passed",
+        "seconds": 0.037
+      },
+      {
+        "test": "tests.test_architecture.test_retired_lifecycle_modules_cannot_return",
+        "status": "passed",
+        "seconds": 0.047
+      },
+      {
+        "test": "tests.test_architecture.test_aia_preparation_is_independent_of_optimization",
+        "status": "passed",
+        "seconds": 0.027
+      },
+      {
+        "test": "tests.test_architecture.test_objective_coordinator_is_observation_neutral",
+        "status": "passed",
+        "seconds": 0.002
+      },
+      {
+        "test": "tests.test_architecture.test_snapshot_reconstruction_does_not_import_training",
+        "status": "passed",
+        "seconds": 0.015
+      }
+    ]
+  }
+]

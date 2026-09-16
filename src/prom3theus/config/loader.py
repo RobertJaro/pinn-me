@@ -11,8 +11,8 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
+from .joint_schema import Configuration, JointInversionConfig
 from .resolver import resolve_path
-from .schema import InversionConfig
 
 
 class ConfigError(ValueError):
@@ -68,6 +68,9 @@ def _discriminated_dataclass(
     if "type" not in value:
         raise ConfigError(f"{context}.type is required")
 
+    from .registry import extension_candidates
+
+    dataclass_candidates.extend(extension_candidates(dataclass_candidates))
     requested = value["type"]
     supported: list[Any] = []
     for candidate in dataclass_candidates:
@@ -256,12 +259,29 @@ def parse_config(
     *,
     base_directory: str | Path,
     environ: Mapping[str, str] | None = None,
-) -> InversionConfig:
+) -> Configuration:
     """Validate an already parsed configuration mapping."""
 
+    if not isinstance(document, Mapping):
+        raise ConfigError("config must be a mapping")
+    try:
+        schema_version = document["schema_version"]
+    except KeyError as error:
+        raise ConfigError("config.schema_version is required") from error
+    if type(schema_version) is not int:
+        raise ConfigError("config.schema_version must be an integer")
+    targets = {
+        3: JointInversionConfig,
+    }
+    try:
+        target = targets[schema_version]
+    except KeyError as error:
+        raise ConfigError(
+            f"config.schema_version must be 3; got {schema_version!r}"
+        ) from error
     base = Path(base_directory).expanduser().resolve(strict=False)
     return _decode_dataclass(
-        InversionConfig,
+        target,
         document,
         context="config",
         base_directory=base,
@@ -273,8 +293,8 @@ def load_config(
     path: str | Path,
     *,
     environ: Mapping[str, str] | None = None,
-) -> InversionConfig:
-    """Load and strictly validate a version-1 LTE YAML configuration."""
+) -> Configuration:
+    """Load and strictly validate a supported versioned YAML configuration."""
 
     config_path = Path(path).expanduser().resolve(strict=False)
     try:

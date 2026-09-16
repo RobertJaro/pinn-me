@@ -44,9 +44,9 @@ from prom3theus.instruments.hmi.timeline import (
     HMIDataModule,
     _selected_acquisition_indices,
 )
-from prom3theus.inversion.runner import _inject_coordinate_contract
 from prom3theus.observations import describe_observation_data
-from prom3theus.training.lightning import LTEInversionModule
+from prom3theus.rt import StratifiedAtmosphereModel
+from prom3theus.inversion.data_terms.stokes import StokesObservationTerm
 
 
 def _write_response(path: Path) -> HMIResponseArchive:
@@ -352,16 +352,18 @@ def test_acquisition_grouping_accepts_jsoc_lowercase_series_filename(tmp_path):
     assert len(groups[0][1]) == 24
 
 
-def test_acquisition_grouping_rejects_non_camera_three_filenames(tmp_path):
+@pytest.mark.parametrize("camera", [1, 2, 3])
+def test_acquisition_grouping_accepts_all_camera_filenames(tmp_path, camera):
     for component in "IQUV":
         for filter_index in range(6):
             (
                 tmp_path
-                / f"hmi.S_720s.20240324_000000_TAI.2.{component}{filter_index}.fits"
+                / f"hmi.S_720s.20240324_000000_TAI.{camera}.{component}{filter_index}.fits"
             ).touch()
 
-    with pytest.raises(ValueError, match="CAMERA=3 filenames"):
-        resolve_acquisition_groups(directory=tmp_path)
+    groups = resolve_acquisition_groups(directory=tmp_path)
+    assert len(groups) == 1
+    assert len(groups[0][1]) == 24
 
 
 def test_physical_time_uses_t_obs_while_record_identity_uses_t_rec(tmp_path):
@@ -404,15 +406,60 @@ def test_acquisition_header_requires_explicit_tai_record_time(tmp_path):
         read_acquisition_header(tmp_path / "hmi.S_720s.20240324_010000_TAI.3.I0.fits")
 
 
-def test_acquisition_header_rejects_non_camera_three(tmp_path):
+@pytest.mark.parametrize("camera", [1, 2, 3])
+@pytest.mark.parametrize("hcamid", [2, 3])
+@pytest.mark.parametrize("layout", ["primary", "extension", "compressed"])
+def test_single_and_combined_camera_stokes_preserve_calibration_identity(
+    tmp_path, camera, hcamid, layout
+):
     header = _fits_header(
         date_obs="2024-03-24T00:58:36.000",
         t_rec="2024.03.24_01:00:00_TAI",
     )
-    header["CAMERA"] = 2
+    header["CAMERA"] = camera
+    header["HCAMID"] = hcamid
+    _write_acquisition(tmp_path, "20240324_010000", header)
+    for path in tmp_path.glob("*.fits"):
+        if layout != "primary":
+            data, metadata = fits.getdata(path, header=True)
+            cls = fits.ImageHDU if layout == "extension" else fits.CompImageHDU
+            fits.HDUList([fits.PrimaryHDU(), cls(data=data, header=metadata)]).writeto(
+                path, overwrite=True
+            )
+        if camera != 3:
+            path.rename(path.with_name(path.name.replace("_TAI.3.", f"_TAI.{camera}.")))
+    segments = resolve_segment_files(tmp_path)
+    identity = read_acquisition_header(segments["I0"])
+    assert identity["hcamid"] == hcamid
+    assert identity["acquisition_key"].endswith(f"HCAMID={hcamid}")
+    headers, stokes = read_stokes_cube(segments, require_quality_zero=True)
+    assert all(h["CAMERA"] == camera for h in headers)
+    assert stokes.shape[-2:] == (4, 6)
+
+
+def test_stokes_loading_accepts_missing_quality(tmp_path):
+    header = _fits_header(
+        date_obs="2024-03-24T00:58:36.000",
+        t_rec="2024.03.24_01:00:00_TAI",
+    )
+    del header["QUALITY"]
+    _write_acquisition(tmp_path, "20240324_010000", header)
+    headers, stokes = read_stokes_cube(
+        resolve_segment_files(tmp_path), require_quality_zero=True
+    )
+    assert all("QUALITY" not in h for h in headers)
+    assert stokes.shape[-2:] == (4, 6)
+
+
+def test_acquisition_header_rejects_unknown_camera(tmp_path):
+    header = _fits_header(
+        date_obs="2024-03-24T00:58:36.000",
+        t_rec="2024.03.24_01:00:00_TAI",
+    )
+    header["CAMERA"] = 4
     _write_acquisition(tmp_path, "20240324_010000", header)
 
-    with pytest.raises(ValueError, match="CAMERA=3"):
+    with pytest.raises(ValueError, match="CAMERA in"):
         read_acquisition_header(tmp_path / "hmi.S_720s.20240324_010000_TAI.3.I0.fits")
 
 
@@ -587,7 +634,15 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
             "encoding_config": {"type": "identity"},
         },
     }
-    _inject_coordinate_contract(atmosphere_config, module.raster.metadata)
+    coordinates = module.raster.metadata["coordinates"]
+    geometry = module.raster.metadata["ray_geometry"]
+    atmosphere_config.update(
+        spatial_coordinate_center_mm=coordinates["network_affine"]["center_mm"],
+        spatial_coordinate_scale_mm=coordinates["network_affine"]["scale_mm"],
+        time_coordinate_center_hours=coordinates["time_affine"]["center_hours"],
+        time_coordinate_scale_hours=coordinates["time_affine"]["scale_hours"],
+        scene_geometry_config={"solar_radius_m": geometry["solar_radius_m"], "scene_basis": geometry["scene_basis_rows"]},
+    )
     equations = {
         name: {"enabled": False, "weight": 0.0}
         for name in (
@@ -595,39 +650,42 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
             "magnetohydrostatic_equilibrium",
             "momentum",
             "magnetic_divergence",
+            "magnetic_current_free",
             "induction",
             "continuity",
             "adiabatic_pressure",
+            "coronal_energy",
+            "upper_boundary_current_free",
+            "side_boundary_current_free",
+            "upper_boundary_no_inflow",
+            "side_boundary_no_inflow",
             "upper_boundary_open_velocity",
             "side_boundary_open_velocity",
-            "side_boundary_current_free",
+            "side_boundary_tangential_magnetic_neumann",
             "upper_domain_microturbulence_prior",
             "upper_domain_temperature_prior",
             "radial_magnetic_energy_gradient",
-            "upper_boundary_current_free",
+            "upper_boundary_tangential_magnetic_neumann",
             "upper_boundary_gas_pressure_prior",
         )
     }
-    inversion = LTEInversionModule(
-        log_tau500=[-5.0, -2.0, 1.0],
+    atmosphere = StratifiedAtmosphereModel( **atmosphere_config).float()
+    inversion = StokesObservationTerm(
+        atmosphere_model=atmosphere,
+        objective_config={
+            "type": "mse",
+        },
         wavelength_angstrom=observation.wavelength_angstrom,
-        atmosphere_config=atmosphere_config,
         synthesizer_config={"line_ids": list(observation.required_line_ids)},
         instrument_config={
             "type": observation.instrument_type,
             "magnetic_azimuth_offset_deg": 90.0,
             **dict(observation.instrument_options),
         },
-        stokes_loss_config={
-            "type": "huber",
-            "stokes_sigmas": {"I": 5.0e-3, "Q": 8.0e-4, "U": 8.0e-4, "V": 8.0e-4},
-            "huber_delta": 1.0,
-        },
         weight_config={"I": 1.0, "Q": 1.0, "U": 1.0, "V": 1.0},
-        wavelength_weights=None,
         wavelength_exclude_windows_angstrom=[],
         continuum_indices=observation.continuum_indices,
-        atlas_continuum_radiance_w_m3_sr=(observation.radiance_scale_w_m3_sr),
+        atlas_continuum_radiance_w_m3_sr=observation.radiance_scale_w_m3_sr,
         depth_sampling_config={
             "sample_count": 3,
             "coarse_to_fine": {
@@ -636,47 +694,33 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
                 "uniform_weight_floor": 0.0,
             },
         },
-        physics_config={
-            "equations": equations,
-            "gravity_m_per_s2": None,
-            "adiabatic_index": 5.0 / 3.0,
-            "upper_boundary_current_free_ramp_steps": 0,
-            "volume_points_per_step": 0,
-            "height_layers_per_step": 0,
-            "upper_volume_points_per_step": 0,
-            "upper_height_layers_per_step": 0,
-            "upper_boundary_points_per_step": 0,
-            "side_boundary_points_per_step": 0,
-            "side_height_layers_per_step": 0,
-            "validation_height_layers": 0,
-            "validation_upper_height_layers": 0,
-            "validation_points_per_height": 0,
-            "sampling_domain": None,
-            "upper_sampling_domain": None,
-            "vector_basis_matches_spatial_coordinates": True,
-            "normalization": {"length_m": 1.0e6, "time_s": 3_600.0},
-        },
-        learning_rate={"start": 1.0e-3, "end": 1.0e-4, "iterations": "auto"},
-        run_metadata={},
         observation_id=observation.observation_id,
         velocity_synthesis_mode=observation.velocity_synthesis_mode.value,
         instrument_line_of_sight_velocity_correction_m_per_s=0.0,
         optimize_instrument_line_of_sight_velocity_correction=True,
-        vector_regularization_config={
-            "enabled": False,
-            "magnetic_weight": 0.0,
-            "velocity_weight": 0.0,
-            "decay_steps": 0,
-        },
     ).float()
-    result = inversion.synthesize(
-        batch["coordinates"],
-        ray_direction=batch["ray_direction"],
-        stokes_basis=batch["stokes_basis"],
-        observer_los_velocity_m_per_s=batch["observer_los_velocity_m_per_s"],
-        instrument_response=batch["instrument_response"],
-    )
-    loss = inversion._stokes_objective(result["stokes"], batch["stokes"])[1]
+    from prom3theus.inversion.objective import StokesObjective
+    inversion.objective = StokesObjective(type="asinh_mse", asinh_scale=1e-3)
+    with torch.no_grad():
+        inversion.instrument_line_of_sight_velocity_correction_normalized.fill_(
+            125.0 / inversion.velocity_scale_m_per_s
+        )
+    inversion.eval()
+    evaluation = inversion.evaluate_batch(batch)
+    correction = evaluation.metrics["line_of_sight_velocity_correction_m_per_s"]
+    torch.testing.assert_close(correction, correction.new_tensor(125.0))
+    assert not correction.requires_grad
+    from prom3theus.inversion.joint import JointEvaluation
+    joint = JointEvaluation(evaluation.likelihood_loss, {"hmi": evaluation}, {}, {}, {})
+    metric = "streams.hmi.line_of_sight_velocity_correction_m_per_s"
+    torch.testing.assert_close(joint.training_metrics()[metric], correction)
+    torch.testing.assert_close(joint.validation_metrics()[metric], correction)
+    result = {"stokes": inversion.predict(batch)}
+    loss = evaluation.likelihood_loss
+    torch.testing.assert_close(evaluation.diagnostics["prediction"], result["stokes"])
+    torch.testing.assert_close(evaluation.diagnostics["target"], batch["stokes"])
+    torch.testing.assert_close(loss, inversion._loss(
+        evaluation.diagnostics["prediction"], evaluation.diagnostics["target"])[1])
 
     assert result["stokes"].shape == batch["stokes"].shape
     assert torch.isfinite(result["stokes"]).all()
@@ -684,5 +728,5 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
     loss.backward()
     assert any(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
-        for parameter in inversion.atmosphere_model.parameters()
+        for parameter in atmosphere.parameters()
     )

@@ -7,6 +7,10 @@ the preparation function must construct its own network client.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
+from threading import Lock
+from tqdm.auto import tqdm
+from prom3theus.core.parallel import parallel_map
 from datetime import date, datetime
 import hashlib
 import json
@@ -425,6 +429,7 @@ def _write_hmi_transmission_profile(
     continuum_panel_width: float = DEFAULT_CONTINUUM_PANEL_WIDTH,
     continuum_panel_nodes: int = DEFAULT_CONTINUUM_PANEL_NODES,
     overwrite: bool = False,
+    client_lock=None,
 ) -> Path:
     """Download one resolved phase map and write its spatial profile field."""
     archive_metadata = dict(archive_metadata)
@@ -432,9 +437,10 @@ def _write_hmi_transmission_profile(
     with tempfile.TemporaryDirectory(
         prefix="prom3theus_hmi_phase_"
     ) as temporary_directory:
-        phase_path = download_phase_map(
-            client, archive_metadata["record"], temporary_directory
-        )
+        with client_lock if client_lock is not None else nullcontext():
+            phase_path = download_phase_map(
+                client, archive_metadata["record"], temporary_directory
+            )
         phase_cube = fits.getdata(phase_path)
         phase_cube = np.asarray(phase_cube, dtype=np.float64)
         if phase_cube.ndim != 3:
@@ -567,7 +573,7 @@ def prepare_hmi_response_directory(
     overwrite: bool = False,
     client: Optional[drms.Client] = None,
 ) -> Path:
-    """Atomically prepare one exact response directory for the selected inputs."""
+    """Reuse valid existing responses, or prepare them; overwrite explicitly to rebuild."""
     if not email:
         raise ValueError("A registered JSOC email address is required for DRMS export.")
     output_directory = Path(output_directory).expanduser().resolve(strict=False)
@@ -576,10 +582,8 @@ def prepare_hmi_response_directory(
             f"HMI response output is not a directory: {output_directory}."
         )
     if output_directory.exists() and not overwrite:
-        raise FileExistsError(
-            f"HMI response output already exists: {output_directory}. "
-            "Pass overwrite=True to replace the complete prepared directory."
-        )
+        load_response_manifest(output_directory)
+        return output_directory / MANIFEST_NAME
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     input_selection = (
         inputs if isinstance(inputs, (str, os.PathLike)) else tuple(inputs)
@@ -611,9 +615,9 @@ def prepare_hmi_response_directory(
 
     assignments_by_time = {
         record_time: resolve_hmi_phase_map_assignment(client, record_time)
-        for record_time in sorted(
+        for record_time in tqdm(sorted(
             {acquisition["record_time"] for acquisition in acquisitions}
-        )
+        ), desc="HMI calibration assignments", unit="slot")
     }
     identities = {
         acquisition["acquisition_key"]: (
@@ -630,8 +634,10 @@ def prepare_hmi_response_directory(
         workspace = Path(workspace_name)
         staged_directory = workspace / "responses"
         staged_directory.mkdir()
-        profiles = {}
-        for phase_map_fsn, hcamid in sorted(set(identities.values())):
+        client_lock = Lock()
+
+        def prepare_profile(identity):
+            phase_map_fsn, hcamid = identity
             profile_key = f"INVPHMAP={phase_map_fsn}|HCAMID={hcamid}"
             profile_name = (
                 f"hmi_transmission_INVPHMAP{phase_map_fsn}_HCAMID{hcamid}.npz"
@@ -643,12 +649,10 @@ def prepare_hmi_response_directory(
                 if identities[acquisition["acquisition_key"]] == (phase_map_fsn, hcamid)
             ]
             representative_time = matching_acquisitions[0]["observation_time"]
-            archive_metadata = resolve_hmi_phase_map(
-                client,
-                representative_time,
-                hcamid=hcamid,
-                phase_map_fsn=phase_map_fsn,
-            )
+            with client_lock:
+                archive_metadata = resolve_hmi_phase_map(
+                    client, representative_time, hcamid=hcamid, phase_map_fsn=phase_map_fsn,
+                )
             _write_hmi_transmission_profile(
                 archive_metadata=archive_metadata,
                 output=profile_path,
@@ -660,8 +664,9 @@ def prepare_hmi_response_directory(
                 continuum_panel_width=continuum_panel_width,
                 continuum_panel_nodes=continuum_panel_nodes,
                 overwrite=False,
+                client_lock=client_lock,
             )
-            profiles[profile_key] = {
+            return profile_key, {
                 "file": profile_name,
                 "phase_map_fsn": phase_map_fsn,
                 "hcamid": hcamid,
@@ -669,6 +674,8 @@ def prepare_hmi_response_directory(
                 "sha256": sha256_file(profile_path),
             }
 
+        profiles = dict(parallel_map(prepare_profile, sorted(set(identities.values())),
+                                     description="HMI unique response profiles"))
         acquisition_entries = {}
         for acquisition in acquisitions:
             identity = identities[acquisition["acquisition_key"]]

@@ -159,13 +159,13 @@ def test_stic_lookup_edge_saturates_all_thermodynamic_bounds(dtype):
     metadata = opacity.metadata()
     assert "saturated at the nearest STiC" in metadata["thermodynamic_lookup_policy"]
     assert metadata["log10_temperature_bounds_k"] == [3.4, 4.0]
-    assert metadata["log10_gas_pressure_bounds_pa"] == [-1.5, 6.0]
+    assert metadata["log10_gas_pressure_bounds_pa"] == [-1.5, 7.0]
 
 
 def test_stic_table_quantities_are_constant_beyond_each_edge():
     opacity = ContinuumOpacity()
     temperature = torch.tensor([1.0e3, 2.0e4], dtype=torch.float64, requires_grad=True)
-    pressure = torch.tensor([1.0e-3, 1.0e7], dtype=torch.float64, requires_grad=True)
+    pressure = torch.tensor([1.0e-3, 1.0e9], dtype=torch.float64, requires_grad=True)
     state = opacity.prepare_stic_lookup(temperature, pressure)
     wavelength = torch.tensor([5000.0, 6300.0], dtype=torch.float64)
 

@@ -1,381 +1,232 @@
-"""Portable, standalone PROM3THEUS evaluation save states."""
-
-from __future__ import annotations
-
-from copy import deepcopy
-from dataclasses import dataclass
-from enum import Enum
-import math
+"""Atomic, observation-independent evaluation snapshots for stream inversions."""
+from dataclasses import asdict, dataclass
 from pathlib import Path
-import pickle
-from typing import Any, Mapping, Sequence
-
+from collections.abc import Mapping
+from copy import deepcopy
+import logging
+import os
 import torch
-
-from prom3theus.observations import ObservationSpec
-from prom3theus.training.lightning import (
-    LTEInversionModule,
-    P3S_CONTEXT_KEY,
-    P3S_FORMAT,
-    P3S_VERSION,
-)
-
+from torch import nn
+from prom3theus.components.forward import reconstruct_term
+from prom3theus.observations import SceneContract
+from prom3theus.rt import StratifiedAtmosphereModel
 from .errors import ArtifactExportError
-from .model import ArtifactManifest
-from .validation import (
-    _parse_observation_spec,
-    _validate_model_contract,
-    _validated_config,
-    _validated_resources,
-)
+
+P3S_FORMAT = "prom3theus.stream_state"
+P3S_VERSION = 1
 
 
-@dataclass(frozen=True, slots=True)
-class ObservationReference:
-    """Lightweight source-selection and sampling contract stored in P3S."""
+def snapshot_value(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(k): snapshot_value(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [snapshot_value(v) for v in value]
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    raise TypeError(f"Unsupported snapshot value: {type(value).__name__}")
 
-    source_signature: str
-    spec: ObservationSpec
-    raster_names: tuple[str, ...]
-    validation_raster_index: int
-    times: tuple[dict[str, Any], ...]
-    bounds: dict[str, Any]
+
+class EvaluationModel(nn.Module):
+    """Shared atmosphere and arbitrary observation terms, without training state."""
+
+    def __init__(self, atmosphere, terms):
+        super().__init__()
+        self.atmosphere_model = atmosphere
+        self.terms = nn.ModuleDict(terms)
 
 
-@dataclass(frozen=True, slots=True)
+def snapshot_context(runtime):
+    return snapshot_value(
+        {
+            "configuration": runtime.config.to_dict(),
+            "resources": runtime.resources,
+            "scene": asdict(runtime.scene),
+            "atmosphere": runtime.model.atmosphere_model.construction,
+            "terms": {
+                name: term.construction for name, term in runtime.model.terms.items()
+            },
+            "streams": {
+                name: {
+                    "store_path": loaded.prepared.store_path,
+                    "source_signature": loaded.prepared.source_signature,
+                    "descriptor": loaded.prepared.descriptor.metadata(),
+                    "specification": loaded.specification.metadata(),
+                    "store_metadata": {
+                        **loaded.store_metadata,
+                        "raster_names": list(
+                            getattr(loaded.data_module, "raster_names", ())
+                        ),
+                        "validation_raster_index": getattr(
+                            loaded.data_module, "validation_raster_index", 0
+                        ),
+                        "times": [
+                            {
+                                "values": raster.metadata.get("times", []),
+                                "scale": raster.metadata.get("coordinates", {}).get(
+                                    "time_scale", "utc"
+                                ),
+                            }
+                            for raster in loaded.rasters
+                        ],
+                        "bounds": getattr(
+                            loaded.data_module, "observation_sampling_bounds", {}
+                        ),
+                    },
+                }
+                for name, loaded in runtime.streams.items()
+            },
+        }
+    )
+
+
+def save_state(path, model, context, *, epoch, global_step):
+    path = Path(path)
+    state = {
+        name: value
+        for name, value in model.state_dict().items()
+        if name.startswith(("atmosphere_model.", "terms."))
+    }
+    state = snapshot_value(state)
+    validate_tensors(state)
+    payload = dict(
+        format=P3S_FORMAT,
+        version=P3S_VERSION,
+        context=context,
+        state_dict=state,
+        epoch=int(epoch),
+        global_step=int(global_step),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def validate_tensors(state):
+    if not isinstance(state, Mapping) or not all(
+        isinstance(v, torch.Tensor) for v in state.values()
+    ):
+        raise ArtifactExportError("Snapshot state must contain tensors only.")
+    if any(
+        not torch.isfinite(v).all()
+        for v in state.values()
+        if v.is_floating_point() or v.is_complex()
+    ):
+        raise ArtifactExportError("Snapshot contains non-finite state.")
+
+
+@dataclass(frozen=True)
 class ValidatedSaveState:
-    """A reconstructed P3S file and its exact post-training evaluation inputs."""
-
     path: Path
-    resolved_config: Any
-    observation: ObservationReference
-    resources: dict[str, Any]
-    module: LTEInversionModule
+    context: dict
+    module: EvaluationModel
+    scene: SceneContract
     epoch: int
     global_step: int
 
 
-def _safe_metadata(value: Any, *, context: str) -> Any:
-    """Reduce P3S metadata to types accepted by the restricted torch loader."""
+def _mse_evaluation_context(context):
+    """Translate legacy objective metadata for evaluation without altering weights."""
+    context = dict(context)
+    configuration = deepcopy(context["configuration"])
+    terms = deepcopy(context["terms"])
+    changed = False
 
-    if isinstance(value, Enum):
-        return _safe_metadata(value.value, context=context)
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise TypeError(f"{context} metadata keys must be strings.")
-        return {
-            key: _safe_metadata(item, context=f"{context}.{key}")
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [
-            _safe_metadata(item, context=f"{context}[]") for item in value
-        ]
-    if value is None or type(value) in {str, int, float, bool}:
-        return value
-    raise TypeError(
-        f"{context} contains unsupported P3S metadata type "
-        f"{type(value).__name__}."
-    )
+    def convert(objective):
+        nonlocal changed
+        replacements = {"huber": "mse", "asinh_huber": "asinh_mse"}
+        if objective.get("type") in replacements:
+            objective["type"] = replacements[objective["type"]]
+            objective.pop("huber_delta", None)
+            changed = True
 
+    def direct_weights(objective, weights):
+        nonlocal changed
+        if "stokes_sigmas" not in objective:
+            return
+        sigmas = objective.pop("stokes_sigmas")
+        total = sum(weights.values())
+        for name, value in list(weights.items()):
+            weights[name] = value / total / (sigmas[name] ** 2 if sigmas else 1.0)
+        changed = True
 
-def p3s_context(
-    *,
-    package_version: str,
-    resolved_config: Mapping[str, Any],
-    resources: Mapping[str, Any],
-    observation_spec: Mapping[str, Any],
-    source_signature: str,
-    raster_names: Sequence[str],
-    validation_raster_index: int,
-    times: Sequence[Mapping[str, Any]],
-    bounds: Mapping[str, Any],
-    model: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the versioned metadata stored inside every P3S save state."""
-
-    rendering_model = _safe_metadata(model, context="model")
-    # Training/provenance metadata can include long FITS-derived index lists.
-    # It does not affect reconstruction or forward rendering.
-    rendering_model["run_metadata"] = {}
-    return {
-        "format": P3S_FORMAT,
-        "version": P3S_VERSION,
-        "solver": "lte",
-        "package_version": str(package_version),
-        "resolved_config": _safe_metadata(resolved_config, context="resolved_config"),
-        "resources": _safe_metadata(resources, context="resources"),
-        "observation": {
-            "source_signature": str(source_signature),
-            "spec": _safe_metadata(observation_spec, context="observation.spec"),
-            "raster_names": _safe_metadata(
-                raster_names, context="observation.raster_names"
-            ),
-            "validation_raster_index": int(validation_raster_index),
-            "times": _safe_metadata(times, context="observation.times"),
-            "bounds": _safe_metadata(bounds, context="observation.bounds"),
-        },
-        "model": rendering_model,
-    }
-
-
-def _save_state_manifest(context: Mapping[str, Any]) -> ArtifactManifest:
-    expected = {
-        "format",
-        "version",
-        "solver",
-        "package_version",
-        "resolved_config",
-        "resources",
-        "observation",
-        "model",
-    }
-    if set(context) != expected:
-        raise ArtifactExportError(
-            f"P3S context fields do not match format version {P3S_VERSION}."
+    for stream in configuration.get("streams", []):
+        objective = stream.get("data_term", {}).get("objective", {})
+        convert(objective)
+        if stream.get("data_term", {}).get("type") == "lte_stokes":
+            direct_weights(objective, objective["stokes_weights"])
+    for contract in terms.values():
+        options = contract["options"]
+        if contract["type"] == "lte_stokes":
+            convert(options["objective_config"])
+            direct_weights(options["objective_config"], options["weight_config"])
+        elif contract["type"] == "aia_optically_thin" and "huber_delta" in options:
+            options.pop("huber_delta")
+            changed = True
+    if changed:
+        logging.getLogger(__name__).warning(
+            "Legacy snapshot objective metadata migrated for evaluation; "
+            "stored model weights are unchanged."
         )
-    if context.get("format") != P3S_FORMAT or context.get("version") != P3S_VERSION:
-        raise ArtifactExportError("P3S format or version is unsupported.")
-    if context.get("solver") != "lte":
-        raise ArtifactExportError("Checkpoint solver must be 'lte'.")
-    if not isinstance(context.get("package_version"), str):
-        raise ArtifactExportError("Checkpoint package_version must be a string.")
-    for name in ("resolved_config", "resources", "observation", "model"):
-        if not isinstance(context.get(name), Mapping):
-            raise ArtifactExportError(f"Checkpoint {name} must be an object.")
-    return ArtifactManifest(
-        schema_version=1,
-        solver=context["solver"],
-        package_version=context["package_version"],
-        created_utc="checkpoint",
-        resolved_config=deepcopy(dict(context["resolved_config"])),
-        resources=deepcopy(dict(context["resources"])),
-        observation=deepcopy(dict(context["observation"])),
-        model=deepcopy(dict(context["model"])),
-        weights_sha256="0" * 64,
-    )
+        context.update(configuration=configuration, terms=terms)
+    return context
 
 
-def load_validated_save_state(
-    save_state_path: str | Path,
-    *,
-    map_location: str | torch.device = "cpu",
-) -> ValidatedSaveState:
-    """Safely load, validate, and reconstruct a P3S file for evaluation."""
-
-    path = Path(save_state_path).expanduser().resolve()
-    if path.suffix != ".p3s":
-        raise ArtifactExportError("PROM3THEUS save states must use the .p3s extension.")
-    try:
-        checkpoint = torch.load(
-            path,
-            map_location=map_location,
-            weights_only=True,
-            mmap=True,
-        )
-    except (
-        FileNotFoundError,
-        pickle.UnpicklingError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise ArtifactExportError(f"Could not safely load P3S file: {error}") from error
-    if not isinstance(checkpoint, Mapping):
-        raise ArtifactExportError("P3S file must contain a mapping.")
-    context = checkpoint.get(P3S_CONTEXT_KEY)
-    if not isinstance(context, Mapping):
-        raise ArtifactExportError(
-            f"P3S file is missing {P3S_CONTEXT_KEY!r} metadata."
-        )
-    manifest = _save_state_manifest(context)
-    root = path.parent
-    config = _validated_config(manifest, root)
-    resources = _validated_resources(manifest, config)
-    raw_observation = context["observation"]
-    observation_fields = {
-        "source_signature",
-        "spec",
-        "raster_names",
-        "validation_raster_index",
-        "times",
-        "bounds",
-    }
+def load_validated_save_state(path, *, map_location="cpu"):
+    path = Path(path).expanduser().resolve()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
     if (
-        not isinstance(raw_observation, Mapping)
-        or set(raw_observation) != observation_fields
+        set(payload)
+        != {"format", "version", "context", "state_dict", "epoch", "global_step"}
+        or payload["format"] != P3S_FORMAT
+        or payload["version"] != P3S_VERSION
     ):
-        raise ArtifactExportError("P3S observation context fields are invalid.")
-    source_signature = raw_observation["source_signature"]
-    if (
-        not isinstance(source_signature, str)
-        or len(source_signature) != 64
-        or any(character not in "0123456789abcdef" for character in source_signature)
-    ):
-        raise ArtifactExportError("P3S observation source_signature is invalid.")
-    spec = _parse_observation_spec(raw_observation["spec"])
-    if config.observation.type != spec.observation_type:
         raise ArtifactExportError(
-            "P3S resolved observation type differs from its observation spec."
+            "Unsupported P3S format. Only stream-state snapshots are accepted."
         )
-    if config.instrument.type != spec.instrument_type:
+    validate_tensors(payload["state_dict"])
+    context = _mse_evaluation_context(payload["context"])
+    from prom3theus.resources import validate_resource_sets
+
+    resources = validate_resource_sets(context["resources"])
+    if snapshot_value(resources) != context["resources"]:
         raise ArtifactExportError(
-            "P3S resolved instrument type differs from its observation spec."
+            "Snapshot resources do not match installed scientific resources."
         )
-    model_config = _validate_model_contract(manifest, config, spec)
-    expected_fields = {
-        P3S_CONTEXT_KEY,
-        "parameters",
-        "epoch",
-        "global_step",
+    scene = SceneContract(**context["scene"])
+    atmosphere = StratifiedAtmosphereModel(**context["atmosphere"]).float()
+    terms = {
+        name: reconstruct_term(contract, atmosphere, scene)
+        for name, contract in context["terms"].items()
     }
-    if set(checkpoint) != expected_fields:
-        raise ArtifactExportError(
-            "P3S fields do not match the compact format contract; expected only "
-            f"{sorted(expected_fields)}."
-        )
-    names = raw_observation["raster_names"]
-    validation_index = raw_observation["validation_raster_index"]
-    times = raw_observation["times"]
-    bounds = raw_observation["bounds"]
-    valid_names = (
-        isinstance(names, list)
-        and bool(names)
-        and all(isinstance(name, str) and bool(name) for name in names)
-        and len(set(names)) == len(names)
-    )
-    valid_time_records = (
-        valid_names and isinstance(times, list) and len(times) == len(names)
-    )
-    if valid_time_records:
-        valid_time_records = all(
-            isinstance(item, Mapping)
-            and set(item) == {"values", "scale"}
-            and isinstance(item["values"], list)
-            and bool(item["values"])
-            and all(
-                isinstance(value, str) and bool(value) for value in item["values"]
-            )
-            and item["scale"] in {"tai", "utc"}
-            for item in times
-        )
-    bound_fields = {
-        "surface_longitude_center_rad",
-        "surface_longitude_offset_rad",
-        "surface_latitude_rad",
-        "time_hours",
-        "solar_radius_m",
-    }
-    valid_bounds = isinstance(bounds, Mapping) and set(bounds) == bound_fields
-    if valid_bounds:
-        scalar_bounds = (
-            bounds["surface_longitude_center_rad"],
-            bounds["solar_radius_m"],
-        )
-        range_bounds = (
-            bounds["surface_longitude_offset_rad"],
-            bounds["surface_latitude_rad"],
-            bounds["time_hours"],
-        )
-        valid_bounds = (
-            all(
-                not isinstance(value, bool)
-                and isinstance(value, (int, float))
-                and math.isfinite(value)
-                for value in scalar_bounds
-            )
-            and float(bounds["solar_radius_m"]) > 0
-            and all(
-                isinstance(value, list)
-                and len(value) == 2
-                and all(
-                    not isinstance(item, bool)
-                    and isinstance(item, (int, float))
-                    and math.isfinite(item)
-                    for item in value
-                )
-                for value in range_bounds
-            )
-        )
-    if (
-        not valid_names
-        or type(validation_index) is not int
-        or validation_index < 0
-        or validation_index >= len(names)
-        or not valid_time_records
-        or not valid_bounds
+    module = EvaluationModel(atmosphere, terms)
+    expected = module.state_dict()
+    # Old sigma buffers become direct component coefficients during migration.
+    # Learned atmosphere tensors remain untouched.
+    for name in list(payload["state_dict"]):
+        if name.endswith(".objective.stokes_sigmas"):
+            prefix = name.removesuffix(".objective.stokes_sigmas")
+            del payload["state_dict"][name]
+            weight_key = prefix + ".stokes_weights"
+            payload["state_dict"][weight_key] = expected[weight_key]
+    if set(expected) != set(payload["state_dict"]) or any(
+        expected[n].shape != v.shape or expected[n].dtype != v.dtype
+        for n, v in payload["state_dict"].items()
     ):
-        raise ArtifactExportError("P3S observation reference is invalid.")
-    observation = ObservationReference(
-        source_signature=source_signature,
-        spec=spec,
-        raster_names=tuple(names),
-        validation_raster_index=validation_index,
-        times=tuple(deepcopy(dict(item)) for item in times),
-        bounds=deepcopy(dict(bounds)),
-    )
-    parameters = checkpoint.get("parameters")
-    if not isinstance(parameters, Mapping) or not all(
-        isinstance(name, str) and isinstance(value, torch.Tensor)
-        for name, value in parameters.items()
+        raise ArtifactExportError("Snapshot model tensor contract differs.")
+    module.load_state_dict(payload["state_dict"], strict=True)
+    module.to(map_location).eval()
+    if any(
+        type(payload[k]) is not int or payload[k] < 0 for k in ("epoch", "global_step")
     ):
-        raise ArtifactExportError("P3S parameters must contain only tensors.")
-    nonfinite = [
-        name
-        for name, value in parameters.items()
-        if (value.is_floating_point() or value.is_complex())
-        and not torch.isfinite(value).all()
-    ]
-    if nonfinite:
-        raise ArtifactExportError(
-            "P3S parameters contain non-finite tensors: "
-            + ", ".join(nonfinite[:12])
-        )
-    try:
-        module = LTEInversionModule(**deepcopy(model_config))
-        expected_parameters = dict(module.named_parameters())
-        if set(parameters) != set(expected_parameters):
-            missing = sorted(set(expected_parameters) - set(parameters))
-            unexpected = sorted(set(parameters) - set(expected_parameters))
-            raise ValueError(
-                f"parameter names differ; missing={missing}, unexpected={unexpected}"
-            )
-        with torch.no_grad():
-            for name, parameter in expected_parameters.items():
-                stored = parameters[name]
-                if stored.shape != parameter.shape or stored.dtype != parameter.dtype:
-                    raise ValueError(
-                        f"parameter {name!r} has incompatible shape or dtype."
-                    )
-                parameter.copy_(stored.to(device=parameter.device))
-        module.set_save_state_context(context)
-        module.eval()
-    except (KeyError, RuntimeError, TypeError, ValueError) as error:
-        raise ArtifactExportError(
-            f"P3S could not reconstruct LTEInversionModule exactly: {error}"
-        ) from error
-    epoch = checkpoint.get("epoch")
-    global_step = checkpoint.get("global_step")
-    if type(epoch) is not int or type(global_step) is not int:
-        raise ArtifactExportError("P3S epoch and global_step must be integers.")
+        raise ArtifactExportError("Snapshot progress must be nonnegative integers.")
     return ValidatedSaveState(
-        path=path,
-        resolved_config=config,
-        observation=observation,
-        resources=resources,
-        module=module,
-        epoch=epoch,
-        global_step=global_step,
+        path, context, module, scene, payload["epoch"], payload["global_step"]
     )
-
-
-__all__ = [
-    "ObservationReference",
-    "P3S_FORMAT",
-    "P3S_VERSION",
-    "ValidatedSaveState",
-    "load_validated_save_state",
-    "p3s_context",
-]

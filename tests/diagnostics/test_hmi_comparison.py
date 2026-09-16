@@ -15,6 +15,17 @@ from prom3theus.diagnostics.hmi_comparison import (
 )
 
 
+def test_scaled_compressed_fits_can_be_read(tmp_path):
+    from astropy.io import fits
+
+    values = np.array([[0, 1], [32768, 65535]], dtype=np.uint16)
+    path = tmp_path / "disambig.fits"
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(values)]).writeto(path)
+    with comparison._fits_image(path) as (header, image):
+        assert header["BZERO"] == 32768
+        np.testing.assert_array_equal(image, values)
+
+
 def test_observer_components_follow_hmi_azimuth_and_inclination():
     components = _observer_components(
         np.array([100.0, 200.0, 300.0]),
@@ -207,3 +218,29 @@ def test_comparison_routes_save_state_queries_through_p3s_loader(tmp_path, monke
         "metrics",
     }
     assert not list((tmp_path / "comparison").glob("*.npz"))
+
+
+def test_hmi_reference_basis_matches_published_ccd_equations():
+    # Sun (2013), arXiv:1309.2392, Eq. (1): CCD components are
+    # [-B sin(gamma) sin(psi), B sin(gamma) cos(psi), B cos(gamma)].
+    # The comparison uses [CCD-up, CCD-left, LOS], so the 90-degree
+    # change of origin must come from the basis, not an extra azimuth offset.
+    from prom3theus.instruments.hmi.geometry import detector_stokes_basis
+
+    field = np.array([300., 500., 800., 1200.])
+    gamma = np.deg2rad([30., 70., 90., 140.])
+    psi = np.deg2rad([0., 37., 90., 215.])
+    ccd = np.stack((-field*np.sin(gamma)*np.sin(psi),
+                    field*np.sin(gamma)*np.cos(psi), field*np.cos(gamma)), axis=-1)
+    observer = _observer_components(field, np.rad2deg(gamma), np.rad2deg(psi))
+    for roll in (0., 27., 179.9):
+        angle = np.deg2rad(roll)
+        rotation = np.array([[np.cos(angle), -np.sin(angle)],
+                             [np.sin(angle), np.cos(angle)]])
+        q, u = detector_stokes_basis(np.array([0., 0., 1.]),
+                                    np.array([1., 0., 0.]),
+                                    np.array([0., 1., 0.]), rotation)
+        basis = np.stack((q, u, [0., 0., 1.]))
+        expected = ccd.copy()
+        expected[:, :2] = ccd[:, :2] @ rotation.T
+        np.testing.assert_allclose(observer @ basis, expected, atol=1e-12)

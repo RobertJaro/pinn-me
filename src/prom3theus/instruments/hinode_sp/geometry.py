@@ -101,11 +101,13 @@ def carrington_rays(
         image_y = np.cross(los, image_x)
         image_y /= np.linalg.norm(image_y, axis=-1, keepdims=True)
         q_axis = np.cos(angle_rad) * image_x + np.sin(angle_rad) * image_y
-        u_axis = -np.sin(angle_rad) * image_x + np.cos(angle_rad) * image_y
+        # 90 degrees from +Q about the line of sight, toward increasing
+        # magnetic azimuth; not the 45-degree +U direction.
+        q_perp_axis = -np.sin(angle_rad) * image_x + np.cos(angle_rad) * image_y
 
         directions[:, column] = ray
         surface_positions[:, column] = surface_xyz
-        stokes_bases[:, column] = np.stack((q_axis, u_axis, los), axis=-2)
+        stokes_bases[:, column] = np.stack((q_axis, q_perp_axis, los), axis=-2)
 
     surface_unit = surface_positions / np.linalg.norm(
         surface_positions, axis=-1, keepdims=True
@@ -141,7 +143,11 @@ def carrington_rays(
         "scene_basis_rows": scene_basis.tolist(),
         "scene_basis_source": scene_basis_source,
         "scene_basis_order": ["chart_x", "chart_y", "chart_normal"],
-        "stokes_basis_order": ["+Q", "+U", "toward_observer"],
+        "stokes_basis_order": ["+Q", "+Q_perp", "toward_observer"],
+        "stokes_basis_order_note": (
+            "the second row is the transverse axis 90 degrees from +Q toward "
+            "increasing magnetic azimuth, not the 45-degree +U direction"
+        ),
         "stokes_reference_angle_deg_from_hpc_x_toward_hpc_y": angle,
         "stokes_reference_status": (
             "sp_prep Level-1 has already rotated Q/U with CROTA2 into the solar "

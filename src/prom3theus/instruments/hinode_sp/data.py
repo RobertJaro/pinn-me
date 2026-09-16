@@ -50,7 +50,7 @@ class HinodeDataModule(ObservationDataModule):
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
         data_loading_workers: int = 1,
-        num_workers: int = 0,
+        num_workers: int = 2,
         pin_memory: bool = False,
         progress: bool = True,
         slit_slice=None,
@@ -154,7 +154,7 @@ class HinodeDataModule(ObservationDataModule):
         evaluation = ObservationPixelDataset(
             raster,
             include_pixel_index=True,
-            pixel_indices=dataset.pixel_indices,
+            pixel_indices=dataset._pixel_indices,
         )
         self._evaluation_dataset = evaluation
         self._prepare_validation_dataset(evaluation)

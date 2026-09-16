@@ -137,9 +137,12 @@ class SphericalShellDomain:
             solar_radius_m=self.solar_radius_m,
         )
 
-    def metadata(self) -> dict:
+    def metadata(self, *, height_power: float | None = None) -> dict:
         """Describe the grouped shell sampler for the inversion artifact."""
 
+        radial_power = _RANDOM_HEIGHT_POWER if height_power is None else float(height_power)
+        if not math.isfinite(radial_power) or radial_power <= 0.0:
+            raise ValueError("height_power must be finite and positive.")
         angle_scale = 180.0 / math.pi
         domain = self.configuration()
         domain.update(
@@ -165,8 +168,8 @@ class SphericalShellDomain:
         )
         return {
             "collocation_distribution": (
-                "quadratic-power stratified random geometric-height layers biased "
-                "toward the inner radius; uniform longitude and surface-area latitude "
+                f"power-{radial_power:g} stratified random geometric-height layers; "
+                "uniform longitude and surface-area latitude "
                 "samples within the initialized domain"
             ),
             "sampling_domain": domain,
@@ -178,11 +181,12 @@ class SphericalShellDomain:
                 ),
                 "coordinate_frame": "heliocentric Carrington Cartesian",
                 "selection_rule": (
-                    "each radial group shares one height drawn by squaring its "
-                    "stratified unit-interval coordinate and contains independent random "
+                    "each radial group shares one height drawn by raising its "
+                    f"stratified unit-interval coordinate to power {radial_power:g} "
+                    "and contains independent random "
                     "longitude, surface-area latitude, and time points"
                 ),
-                "random_radial_power": _RANDOM_HEIGHT_POWER,
+                "random_radial_power": radial_power,
             },
             "side_boundary_sampling": {
                 "faces": [
@@ -193,8 +197,9 @@ class SphericalShellDomain:
                 ],
                 "balance": "equal sample count on every angular face per height",
                 "normal": "outward heliocentric-Cartesian tangent unit vector",
-                "height_grouping": (
-                    "all four faces share each stratified geometric-height layer"
+                "distribution": (
+                    f"independent power-{radial_power:g} geometric heights, along-face "
+                    "coordinates, and times with equal counts on all four faces"
                 ),
             },
         }
@@ -234,7 +239,10 @@ class SphericalShellDomain:
             sine_latitude_min
             + (sine_latitude_max - sine_latitude_min) * latitude_fraction
         )
-        radius_m = self.solar_radius_m + heights[:, None] * 1.0e6
+        heights = heights.reshape(
+            *heights.shape, *((1,) * max(0, longitude.ndim - heights.ndim))
+        )
+        radius_m = self.solar_radius_m + heights * 1.0e6
         cosine_latitude = torch.sqrt((1.0 - sine_latitude.square()).clamp_min(0.0))
         sine_longitude = torch.sin(longitude)
         cosine_longitude = torch.cos(longitude)
@@ -257,6 +265,7 @@ class SphericalShellDomain:
         height_count: int,
         points_per_height: int,
         *,
+        height_power: float | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -266,6 +275,9 @@ class SphericalShellDomain:
         points_per_height = int(points_per_height)
         if height_count < 1 or points_per_height < 1:
             raise ValueError("Grouped sample counts must be positive.")
+        power = _RANDOM_HEIGHT_POWER if height_power is None else float(height_power)
+        if not math.isfinite(power) or power <= 0.0:
+            raise ValueError("height_power must be finite and positive.")
         spatial_dtype = torch.float64 if dtype is None else dtype
         shape = (height_count, points_per_height)
         random_fraction_count = (2 if dtype is None else 3) * points_per_height
@@ -278,7 +290,7 @@ class SphericalShellDomain:
             torch.arange(height_count, dtype=spatial_dtype, device=device)
             + spatial_random[:, 0]
         ) / height_count
-        height_fraction = height_fraction.pow(_RANDOM_HEIGHT_POWER)
+        height_fraction = height_fraction.pow(power)
         heights = self.height_bounds_Mm[0] + height_fraction * (
             self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
         )
@@ -347,6 +359,11 @@ class SphericalShellDomain:
     ) -> dict[str, torch.Tensor]:
         """Map balanced samples onto the four angular faces with outward normals."""
 
+        flatten = along_fraction.ndim == 1
+        if flatten:
+            heights_Mm = heights_Mm.unsqueeze(0)
+            along_fraction = along_fraction.unsqueeze(0)
+            time_fraction = time_fraction.unsqueeze(0)
         if along_fraction.ndim != 2 or along_fraction.shape[1] % 4 != 0:
             raise ValueError("Side samples must contain equal points on four faces.")
         if time_fraction.shape != along_fraction.shape:
@@ -367,8 +384,9 @@ class SphericalShellDomain:
         latitude_min, latitude_max = self.latitude_bounds_rad
         sine_latitude_min = math.sin(latitude_min)
         sine_latitude_max = math.sin(latitude_max)
-        longitude_face_latitude = latitude_min + (latitude_max - latitude_min) * (
-            along_fraction[:, : 2 * points_per_face]
+        longitude_face_latitude = (
+            latitude_min
+            + (latitude_max - latitude_min) * (along_fraction[:, : 2 * points_per_face])
         )
         longitude_face_latitude_fraction = (
             torch.sin(longitude_face_latitude) - sine_latitude_min
@@ -400,10 +418,14 @@ class SphericalShellDomain:
             )
             * longitude_fraction
         )
-        sine_latitude = math.sin(self.latitude_bounds_rad[0]) + (
-            math.sin(self.latitude_bounds_rad[1])
-            - math.sin(self.latitude_bounds_rad[0])
-        ) * latitude_fraction
+        sine_latitude = (
+            math.sin(self.latitude_bounds_rad[0])
+            + (
+                math.sin(self.latitude_bounds_rad[1])
+                - math.sin(self.latitude_bounds_rad[0])
+            )
+            * latitude_fraction
+        )
         cosine_latitude = torch.sqrt((1.0 - sine_latitude.square()).clamp_min(0.0))
         sine_longitude = torch.sin(longitude)
         cosine_longitude = torch.cos(longitude)
@@ -423,60 +445,54 @@ class SphericalShellDomain:
             (
                 -longitude_tangent[:, :points_per_face],
                 longitude_tangent[:, points_per_face : 2 * points_per_face],
-                -latitude_tangent[
-                    :, 2 * points_per_face : 3 * points_per_face
-                ],
+                -latitude_tangent[:, 2 * points_per_face : 3 * points_per_face],
                 latitude_tangent[:, 3 * points_per_face :],
             ),
             dim=1,
         )
-        return result
+        return (
+            {name: value.squeeze(0) for name, value in result.items()}
+            if flatten
+            else result
+        )
 
     def random_sides(
         self,
-        height_count: int,
-        points_per_height: int,
+        point_count: int,
         *,
+        height_power: float | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Draw balanced random samples on all four angular side faces."""
+        """Draw independent balanced samples on the four angular side faces."""
 
-        height_count = int(height_count)
-        points_per_height = int(points_per_height)
-        if height_count < 1 or points_per_height < 4:
+        point_count = int(point_count)
+        if point_count < 4 or point_count % 4 != 0:
             raise ValueError(
-                "Side sampling requires a positive height count and at least four "
-                "points per height."
+                "Side sampling requires at least four points divisible by four."
             )
-        if points_per_height % 4 != 0:
-            raise ValueError("Side points per height must be divisible by four.")
         if (
-            self.longitude_offset_bounds_rad[0]
-            == self.longitude_offset_bounds_rad[1]
+            self.longitude_offset_bounds_rad[0] == self.longitude_offset_bounds_rad[1]
             or self.latitude_bounds_rad[0] == self.latitude_bounds_rad[1]
         ):
             raise ValueError("Side sampling requires non-zero angular extents.")
+        power = _RANDOM_HEIGHT_POWER if height_power is None else float(height_power)
+        if not math.isfinite(power) or power <= 0.0:
+            raise ValueError("height_power must be finite and positive.")
         spatial_dtype = torch.float64 if dtype is None else dtype
-        height_random = torch.rand(
-            height_count, dtype=spatial_dtype, device=device
+        # One allocation for all spatial coordinates, plus a separate time
+        # allocation only when its physical dtype differs.
+        random = torch.rand(
+            (2 if dtype is None else 3, point_count), dtype=spatial_dtype, device=device
         )
-        height_fraction = (
-            torch.arange(height_count, dtype=spatial_dtype, device=device)
-            + height_random
-        ) / height_count
-        heights = self.height_bounds_Mm[0] + height_fraction.pow(
-            _RANDOM_HEIGHT_POWER
-        ) * (self.height_bounds_Mm[1] - self.height_bounds_Mm[0])
-        along_fraction = torch.rand(
-            (height_count, points_per_height),
-            dtype=spatial_dtype,
-            device=device,
+        heights = self.height_bounds_Mm[0] + random[0].pow(power) * (
+            self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
         )
-        time_fraction = torch.rand(
-            (height_count, points_per_height),
-            dtype=torch.float32 if dtype is None else dtype,
-            device=device,
+        along_fraction = random[1]
+        time_fraction = (
+            torch.rand(point_count, dtype=torch.float32, device=device)
+            if dtype is None
+            else random[2]
         )
         return self._side_positions(
             heights,
@@ -572,41 +588,33 @@ class SphericalShellDomain:
 
     def deterministic_sides(
         self,
-        height_count: int,
-        points_per_height: int,
+        point_count: int,
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Build a fixed balanced sample over the four angular side faces."""
+        """Build fixed independent samples over the four angular side faces."""
 
-        height_count = int(height_count)
-        points_per_height = int(points_per_height)
-        if height_count < 2 or points_per_height < 4:
+        point_count = int(point_count)
+        if point_count < 4 or point_count % 4 != 0:
             raise ValueError(
-                "Side validation requires at least two heights and four points "
-                "per height."
+                "Side validation requires at least four points divisible by four."
             )
-        if points_per_height % 4 != 0:
-            raise ValueError("Side points per height must be divisible by four.")
         if (
-            self.longitude_offset_bounds_rad[0]
-            == self.longitude_offset_bounds_rad[1]
+            self.longitude_offset_bounds_rad[0] == self.longitude_offset_bounds_rad[1]
             or self.latitude_bounds_rad[0] == self.latitude_bounds_rad[1]
         ):
             raise ValueError("Side sampling requires non-zero angular extents.")
         spatial_dtype = torch.float64 if dtype is None else dtype
-        heights = torch.linspace(
-            self.height_bounds_Mm[0],
-            self.height_bounds_Mm[1],
-            height_count,
-            dtype=spatial_dtype,
-            device=device,
+        index = torch.arange(point_count, dtype=spatial_dtype, device=device) + 0.5
+        height_fraction = torch.frac(index * ((math.sqrt(7.0) - 1.0) / 2.0)).pow(
+            _RANDOM_HEIGHT_POWER
         )
-        points_per_face = points_per_height // 4
-        index = (
-            torch.arange(points_per_face, dtype=spatial_dtype, device=device) + 0.5
+        heights = self.height_bounds_Mm[0] + height_fraction * (
+            self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
         )
+        points_per_face = point_count // 4
+        index = torch.arange(points_per_face, dtype=spatial_dtype, device=device) + 0.5
         base = index / points_per_face
         along_fraction = torch.cat(
             (
@@ -615,13 +623,9 @@ class SphericalShellDomain:
                 torch.frac(index * (math.sqrt(2.0) - 1.0)),
                 torch.frac(index * (math.sqrt(3.0) - 1.0)),
             )
-        ).expand(height_count, -1)
-        time_index = (
-            torch.arange(points_per_height, dtype=spatial_dtype, device=device) + 0.5
         )
-        time_fraction = torch.frac(
-            time_index * ((math.sqrt(5.0) - 1.0) / 2.0)
-        ).expand(height_count, -1)
+        time_index = torch.arange(point_count, dtype=spatial_dtype, device=device) + 0.5
+        time_fraction = torch.frac(time_index * ((math.sqrt(5.0) - 1.0) / 2.0))
         if dtype is None:
             time_fraction = time_fraction.to(torch.float32)
         return self._side_positions(

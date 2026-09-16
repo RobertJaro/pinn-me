@@ -1,10 +1,4 @@
-"""Strict, artifact-only export for LTE inversions.
-
-An export is reconstructed exclusively from the versioned artifact manifest,
-its tensor-only state dictionary, and its canonical embedded observation
-store. The validation, numerical evaluation, and archive-writing concerns live
-in focused sibling modules; this module is the stable public facade.
-"""
+"""Export P3S save states and archival artifacts through one evaluation path."""
 
 from __future__ import annotations
 
@@ -12,7 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .archive import build_export_metadata, write_export_archive
+from prom3theus.core import sha256_file
+
+from .archive import (
+    build_save_state_export_metadata,
+    write_export_archive,
+)
 from .errors import ArtifactExportError
 from .evaluation import (
     depth_grid,
@@ -25,8 +24,8 @@ from .full_shell import (
     full_shell_height_grid,
     full_shell_metadata,
 )
+from .loader import P3SLoader
 from .stokes import evaluate_stokes
-from .validation import load_validated_artifact
 
 
 def _validate_export_arrays(arrays: dict[str, np.ndarray]) -> None:
@@ -59,29 +58,9 @@ def _validate_export_arrays(arrays: dict[str, np.ndarray]) -> None:
             )
 
 
-def export_artifact(
-    artifact_directory: str | Path,
-    output: str | Path,
-    *,
-    depth_samples: int | None = 101,
-    batch_size: int = 4096,
-    include_stokes: bool = False,
-    stokes_batch_size: int = 16,
-    include_full_shell: bool = False,
-    full_shell_samples: int = 101,
-    storage_dtype: str = "float32",
-    device: str = "auto",
-) -> Path:
-    """Export one strict LTE artifact as a compressed, self-described NPZ file.
-
-    The observation is never rebuilt from its original FITS inputs. Its exact
-    canonical store must be present below ``artifact_directory`` and named by
-    ``manifest.observation.store.path``.
-    """
-
-    artifact_root = Path(artifact_directory).expanduser().resolve()
-    if not artifact_root.is_dir():
-        raise FileNotFoundError(f"Artifact directory not found: {artifact_root}")
+def _export_options(
+    output, batch_size, stokes_batch_size, full_shell_samples, storage_dtype
+):
     output_path = Path(output).expanduser().resolve()
     if output_path.suffix.lower() != ".npz":
         raise ValueError("output must use the .npz suffix.")
@@ -91,8 +70,24 @@ def export_artifact(
         raise ValueError("full_shell_samples must be an integer of at least two.")
     resolve_storage_dtype(storage_dtype)
 
-    artifact = load_validated_artifact(artifact_root)
-    module = artifact.module
+    return output_path
+
+
+def _evaluate_export(
+    module,
+    raster,
+    observation_spec,
+    *,
+    depth_samples,
+    batch_size,
+    include_stokes,
+    stokes_batch_size,
+    include_full_shell,
+    full_shell_samples,
+    storage_dtype,
+    device,
+):
+    """Evaluate and validate arrays identically for both persistence formats."""
     compute_dtype = next(module.parameters()).dtype
     export_device = select_export_device(
         device,
@@ -101,7 +96,6 @@ def export_artifact(
     )
     module = module.to(export_device).eval()
     evaluation_depth = depth_grid(module, depth_samples)
-    raster = artifact.raster_selection.raster
     arrays = evaluate_atmosphere(
         module,
         raster,
@@ -127,18 +121,57 @@ def export_artifact(
             evaluate_stokes(
                 module,
                 raster,
-                artifact.observation.spec,
+                observation_spec,
                 batch_size=stokes_batch_size,
                 storage_dtype=storage_dtype,
             )
         )
     _validate_export_arrays(arrays)
-    metadata = build_export_metadata(
-        artifact.manifest,
-        artifact.observation,
-        artifact.resources,
+    return arrays, evaluation_depth, full_shell, export_device
+
+
+def export_save_state(
+    save_state: str | Path,
+    output: str | Path,
+    *,
+    depth_samples: int | None = 101,
+    batch_size: int = 4096,
+    include_stokes: bool = False,
+    stokes_batch_size: int = 16,
+    include_full_shell: bool = False,
+    full_shell_samples: int = 101,
+    storage_dtype: str = "float32",
+    device: str = "auto",
+    stream_id: str | None = None,
+) -> Path:
+    """Export state.p3s using its verified, signature-addressed observation cache.
+
+    No separate archival artifact or original FITS inputs are required. The
+    prepared observation cache referenced by the save state must be available.
+    """
+    output_path = _export_options(
+        output, batch_size, stokes_batch_size, full_shell_samples, storage_dtype
+    )
+    loader = P3SLoader(save_state, device=device, stream_id=stream_id)
+    selection = loader.select_raster()
+    arrays, evaluation_depth, full_shell, export_device = _evaluate_export(
+        loader.module,
+        selection.raster,
+        loader.observation.spec,
+        depth_samples=depth_samples,
+        batch_size=batch_size,
+        include_stokes=include_stokes,
+        stokes_batch_size=stokes_batch_size,
+        include_full_shell=include_full_shell,
+        full_shell_samples=full_shell_samples,
+        storage_dtype=storage_dtype,
+        device=device,
+    )
+    metadata = build_save_state_export_metadata(
+        loader,
         arrays,
-        artifact.raster_selection,
+        selection,
+        save_state_sha256=sha256_file(loader.path),
         depth_samples=int(evaluation_depth.numel()),
         include_stokes=include_stokes,
         full_shell=full_shell,
@@ -148,4 +181,4 @@ def export_artifact(
     return write_export_archive(output_path, arrays, metadata)
 
 
-__all__ = ["ArtifactExportError", "export_artifact"]
+__all__ = ["ArtifactExportError", "export_save_state"]

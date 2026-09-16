@@ -1,5 +1,3 @@
-"""Optional PyTorch Lightning integration."""
-
-from .lightning import LTEInversionModule
-
-__all__ = ["LTEInversionModule"]
+"""Training lifecycle for stream inversions."""
+from .joint import JointInversionModule
+__all__ = ["JointInversionModule"]

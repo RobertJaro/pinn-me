@@ -12,8 +12,9 @@ import numpy as np
 from astropy.io import fits
 from astropy.time import Time
 from dateutil.parser import parse
+from prom3theus.core.parallel import parallel_map
 
-from .constants import HMI_CAMERA
+from .constants import HMI_CAMERAS
 
 
 SEGMENT_KEYS = tuple(
@@ -23,7 +24,7 @@ _SEGMENT_PATTERN = re.compile(r"\.(?P<stokes>[IQUV])(?P<filter>[0-5])\.fits$")
 # JSOC export filenames spell the series prefix as ``hmi.s_720s`` even though
 # the DRMS series name is conventionally written ``hmi.S_720s``. Accept only
 # those two exact spellings; the remaining acquisition contract stays strict.
-_ACQUISITION_PATTERN = re.compile(r"hmi\.[Ss]_720s\.\d{8}_\d{6}_TAI\.3")
+_ACQUISITION_PATTERN = re.compile(r"hmi\.[Ss]_720s\.\d{8}_\d{6}_TAI\.[123]")
 _IDENTITY_TEXT_KEYS = (
     "DATE-OBS",
     "T_OBS",
@@ -179,7 +180,7 @@ def resolve_segment_files(files) -> dict[str, Path]:
     acquisition = next(iter(prefixes))
     if _ACQUISITION_PATTERN.fullmatch(acquisition) is None:
         raise ValueError(
-            "HMI LTE loading requires exact hmi.S_720s CAMERA=3 filenames; "
+            "HMI LTE loading requires exact hmi.S_720s CAMERA=1, 2, or 3 filenames; "
             f"received {acquisition!r}."
         )
     return segments
@@ -210,10 +211,32 @@ def resolve_acquisition_groups(
     return resolved
 
 
+def hmi_image_hdu(hdul):
+    """Find the single image without decoding full-disk pixels (including compressed FITS)."""
+    images = [hdu for hdu in hdul
+              if isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU, fits.CompImageHDU))
+              and hdu.header.get("NAXIS") == 2]
+    if len(images) != 1:
+        raise ValueError(f"HMI segment requires exactly one 2D image HDU; found {len(images)}.")
+    return images[0]
+
+
+def hmi_image_header(hdul):
+    """Preserve primary metadata, with the image HDU's keywords taking precedence."""
+    header = hdul[0].header.copy()
+    header.extend(hmi_image_hdu(hdul).header, update=True, strip=False)
+    return header
+
+
+def read_hmi_image_header(path):
+    with fits.open(path, do_not_scale_image_data=True) as hdul:
+        return hmi_image_header(hdul)
+
+
 def read_acquisition_header(path: Path) -> dict:
     """Read the acquisition identity and timestamp from one reference segment."""
 
-    header = fits.getheader(path, 0)
+    header = read_hmi_image_header(path)
     try:
         date = parse_hmi_tai_time(str(header["T_OBS"]))
         observation_time = format_jsoc_time(str(header["T_OBS"]))
@@ -225,9 +248,9 @@ def read_acquisition_header(path: Path) -> dict:
         raise ValueError(
             f"HMI FITS acquisition has invalid T_OBS/T_REC/CAMERA/HCAMID: {path}."
         ) from error
-    if type(camera) is not int or camera != HMI_CAMERA:
+    if type(camera) is not int or camera not in HMI_CAMERAS:
         raise ValueError(
-            f"HMI FITS acquisition requires CAMERA={HMI_CAMERA}; got {camera!r}: "
+            f"HMI FITS acquisition requires CAMERA in {HMI_CAMERAS}; got {camera!r}: "
             f"{path}."
         )
     if type(hcamid) is not int or hcamid not in {2, 3}:
@@ -256,9 +279,9 @@ def read_stokes_cube(
     stokes = None
     for key in SEGMENT_KEYS:
         path = segments[key]
-        with fits.open(path, memmap=True) as hdul:
-            header = hdul[0].header.copy()
-            data = hdul[0].data
+        with fits.open(path, memmap=False) as hdul:
+            header = hmi_image_header(hdul)
+            data = hmi_image_hdu(hdul).data
             if (
                 data is None
                 or data.ndim != 2
@@ -272,7 +295,6 @@ def read_stokes_cube(
                 *_IDENTITY_TEXT_KEYS,
                 *_IDENTITY_INTEGER_KEYS,
                 *_IDENTITY_FLOAT_KEYS,
-                "QUALITY",
             }
             missing = sorted(required - set(header))
             if missing:
@@ -291,7 +313,8 @@ def read_stokes_cube(
                 integer_identity = tuple(
                     int(header[name]) for name in _IDENTITY_INTEGER_KEYS
                 )
-                quality = int(header["QUALITY"])
+                # Some historical exports omit QUALITY; do not invent a FITS keyword.
+                quality = int(header.get("QUALITY", 0))
                 detector_origin = (
                     None
                     if "CCD_X0" not in header
@@ -330,7 +353,7 @@ def read_stokes_cube(
                 or text_values["CUNIT2"].lower() != "arcsec"
                 or not text_values["TELESCOP"]
                 or not text_values["INSTRUME"]
-                or integer_identity[0] != HMI_CAMERA
+                or integer_identity[0] not in HMI_CAMERAS
                 or integer_identity[1] not in {2, 3}
                 or quality < 0
                 or floating_values["CDELT1"] <= 0
@@ -393,8 +416,8 @@ def discover_hmi_acquisitions(inputs) -> list[dict]:
             "No HMI I0 FITS segments found; expected filenames ending in '.I0.fits'."
         )
     acquisitions = {}
-    for path in representatives:
-        item = read_acquisition_header(path)
+    for item in parallel_map(read_acquisition_header, representatives,
+                             description="HMI response headers"):
         acquisitions.setdefault(item["acquisition_key"], item)
     return [acquisitions[key] for key in sorted(acquisitions)]
 

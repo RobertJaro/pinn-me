@@ -1,0 +1,22 @@
+{
+  "affected_suites": {
+    "passed": 360,
+    "skipped": 1
+  },
+  "full_suite": {
+    "passed": 872,
+    "failed": 5,
+    "skipped": 2
+  },
+  "cuda_available": false,
+  "full_suite_failures": [
+    "tests/cli/test_cli.py::test_invert_dispatches_joint_training_with_active_aia",
+    "tests/diagnostics/test_aia_side_view.py::test_side_view_wandb_logging",
+    "tests/inversion/test_boundary_conditions.py::test_dynamic_hmi_configs_use_progressive_potential_and_outflow_boundaries[hmi_aia_dynamic.yaml]",
+    "tests/inversion/test_objective.py::test_training_and_joint_stokes_reductions_match_values_and_gradients[shape0]",
+    "tests/inversion/test_objective.py::test_training_and_joint_stokes_reductions_match_values_and_gradients[shape1]"
+  ],
+  "final_focused_rerun": {
+    "passed": 50
+  }
+}

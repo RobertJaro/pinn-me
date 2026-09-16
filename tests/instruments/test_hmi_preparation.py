@@ -205,6 +205,7 @@ def test_preparation_queries_phase_map_assignment_for_each_acquisition(
         manifest["profiles"]
     )
     assert {entry["phase_map_fsn"] for entry in written} == {4242, 5252}
+    assert len(written) == 2  # One build per unique calibration, not per acquisition.
     assert all(
         entry["sha256"] == sha256_file(manifest_path.parent / entry["file"])
         for entry in manifest["profiles"].values()
@@ -248,7 +249,7 @@ def test_phase_map_assignment_is_read_from_the_matching_definitive_record():
     }
 
 
-def test_response_directory_requires_explicit_atomic_replacement(tmp_path, monkeypatch):
+def test_incomplete_response_directory_is_not_silently_reused(tmp_path, monkeypatch):
     output = tmp_path / "responses"
     output.mkdir()
     marker = output / "old"
@@ -259,7 +260,7 @@ def test_response_directory_requires_explicit_atomic_replacement(tmp_path, monke
         lambda _: pytest.fail("existing output must be rejected before input access"),
     )
 
-    with pytest.raises(FileExistsError, match="complete prepared directory"):
+    with pytest.raises(FileNotFoundError, match="manifest not found"):
         preparation.prepare_hmi_response_directory(
             [tmp_path / "unused-input"],
             output,
@@ -267,6 +268,20 @@ def test_response_directory_requires_explicit_atomic_replacement(tmp_path, monke
             client=_Client(),
         )
     assert marker.read_text() == "preserve"
+
+
+def test_existing_responses_are_validated_and_reused_without_input_or_network_access(tmp_path, monkeypatch):
+    output = tmp_path / "responses"
+    output.mkdir()
+    calls = []
+    monkeypatch.setattr(preparation, "load_response_manifest", lambda path: calls.append(path))
+    monkeypatch.setattr(preparation, "discover_hmi_acquisitions",
+                        lambda _: pytest.fail("reuse must not rediscover inputs"))
+    result = preparation.prepare_hmi_response_directory(
+        [tmp_path / "unused-input"], output, "scientist@example.test", client=_Client(),
+    )
+    assert calls == [output]
+    assert result == output / preparation.MANIFEST_NAME
 
 
 def test_response_output_must_not_contain_source_fits(tmp_path, monkeypatch):

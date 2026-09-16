@@ -102,7 +102,11 @@ def test_current_density_is_curl_b_over_mu0_in_si_units():
             scalar = self.scale.expand(count)
             # B_y = x [G] gives curl(B)_z = 1 G m^-1.
             magnetic = torch.stack(
-                (torch.zeros_like(position[:, 0]), position[:, 0], torch.zeros_like(position[:, 0])),
+                (
+                    torch.zeros_like(position[:, 0]),
+                    position[:, 0],
+                    torch.zeros_like(position[:, 0]),
+                ),
                 dim=-1,
             )
             return {
@@ -121,6 +125,51 @@ def test_current_density_is_curl_b_over_mu0_in_si_units():
 
     expected = 1.0e-4 / (4.0 * np.pi * 1.0e-7)
     np.testing.assert_allclose(fields["current_density"], expected, rtol=1.0e-6)
+
+
+def test_physical_evaluation_forwards_explicit_dynamic_time():
+    class Atmosphere(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.ones(()))
+            self.thermodynamic_eos = SimpleNamespace(
+                mass_density=lambda temperature, pressure: pressure / temperature
+            )
+
+        def evaluate_position_points(self, position, time_hours=None):
+            assert time_hours == 1.25
+            scalar = self.scale.expand(position.shape[0])
+            vector = position * 0.0
+            return {
+                "temperature": scalar * 6_000.0,
+                "gas_pressure": scalar,
+                "microturbulence": scalar * 1_000.0,
+                "magnetic_field": vector,
+                "velocity_field": vector,
+            }
+
+    evaluator = AtmosphereEvaluator(AtmosphereSampling.from_options())
+    fields = evaluator._evaluate_physical_positions(
+        SimpleNamespace(atmosphere_model=Atmosphere()),
+        torch.tensor([[695_700_000.0, 0.0, 0.0]]),
+        time_hours=1.25,
+    )
+
+    np.testing.assert_allclose(fields["current_density"], 0.0)
+
+
+def test_raster_time_requires_one_finite_time():
+    raster = SimpleNamespace(
+        coordinates=torch.tensor(
+            [[[0.0, 0.0, 1.5], [1.0, 0.0, 1.5]]], dtype=torch.float32
+        ),
+        valid_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    assert AtmosphereEvaluator._raster_time_hours(raster) == 1.5
+
+    raster.coordinates[0, 1, 2] = 1.6
+    with pytest.raises(ValueError, match="one time"):
+        AtmosphereEvaluator._raster_time_hours(raster)
 
 
 def test_physical_slices_include_observer_magnetic_angles_and_los_velocity():
@@ -149,9 +198,7 @@ def test_physical_slices_include_observer_magnetic_angles_and_los_velocity():
                 "velocity_field": velocity,
             }
 
-    observer_basis = torch.tensor(
-        ((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0))
-    )
+    observer_basis = torch.tensor(((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
     evaluator = AtmosphereEvaluator(AtmosphereSampling.from_options())
     fields = evaluator._evaluate_physical_positions(
         SimpleNamespace(atmosphere_model=Atmosphere()),

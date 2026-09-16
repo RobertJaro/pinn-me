@@ -4,13 +4,6 @@ from __future__ import annotations
 
 
 def __getattr__(name: str):
-    if name in {
-        "build_hmi_stokes_query",
-        "download_hmi_stokes",
-    }:
-        from . import download as download_module
-
-        return getattr(download_module, name)
     if name == "HMIFilterProfiles":
         from .operator import HMIFilterProfiles
 
@@ -46,8 +39,6 @@ __all__ = [
     "HMIDataModule",
     "HMIFilterProfiles",
     "HMIResponseArchive",
-    "build_hmi_stokes_query",
-    "download_hmi_stokes",
     "load_raster",
     "load_response_manifest",
     "load_response_profile",

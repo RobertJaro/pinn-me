@@ -144,7 +144,7 @@ class HMIDataModule(ObservationDataModule):
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
         data_loading_workers: int = 1,
-        num_workers: int = 0,
+        num_workers: int = 2,
         pin_memory: bool = False,
         progress: bool = True,
         require_quality_zero: bool = True,
@@ -185,6 +185,11 @@ class HMIDataModule(ObservationDataModule):
         del stage
         if self.raster is not None:
             return
+        import tempfile
+        from prom3theus.observations.arrays import spill_raster
+        self._preparation_spool = tempfile.TemporaryDirectory(prefix="hmi-prepare-")
+        def load_and_spill(task):
+            return spill_raster(load_timeline_acquisition(task), self._preparation_spool.name)
         all_groups = resolve_acquisition_groups(self.files, self.directory)
         validation_source_index = _validation_index(
             all_groups, self.validation_raster
@@ -240,7 +245,7 @@ class HMIDataModule(ObservationDataModule):
             loader_options=self.raster_options,
         )
         reference_result = ordered_parallel_fits_map(
-            load_timeline_acquisition, [reference_task], 1
+            load_and_spill, [reference_task], 1
         )[0]
         shared_basis = reference_result.metadata["ray_geometry"]["scene_basis_rows"]
         remaining_indices = [
@@ -260,7 +265,7 @@ class HMIDataModule(ObservationDataModule):
             for index in remaining_indices
         ]
         remaining_results = ordered_parallel_fits_map(
-            load_timeline_acquisition,
+            load_and_spill,
             remaining_tasks,
             self.data_loading_workers,
             progress=self.progress,
@@ -296,7 +301,7 @@ class HMIDataModule(ObservationDataModule):
         self._evaluation_dataset = ObservationPixelDataset(
             self.raster,
             include_pixel_index=True,
-            pixel_indices=datasets[validation_index].pixel_indices,
+            pixel_indices=datasets[validation_index]._pixel_indices,
         )
         self._update_coordinate_normalization(reference_time)
         self.fits_consistency_metadata = {
@@ -334,19 +339,21 @@ class HMIDataModule(ObservationDataModule):
         xy_max = None
         time_min = math.inf
         time_max = -math.inf
+        from prom3theus.observations.arrays import read_slice
         for raster in self.rasters:
-            values = raster.coordinates[..., :2][raster.valid_mask]
-            current_min = values.amin(dim=0)
-            current_max = values.amax(dim=0)
-            xy_min = (
-                current_min if xy_min is None else torch.minimum(xy_min, current_min)
-            )
-            xy_max = (
-                current_max if xy_max is None else torch.maximum(xy_max, current_max)
-            )
-            times = raster.coordinates[..., 2][raster.valid_mask]
-            time_min = min(time_min, float(times.amin()))
-            time_max = max(time_max, float(times.amax()))
+            rows = max(1, 262144 // raster.spatial_shape[1])
+            for start in range(0, raster.spatial_shape[0], rows):
+                section = slice(start, start + rows)
+                mask = read_slice(raster.valid_mask, section)
+                if not mask.any():
+                    continue
+                coordinates = read_slice(raster.coordinates, section)[mask]
+                current_min = coordinates[:, :2].amin(dim=0)
+                current_max = coordinates[:, :2].amax(dim=0)
+                xy_min = current_min if xy_min is None else torch.minimum(xy_min, current_min)
+                xy_max = current_max if xy_max is None else torch.maximum(xy_max, current_max)
+                time_min = min(time_min, float(coordinates[:, 2].amin()))
+                time_max = max(time_max, float(coordinates[:, 2].amax()))
         affine = self.raster.metadata["coordinates"]["network_affine"]
         affine["center_mm"] = (0.5 * (xy_min + xy_max)).tolist()
         affine["scale_mm"] = torch.maximum(

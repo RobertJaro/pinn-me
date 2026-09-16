@@ -10,6 +10,7 @@ from importlib import import_module
 
 
 _EXPORT_MODULE = {
+    "TensorDiskDataset": ".tensor_dataset",
     "CARRINGTON_OBSERVER_RELATIVE_VELOCITY": ".contracts",
     "CARRINGTON_REGISTERED_RELATIVE_VELOCITY": ".contracts",
     "COORDINATES": ".contracts",
@@ -43,6 +44,33 @@ _EXPORT_MODULE = {
     "OBSERVATION_STORE_VERSION": ".store",
     "ObservationStore": ".store",
     "observation_store_signature": ".store",
+    "ABSOLUTE_TAI_SECONDS": ".image_contracts",
+    "CHANNEL_ANGSTROM": ".image_contracts",
+    "CHANNEL_INDEX": ".image_contracts",
+    "EXPOSURE_GROUP": ".image_contracts",
+    "IMAGE_INDEX": ".image_contracts",
+    "INTENSITY": ".image_contracts",
+    "UNCERTAINTY": ".image_contracts",
+    "ImageObservationBatch": ".image_contracts",
+    "ImageObservationRaster": ".image_contracts",
+    "ImageObservationSample": ".image_contracts",
+    "ImageObservationSpec": ".image_contracts",
+    "ImageObservationBatchCollator": ".image_dataset",
+    "ImagePixelDataset": ".image_dataset",
+    "collate_image_samples": ".image_dataset",
+    "reconstruct_image": ".image_dataset",
+    "StoredImageDataModule": ".image_data",
+    "IMAGE_MANIFEST_FILENAME": ".image_store",
+    "IMAGE_OBSERVATION_STORE_FORMAT": ".image_store",
+    "IMAGE_OBSERVATION_STORE_VERSION": ".image_store",
+    "ImageObservationStore": ".image_store",
+    "image_observation_store_signature": ".image_store",
+    "SceneContract": ".scene",
+    "ObservationDescriptor": ".streams",
+    "ObservationKind": ".streams",
+    "ObservationStreamDataModule": ".streams",
+    "PreparedObservationStream": ".streams",
+    "PreparedObservationStreams": ".streams",
 }
 
 

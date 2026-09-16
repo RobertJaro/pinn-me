@@ -7,7 +7,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 
-from .plotting import DiagnosticPlotter, FIELD_STYLES
+from .plotting import FIELD_STYLES, DiagnosticPlotter
 
 
 class AtmospherePlotter(DiagnosticPlotter):
@@ -125,11 +125,21 @@ class AtmospherePlotter(DiagnosticPlotter):
         return figure
 
     def tau_figure(self, evaluated: dict, label: str) -> Figure:
-        """Show continuum optical depth integrated along the traced rays."""
+        """Show the observed line-core optical depth along the traced rays.
 
-        tau = evaluated["profile_fields"]["tau500_ray"]
+        The quantity plotted is the optical depth the observation actually
+        sees: the integral of the same ``eta_I`` the formal solver uses, at
+        the most opaque configured line centre.  The 500 nm continuum depth
+        is drawn alongside it for reference, since the two differ by orders
+        of magnitude -- a line core reaches unit optical depth while
+        ``tau_500`` is still far below one.
+        """
+
+        tau = evaluated["profile_fields"]["tau_line_ray"]
+        continuum_tau = evaluated["profile_fields"]["tau500_ray"]
         tiny = np.finfo(tau.dtype).tiny
         log_tau = np.log10(np.clip(tau, tiny, None))
+        log_continuum = np.log10(np.clip(continuum_tau, tiny, None))
         height_Mm = evaluated["shell_height_levels_m"] / 1.0e6
         # The outer boundary is defined to have tau=0 and therefore has no
         # finite logarithm. Exclude only that endpoint from the profile panel.
@@ -137,6 +147,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         lower, median, upper = np.nanpercentile(
             log_tau[:, profile_slice], (16.0, 50.0, 84.0), axis=0
         )
+        continuum_median = np.nanmedian(log_continuum[:, profile_slice], axis=0)
 
         figure = Figure(figsize=(11.0, 4.5), constrained_layout=True)
         FigureCanvasAgg(figure)
@@ -154,25 +165,25 @@ class AtmospherePlotter(DiagnosticPlotter):
             height_Mm[profile_slice],
             color="tab:blue",
             linewidth=1.6,
-            label="validation-ray median",
+            label="line core: validation-ray median",
         )
         profile_axis.plot(
-            evaluated["log_tau500"][profile_slice],
+            continuum_median,
             height_Mm[profile_slice],
-            color="black",
+            color="tab:orange",
+            linewidth=1.2,
             linestyle="--",
-            linewidth=1.0,
-            label="FALC radial shell labels",
+            label=r"500 nm continuum: median",
         )
         profile_axis.axvline(0.0, color="0.45", linewidth=0.8, linestyle=":")
-        profile_axis.set_xlabel(r"$\log_{10}\tau_{500}$")
+        profile_axis.set_xlabel(r"$\log_{10}\tau$")
         profile_axis.set_ylabel(r"height $h=r-R_\odot$ [Mm]")
-        profile_axis.set_title(r"derived $\tau_{500}=\int\alpha_{500}\,ds$")
+        profile_axis.set_title(r"derived $\tau=\int\eta_I\,ds$ at the line core")
         profile_axis.grid(alpha=0.2)
         profile_axis.legend(loc="best", fontsize=8)
 
         bottom_index = -1
-        bottom_tau = evaluated["map_fields"]["tau500_ray"][..., bottom_index]
+        bottom_tau = evaluated["map_fields"]["tau_line_ray"][..., bottom_index]
         finite = bottom_tau[np.isfinite(bottom_tau) & (bottom_tau > 0)]
         if finite.size:
             bottom_log_tau = np.log10(np.clip(bottom_tau, tiny, None))
@@ -199,12 +210,12 @@ class AtmospherePlotter(DiagnosticPlotter):
         map_axis.set_ylabel("Carrington latitude [deg]")
         bottom_height_Mm = height_Mm[bottom_index]
         map_axis.set_title(
-            rf"bottom layer: $\log_{{10}}\tau_{{500}}$ at "
+            rf"bottom layer: line-core $\log_{{10}}\tau$ at "
             rf"$h=r-R_\odot={bottom_height_Mm:g}\,\mathrm{{Mm}}$"
         )
         colorbar = figure.colorbar(image, ax=map_axis, location="right", shrink=0.86)
-        colorbar.set_label(r"$\log_{10}\tau_{500}$")
-        figure.suptitle(f"Continuum optical-depth validation — {label}")
+        colorbar.set_label(r"line-core $\log_{10}\tau$")
+        figure.suptitle(f"Line-core optical-depth validation — {label}")
         return figure
 
     def meridional_field_panel_figure(
@@ -252,6 +263,11 @@ class AtmospherePlotter(DiagnosticPlotter):
                 if norm_evaluated is not None
                 else raw_values
             )
+            if style.get("full_range", False) and norm_evaluated is not None:
+                # The meridional plane may contain extrema between shell layers.
+                norm_values = np.concatenate(
+                    (np.ravel(norm_values), np.ravel(raw_values))
+                )
             image = axis.pcolormesh(
                 latitude_corners_deg,
                 vertical_corners,

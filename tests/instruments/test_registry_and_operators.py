@@ -10,16 +10,15 @@ import torch
 
 from prom3theus.config import load_config
 from prom3theus.instruments import (
-    HMIFilterProfiles,
     HinodeSpectralPSF,
+    HMIFilterProfiles,
     build_instrument,
     get_instrument_registration,
     resolve_instrument_config,
 )
+from prom3theus.inversion.assembly import build_forward_assembly
+from prom3theus.inversion.configuration import DepthSamplingSettings
 from prom3theus.observations import get_observation_adapter
-from prom3theus.training.assembly import build_forward_assembly
-from prom3theus.training.configuration import DepthSamplingSettings
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -202,7 +201,7 @@ def test_shipped_observation_sections_construct_their_exact_adapter(
     filename, data_module_name
 ):
     config = load_config(PROJECT_ROOT / "configs" / filename)
-    observation = config.observation.to_dict()
+    observation = config.streams[0].observation.to_dict()
     adapter = get_observation_adapter(observation.pop("type"))
 
     data = adapter.build(observation)

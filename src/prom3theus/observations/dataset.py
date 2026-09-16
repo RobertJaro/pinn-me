@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 
 import torch
+from .bulk import PixelCatalog
 from torch.utils.data import Dataset, default_collate
 
 from .contracts import ObservationBatch, ObservationRaster
@@ -37,9 +38,11 @@ class ObservationPixelDataset(Dataset):
             raise KeyError(
                 f"Raster does not provide auxiliary fields: {sorted(missing)}."
             )
-        if pixel_indices is None:
-            indices = torch.nonzero(raster.valid_mask, as_tuple=False)
-        else:
+        self._pixel_indices = None
+        self._pixel_catalog = getattr(raster, "_bulk_catalog", None) or PixelCatalog(raster.valid_mask)
+        if not len(self._pixel_catalog):
+            raise ValueError("A dataset requires at least one valid pixel")
+        if pixel_indices is not None:
             raw_indices = torch.as_tensor(pixel_indices)
             integer_dtypes = {
                 torch.int8,
@@ -51,27 +54,75 @@ class ObservationPixelDataset(Dataset):
             if raw_indices.dtype not in integer_dtypes:
                 raise TypeError("pixel_indices must use an integer dtype.")
             indices = raw_indices.to(dtype=torch.long)
-        if indices.ndim != 2 or indices.shape[-1] != 2:
-            raise ValueError("pixel_indices must have shape [sample, 2].")
-        if indices.numel() == 0:
-            raise ValueError(
-                "An observation dataset requires at least one valid pixel."
-            )
-        if (
-            torch.any(indices < 0)
-            or torch.any(indices[:, 0] >= raster.spatial_shape[0])
-            or torch.any(indices[:, 1] >= raster.spatial_shape[1])
-        ):
-            raise IndexError("pixel_indices lie outside the raster.")
-        if not torch.all(raster.valid_mask[indices[:, 0], indices[:, 1]]):
-            raise ValueError("pixel_indices may only select valid pixels.")
-        self.pixel_indices = indices
+            if indices.ndim != 2 or indices.shape[-1] != 2:
+                raise ValueError("pixel_indices must have shape [sample, 2].")
+            if indices.numel() == 0:
+                raise ValueError(
+                    "An observation dataset requires at least one valid pixel."
+                )
+            if (
+                torch.any(indices < 0)
+                or torch.any(indices[:, 0] >= raster.spatial_shape[0])
+                or torch.any(indices[:, 1] >= raster.spatial_shape[1])
+            ):
+                raise IndexError("pixel_indices lie outside the raster.")
+            if not torch.all(raster.valid_mask[indices[:, 0], indices[:, 1]]):
+                raise ValueError("pixel_indices may only select valid pixels.")
+            self.pixel_indices = indices
+
+    @property
+    def pixel_indices(self):
+        # Compatibility for explicit diagnostics; training uses compact catalogs.
+        if self._pixel_indices is not None:
+            from .arrays import materialize_array
+            return materialize_array(self._pixel_indices)
+        return self._pixel_catalog.pixels(0, len(self._pixel_catalog))
+
+    @pixel_indices.setter
+    def pixel_indices(self, value):
+        self._pixel_indices = value
+
+    def pixels_at(self, indices):
+        if self._pixel_indices is not None:
+            return self._pixel_indices[indices]
+        if isinstance(indices, slice):
+            return self._pixel_catalog.pixels(indices.start, indices.stop)
+        # Sparse diagnostics load each containing mask block only once.
+        parts = []
+        for block in torch.unique(torch.searchsorted(
+            torch.tensor(self._pixel_catalog.prefix[1:]), indices, right=True)):
+            first = self._pixel_catalog.prefix[int(block)]
+            last = self._pixel_catalog.prefix[int(block) + 1]
+            selected = indices[(indices >= first) & (indices < last)]
+            parts.append(self._pixel_catalog.pixels(first, last)[selected - first])
+        return torch.cat(parts)
 
     def __len__(self) -> int:
-        return int(self.pixel_indices.shape[0])
+        return (len(self._pixel_catalog) if self._pixel_indices is None
+                else int(self._pixel_indices.shape[0]))
+
+    def bulk_fields(self):
+        fields = {name: getattr(self.raster, name) for name in
+                  ("coordinates", "ray_direction", "stokes_basis", "stokes")}
+        if self.include_surface_position:
+            fields["surface_position_m"] = self.raster.surface_position_m
+        fields.update({name: self.raster.auxiliary[name] for name in self.auxiliary_fields})
+        return fields
+
+    def finish_bulk(self, batch, pixels):
+        if self.include_pixel_index:
+            batch["pixel_index"] = pixels
+        response = {name.removeprefix("instrument_response:"): batch.pop(name)
+                    for name in tuple(batch) if name.startswith("instrument_response:")}
+        if response:
+            batch["instrument_response"] = response
+        return batch
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        pixel = self.pixel_indices[index]
+        index = index + len(self) if index < 0 else index
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        pixel = self.pixels_at(slice(index, index + 1))[0]
         row, column = map(int, pixel)
         sample = {
             "coordinates": self.raster.coordinates[row, column],

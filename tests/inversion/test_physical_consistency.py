@@ -6,12 +6,9 @@ import pytest
 import torch
 
 from prom3theus.instruments import MagneticAzimuthConvention
-from prom3theus.inversion.forward import (
-    DepthRefinement,
-    ForwardRuntime,
-    LTEForwardComposition,
-)
-from prom3theus.rt import RayTraceResult, StratifiedAtmosphere
+from prom3theus.inversion.depth_sampling import DepthRefinement
+from prom3theus.inversion.forward import ForwardRuntime, LTEForwardComposition
+from prom3theus.rt import RadialReferenceAtmosphere, RayTraceResult, StratifiedAtmosphere
 
 
 class _CaptureBackend:
@@ -52,7 +49,8 @@ class _IdentityInstrument(torch.nn.Module):
 class _ConstantAtmosphere(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.register_buffer("log_tau500", torch.tensor([-5.0, 1.0]))
+        self.reference_atmosphere = RadialReferenceAtmosphere("falc_82")
+        self.line_formation_height_bounds_Mm = (1.5, -0.1)
         self.register_buffer("solar_radius_m", torch.tensor(1.0))
 
     @staticmethod
@@ -67,7 +65,7 @@ class _ConstantAtmosphere(torch.nn.Module):
         position[..., 0] = 1.0
         distance = torch.arange(depth, dtype=coordinates.dtype).expand(batch, -1)
         atmosphere = StratifiedAtmosphere(
-            log_tau500=depth_grid,
+            depth_coordinate=torch.arange(depth, dtype=coordinates.dtype),
             temperature=scalar * 6_000.0,
             velocity_field=vector,
             microturbulence=scalar * 1_000.0,

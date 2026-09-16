@@ -1,50 +1,16 @@
-# Static LTE inversion of the full Hinode/SOT-SP raster 20110214_000004.
-#
-# These are the literal operational paths from the preserved run. The input
-# directory must contain the prepared FITS columns for this raster directly.
-schema_version: 2
-
+# Single-stream inversion through the joint runtime.
+schema_version: 3
 solver:
-  kind: lte
+  kind: joint
   output_directory: /glade/work/rjarolim/lte/hinode_mhs_20110214_000004_v03
   work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_20110214_000004_v03
-
-resources:
-  # Common LTE atomic tables plus the complete Hinode/SP instrument bundle.
-  bundle: packaged
-
-observation:
-  type: hinode_sp
-  directory: /glade/work/rjarolim/data/inversion/hinode_2011_02/20110214_000004
-  selection:
-    slit_slice:
-      start: 0
-      stop: 512
-  loader:
-    batch_size: 128
-    validation_batch_size: 64
-    validation_stride: 16
-    preparation_workers: 8
-    workers: 8
-    pin_memory: true
-    progress: true
-  calibration:
-    continuum_edge_samples: 8
-    quiet_sun_max_fractional_polarization: 1.0e-2
-    quiet_sun_continuum_trim_quantiles: [0.05, 0.95]
-    minimum_quiet_sun_pixels: 1024
-    stokes_reference_angle_deg: 0.0
-
+scene:
+  reference_stream: photospheric_stokes
 atmosphere:
-  depth_grid:
-    coordinate: log_tau500
-    minimum: -5.0
-    maximum: 1.0
-    count: 51
   geometry:
     type: spherical_shell
     time_dependent: false
-    height_input_scale_m: 1.0e+6
+    height_input_scale_m: 1000000.0
     outer_height_megameter: 1.5
     line_formation_outer_height_megameter: 1.5
     inner_height_megameter: -0.1
@@ -58,99 +24,157 @@ atmosphere:
       maximum_m_per_s: 100000.0
     magnetic_field:
       scale_gauss: 100.0
+      representation: vector_potential
     microturbulence:
       log_scale: 0.2
     gas_pressure:
       log_scale: 0.5
   network:
-    type: mlp
+    type: siren
     hidden_dimension: 256
     hidden_layers: 8
-    activation: silu
-    encoding:
-      type: fourier
-      # Three static Carrington spatial coordinates; there is no time input.
-      num_frequencies: [64, 64, 64]
-      max_frequencies: [8, 8, 8]
-      include_input: true
-
-synthesis:
-  line_ids: [FeI_6301.5008, FeI_6302.4932]
-  excluded_wavelength_windows_angstrom: [[6302.04, 6302.14]]
-
-instrument:
-  type: hinode_sp
-  spectral_psf:
-    type: gaussian
-    fwhm_angstrom: 0.025
-    oversample: 4
-    truncate_sigma: 4.0
-
-training:
-  depth_sampling:
-    sample_count: 25
-    coarse_to_fine:
+    first_omega_0: 30.0
+    hidden_omega_0: 1.0
+    radial_weighting:
+      near_sun_weight: 1.0
+      outer_weight: 0.1
+      exponent: 1.0
+physics:
+  vector_basis_matches_spatial_coordinates: true
+  loss_start_step: 500
+  loss_ramp_steps: 1000
+  robust_loss_delta: 1.0
+  collocation:
+    volume_points_per_step: 1024
+    height_layers_per_step: 32
+    upper_volume_points_per_step: 0
+    upper_height_layers_per_step: 0
+    upper_boundary_points_per_step: 256
+    side_boundary_points_per_step: 0
+    validation_side_boundary_points: 0
+    validation_height_layers: 8
+    validation_upper_height_layers: 0
+    validation_points_per_height: 32
+    height_sampling_power: 1.0
+    residual_adaptive_enabled: true
+    residual_adaptive_candidate_multiplier: 2
+    residual_adaptive_fraction: 0.5
+    residual_adaptive_start_step: 500
+    residual_adaptive_update_every_n_steps: 250
+  normalization:
+    length_m: 1000000.0
+    time_s: 3600.0
+    magnetic_field_floor_gauss: 1.0
+    velocity_scale_m_per_s: 1000.0
+    force_balance_pressure_floor_pa: 1.0
+  equations:
+    hydrostatic_equilibrium:
+      enabled: false
+      weight: 0.0
+    magnetohydrostatic_equilibrium:
       enabled: true
-      fine_sample_count: 16
-      uniform_weight_floor: 0.05
-  vector_regularization:
-    enabled: false
-    magnetic_weight: 0.0
-    velocity_weight: 0.0
-    decay_steps: 0
-  physics:
-    vector_basis_matches_spatial_coordinates: true
-    upper_boundary_current_free_ramp_steps: 0
-    collocation:
-      volume_points_per_step: 1024
-      height_layers_per_step: 32
-      upper_volume_points_per_step: 0
-      upper_height_layers_per_step: 0
-      upper_boundary_points_per_step: 256
-      side_boundary_points_per_step: 0
-      side_height_layers_per_step: 0
-      validation_height_layers: 8
-      validation_upper_height_layers: 0
-      validation_points_per_height: 32
-    normalization:
-      length_m: 1.0e+6
-      time_s: 3600.0
-      magnetic_field_floor_gauss: 1.0
-      velocity_scale_m_per_s: 1000.0
-    equations:
-      hydrostatic_equilibrium: {enabled: false, weight: 0.0}
-      magnetohydrostatic_equilibrium: {enabled: true, weight: 1.0e-1}
-      momentum: {enabled: false, weight: 0.0}
-      magnetic_divergence: {enabled: true, weight: 1.0e-1}
-      radial_magnetic_energy_gradient: {enabled: false, weight: 0.0}
-      induction: {enabled: false, weight: 0.0}
-      continuity: {enabled: false, weight: 0.0}
-      upper_domain_microturbulence_prior: {enabled: false, weight: 0.0}
-      upper_boundary_open_velocity: {enabled: false, weight: 0.0}
-      side_boundary_open_velocity: {enabled: false, weight: 0.0}
-      upper_boundary_current_free: {enabled: false, weight: 0.0}
-      side_boundary_current_free: {enabled: false, weight: 0.0}
-      upper_boundary_gas_pressure_prior: {enabled: true, weight: 1.0e-4}
-  learning_rate:
-    start: 1.0e-3
-    end: 1.0e-4
-    iterations: auto
-
-loss:
-  type: huber
-  # Effective errors in the stored disk-center atlas-continuum units. Stokes I
-  # includes unresolved structure/model discrepancy; Q/U/V track the measured
-  # continuum polarization floor of these observations.
-  stokes_sigmas: {i: 5.0e-3, q: 2.0e-3, u: 2.0e-3, v: 2.0e-3}
-  huber_delta: 1.0
-  # Relative preferences are normalized to sum to one at runtime.
-  stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
-
+      weight: 0.1
+    momentum:
+      enabled: false
+      weight: 0.0
+    magnetic_divergence:
+      enabled: true
+      weight: 0.1
+    radial_magnetic_energy_gradient:
+      enabled: false
+      weight: 0.0
+    radial_magnetic_field:
+      enabled: false
+      weight: 0.0
+    induction:
+      enabled: false
+      weight: 0.0
+    continuity:
+      enabled: false
+      weight: 0.0
+    upper_domain_microturbulence_prior:
+      enabled: false
+      weight: 0.0
+    upper_boundary_open_velocity:
+      enabled: false
+      weight: 0.0
+    side_boundary_open_velocity:
+      enabled: false
+      weight: 0.0
+    upper_boundary_tangential_magnetic_neumann:
+      enabled: false
+      weight: 0.0
+    side_boundary_tangential_magnetic_neumann:
+      enabled: false
+      weight: 0.0
+    upper_boundary_gas_pressure_prior:
+      enabled: true
+      weight: 0.0001
+atmosphere_regularization:
+  - id: vector_potential_regularization
+    type: vector_potential
+    gauge_weight: 0.1
+    smoothness_weight: 0.001
+    sample_count: 512
+    height_layers: 16
+    domain: line_formation
+    smoothness_step_megameter: 0.25
+streams:
+- id: photospheric_stokes
+  observation:
+    type: hinode_sp
+    directory: /glade/work/rjarolim/data/inversion/hinode_2011_02/20110214_000004
+    selection:
+      slit_slice:
+        start: 0
+        stop: 512
+    loader:
+      batch_size: 128
+      validation_batch_size: 64
+      validation_stride: 16
+      preparation_workers: 8
+      workers: 8
+      pin_memory: false
+      progress: true
+    calibration:
+      continuum_edge_samples: 8
+      quiet_sun_max_fractional_polarization: 0.01
+      quiet_sun_continuum_trim_quantiles:
+      - 0.05
+      - 0.95
+      minimum_quiet_sun_pixels: 1024
+      stokes_reference_angle_deg: 0.0
+  data_term:
+    type: lte_stokes
+    weight: 1.0
+    synthesis:
+      line_ids:
+      - FeI_6301.5008
+      - FeI_6302.4932
+      excluded_wavelength_windows_angstrom:
+      - - 6302.04
+        - 6302.14
+    instrument:
+      type: hinode_sp
+      spectral_psf:
+        type: gaussian
+        fwhm_angstrom: 0.025
+        oversample: 4
+        truncate_sigma: 4.0
+    objective:
+      type: mse
+      stokes_weights: {i: 10000, q: 62500, u: 62500, v: 62500}
+    depth_sampling:
+      # FALC reference coordinates shape Stokes quadrature; the model uses height.
+      reference_log_tau500_bounds: [-5.0, 1.0]
+      sample_count: 25
+      coarse_to_fine:
+        enabled: true
+        fine_sample_count: 16
+        uniform_weight_floor: 0.05
 diagnostics:
-  validation_every_n_epochs: 1
   visualization:
     enabled: true
-    every_n_validations: 1
     ray_sampling:
       batch_size: 1024
       max_pixels: 16384
@@ -165,17 +189,43 @@ diagnostics:
     meridional_slice:
       enabled: true
       longitude_deg: 36.0
-    include_initial: true
-
-runtime:
+training:
+  loader_seed: 0
+  reader_workers: 2  # Global maximum concurrent bulk reads.
+  loader_block_bytes: 33554432
+  loader_cache_bytes: 134217728  # Per observation stream, across its channels.
+  loader_prefetch_batches: 2
+  loader_max_batch_bytes: 67108864
+  gpu_prefetch: true
+  max_steps: -1
   max_epochs: 500
-  log_every_n_steps: 10
+  learning_rate: 3.0e-4
+  final_learning_rate: 3.0e-5
   gradient_clip_norm: 0.1
-
+  log_every_n_steps: 10
+  warmup_steps: 1000
+  loss_balance:
+    enabled: true
+    start_step: 250
+    update_every_n_steps: 100
+    ema_decay: 0.9
+    adaptation_rate: 0.1
+    target_gradient_fraction: 0.25
+    min_multiplier: 0.01
+    max_multiplier: 100.0
+    probe_parameter_count: 4
+  reference_stream: photospheric_stokes
 logging:
   type: wandb
   project: PROM3THEUS
   tags:
-    [hinode, sot-sp, lte, mhs, magnetohydrostatic-equilibrium, spherical-shell,
-     carrington, full-resolution, "20110214_000004"]
+  - hinode
+  - sot-sp
+  - lte
+  - mhs
+  - magnetohydrostatic-equilibrium
+  - spherical-shell
+  - carrington
+  - full-resolution
+  - '20110214_000004'
   run_name: Hinode LTE MHS 20110214_000004

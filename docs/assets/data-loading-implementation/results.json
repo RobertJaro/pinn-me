@@ -1,0 +1,57 @@
+{
+  "platform": "macOS-14.6.1-arm64-arm-64bit",
+  "python": "3.11.15",
+  "torch": "2.12.0",
+  "numpy": "2.4.6",
+  "cuda": false,
+  "samples": 65536,
+  "fields": 6,
+  "features": 16,
+  "results": [
+    {
+      "batch_size": 64,
+      "reopen_per_batch_seconds": [
+        0.9371161249000579,
+        0.8960107499733567,
+        0.9717862500110641
+      ],
+      "read_session_seconds": [
+        0.0346869999775663,
+        0.03281779098324478,
+        0.03281829203478992
+      ],
+      "mapping_count": 6,
+      "median_speedup": 28.554689071163196
+    },
+    {
+      "batch_size": 256,
+      "reopen_per_batch_seconds": [
+        0.20797654206398875,
+        0.32656662503723055,
+        0.2287232920061797
+      ],
+      "read_session_seconds": [
+        0.010464082937687635,
+        0.008736707968637347,
+        0.008817832916975021
+      ],
+      "mapping_count": 6,
+      "median_speedup": 25.938719202296223
+    },
+    {
+      "batch_size": 4096,
+      "reopen_per_batch_seconds": [
+        0.01716595806647092,
+        0.016630666912533343,
+        0.023048667004331946
+      ],
+      "read_session_seconds": [
+        0.0028353340458124876,
+        0.001443832996301353,
+        0.0016220000106841326
+      ],
+      "mapping_count": 6,
+      "median_speedup": 10.583204656842515
+    }
+  ]
+}

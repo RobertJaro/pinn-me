@@ -128,12 +128,12 @@ class ObservationStore:
 
     @classmethod
     def _write_array(cls, path: Path, tensor: torch.Tensor) -> dict[str, Any]:
-        array = tensor.detach().cpu().contiguous().numpy()
-        np.save(path, array, allow_pickle=False)
+        from .arrays import write_array
+        dtype, shape = write_array(path, tensor)
         return {
             "file": path.name,
-            "dtype": array.dtype.str,
-            "shape": list(array.shape),
+            "dtype": dtype,
+            "shape": list(shape),
             "sha256": _sha256(path),
         }
 
@@ -310,10 +310,8 @@ class ObservationStore:
             raise ValueError(f"Unsafe or missing observation array path for {name!r}.")
         if verify and _sha256(array_path) != record.get("sha256"):
             raise ValueError(f"Observation array checksum mismatch for {name!r}.")
-        array = np.load(array_path, mmap_mode="c" if mmap else None, allow_pickle=False)
-        if list(array.shape) != shape or array.dtype != dtype:
-            raise ValueError(f"Observation array schema mismatch for {name!r}.")
-        return torch.from_numpy(array)
+        from .loading import load_array_tensor
+        return load_array_tensor(array_path, mmap=mmap, shape=shape, dtype=dtype)
 
     @classmethod
     def load_sequence(
@@ -378,13 +376,15 @@ class ObservationStore:
                 for name, value in arrays.items()
                 if name.startswith("auxiliary:")
             }
+            from .catalog import validated_raster, attach_catalog
             rasters.append(
-                ObservationRaster(
+                validated_raster(ObservationRaster,
                     **{name: arrays[name] for name in cls._CORE_FIELDS},
                     metadata=raster_record["metadata"],
                     auxiliary=auxiliary,
                 )
             )
+            attach_catalog(rasters[-1], root, raster_record)
             name = raster_record["name"]
             if not isinstance(name, str) or not name:
                 raise ValueError(

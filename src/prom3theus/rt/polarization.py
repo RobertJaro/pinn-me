@@ -9,12 +9,11 @@ import torch
 from torch import nn
 
 from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN, SPEED_OF_LIGHT
+
 from .atomic import AtomicDatabase, SpectralLine
 from .opacity import damping_rate, integrated_line_opacity
 from .profiles import VoigtFaraday
-from .wavelength import air_to_vacuum_angstrom
 from .zeeman import ZeemanPattern
-
 
 # Exact CODATA/SI constants used at the tensor boundary.  Wavelength and field
 # remain in Angstrom and gauss only where explicitly indicated.
@@ -77,19 +76,28 @@ class PolarizedLineOpacity(nn.Module):
             )
             for line in self.lines
         )
-        line_wavelength_air = torch.tensor(
-            [line.wavelength_air_angstrom for line in self.lines],
-            dtype=torch.float64,
+        # Atomic metadata are constants, not model tensors. All registered
+        # quantities use the default model dtype; no float64 promotion is needed.
+        vacuum = []
+        for line in self.lines:
+            reference_um = line.wavelength_air_angstrom / 1e4  # micrometres
+            s0 = 1 / reference_um**2
+            n0 = (
+                1
+                + 0.00008336624212083
+                + 0.02408926869968 / (130.1065924522 - s0)
+                + 0.0001599740894897 / (38.92568793293 - s0)
+            )
+            vacuum.append(line.wavelength_air_angstrom * n0)
+        self._rest_frequencies_hz = tuple(
+            SPEED_OF_LIGHT / (value * 1e-10) for value in vacuum
         )
-        line_wavelength_vacuum = air_to_vacuum_angstrom(line_wavelength_air)
         self.register_buffer(
-            "line_wavelength_vacuum_angstrom",
-            line_wavelength_vacuum,
-            persistent=False,
+            "line_wavelength_vacuum_angstrom", torch.tensor(vacuum), persistent=False
         )
         self.register_buffer(
             "line_rest_frequency_hz",
-            SPEED_OF_LIGHT / (line_wavelength_vacuum * 1.0e-10),
+            torch.tensor(self._rest_frequencies_hz),
             persistent=False,
         )
         self.register_buffer(
@@ -98,8 +106,7 @@ class PolarizedLineOpacity(nn.Module):
                 [
                     _atomic_mass_u(self.atomic, line.element) * ATOMIC_MASS_UNIT
                     for line in self.lines
-                ],
-                dtype=torch.float64,
+                ]
             ),
             persistent=False,
         )
@@ -155,22 +162,37 @@ class PolarizedLineOpacity(nn.Module):
                 raise TypeError(
                     f"{name} must use the temperature tensor's dtype and device"
                 )
-            if not torch.isfinite(values).all():
-                raise ValueError(f"{name} must contain only finite values")
-        if torch.any((wavelength_angstrom < 2000.0) | (wavelength_angstrom > 100000.0)):
-            raise ValueError(
-                "Standard-air wavelengths must lie in the supported 2000--100000 Angstrom range"
-            )
-        if torch.any(temperature <= 0):
-            raise ValueError("temperature must be strictly positive")
-        if torch.any(velocity_los.abs() >= SPEED_OF_LIGHT):
-            raise ValueError("velocity_los must remain strictly subluminal")
-        if torch.any(microturbulence < 0):
-            raise ValueError("microturbulence must be non-negative")
-        if torch.any(continuum_extinction <= 0) or torch.any(alpha500 <= 0):
-            raise ValueError(
-                "continuum_extinction and alpha500 must be strictly positive"
-            )
+        # Transfer the small vector of validation flags once. Inspecting each
+        # reduction in Python separately serializes CPU and GPU execution.
+        checks = [
+            (torch.isfinite(values).all(), f"{name} must contain only finite values")
+            for name, values in inputs.items()
+        ]
+        checks.extend(
+            [
+                (
+                    (
+                        (wavelength_angstrom >= 2000.0)
+                        & (wavelength_angstrom <= 100000.0)
+                    ).all(),
+                    "Standard-air wavelengths must lie in the supported 2000--100000 Angstrom range",
+                ),
+                ((temperature > 0).all(), "temperature must be strictly positive"),
+                (
+                    (velocity_los.abs() < SPEED_OF_LIGHT).all(),
+                    "velocity_los must remain strictly subluminal",
+                ),
+                ((microturbulence >= 0).all(), "microturbulence must be non-negative"),
+                (
+                    (continuum_extinction > 0).all() & (alpha500 > 0).all(),
+                    "continuum_extinction and alpha500 must be strictly positive",
+                ),
+            ]
+        )
+        valid = torch.stack([flag for flag, _ in checks]).cpu().tolist()
+        for passed, (_, message) in zip(valid, checks, strict=True):
+            if not passed:
+                raise ValueError(message)
 
     def _orientation(self, magnetic_field: torch.Tensor):
         bx, by, b_los = magnetic_field.unbind(dim=-1)
@@ -196,40 +218,116 @@ class PolarizedLineOpacity(nn.Module):
             sin2_sin2azimuth,
         )
 
-    def _group_profiles(
+    def velocity_offsets_km_s(self, wavelength_angstrom):
+        """Rest-minus-observed frequency as an equivalent velocity in km/s.
+
+        Evaluate c*(lambda_vac-lambda0_vac)/lambda_vac without subtracting
+        absolute optical frequencies or nearly equal refractive indices. Air
+        wavelength residuals use a split line centre, and the refractive-index
+        difference is factored algebraically. Every tensor stays in input dtype.
+        """
+        wavelength = torch.as_tensor(wavelength_angstrom)
+        offsets = []
+        wavelength_um = wavelength / 1e4  # micrometres, order unity
+        for line in self.lines:
+            origin = int(line.wavelength_air_angstrom)
+            delta_l = (
+                (wavelength - origin) - (line.wavelength_air_angstrom - origin)
+            ) / 1e4
+            reference_um = line.wavelength_air_angstrom / 1e4
+            s, s0 = wavelength_um.reciprocal().square(), 1 / reference_um**2
+            delta_s = (
+                -delta_l
+                * (wavelength_um + reference_um)
+                / (wavelength_um.square() * reference_um**2)
+            )
+            n0 = (
+                1
+                + 0.00008336624212083
+                + 0.02408926869968 / (130.1065924522 - s0)
+                + 0.0001599740894897 / (38.92568793293 - s0)
+            )
+            delta_n = delta_s * (
+                0.02408926869968 / ((130.1065924522 - s) * (130.1065924522 - s0))
+                + 0.0001599740894897 / ((38.92568793293 - s) * (38.92568793293 - s0))
+            )
+            relative = (delta_l * n0 + wavelength_um * delta_n) / (
+                wavelength_um * (n0 + delta_n)
+            )
+            offsets.append((SPEED_OF_LIGHT / 1000) * relative)
+        return torch.stack(offsets)
+
+    def line_center_extinction(
         self,
-        pattern: ZeemanPattern,
-        frequency_hz: torch.Tensor,
-        central_frequency_hz: torch.Tensor,
-        doppler_width_hz: torch.Tensor,
-        damping: torch.Tensor,
-        field_strength_gauss: torch.Tensor,
-        bulk_doppler_factor: torch.Tensor,
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        temperature: torch.Tensor,
+        microturbulence: torch.Tensor,
+        *,
+        lower_level_populations: Mapping[str, torch.Tensor],
+        damping_electron_density: torch.Tensor | None,
+        damping_hydrogen_neutral: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the summed rest-frame line-centre extinction in m^-1.
+
+        Every line is evaluated at its own rest frequency with no magnetic
+        splitting and no bulk velocity, so this is the largest monochromatic
+        line extinction the configured window can reach at each depth. It is a
+        depth-sampling quantity used to locate the layers where the line cores
+        form; it never enters the emergent Stokes vector, where the field,
+        velocity, and Zeeman pattern all matter.
+        """
+
+        total = torch.zeros_like(temperature)
+        rest_frequencies = temperature.new_tensor(self._rest_frequencies_hz)
+        atomic_masses = self.line_atomic_mass_kg.to(temperature)
+        electron_density = (
+            torch.zeros_like(temperature)
+            if damping_electron_density is None
+            else damping_electron_density
+        )
+        for line_index, line in enumerate(self.lines):
+            rest_frequency = rest_frequencies[line_index]
+            doppler_velocity = torch.sqrt(
+                (2.0 * K_BOLTZMANN / atomic_masses[line_index]) * temperature
+                + microturbulence.square()
+            )
+            doppler_width = rest_frequency * (doppler_velocity / SPEED_OF_LIGHT)
+            damping_parameter = damping_rate(
+                line,
+                temperature,
+                electron_density,
+                damping_hydrogen_neutral,
+            ) / (4.0 * torch.pi * doppler_width)
+            peak_profile, _ = self.profile.dimensionless(
+                torch.zeros_like(damping_parameter),
+                damping_parameter,
+                assume_nonnegative_damping=True,
+            )
+            integrated = integrated_line_opacity(
+                line,
+                lower_level_populations[line.id],
+                temperature,
+                rest_frequency_hz=rest_frequency,
+            )
+            total = total + integrated * peak_profile / doppler_width
+        return total
+
+    def _group_profiles(
+        self, pattern, reduced_offset, zeeman_splitting, damping, doppler_width_hz
+    ):
         shift_factors, strengths, group_slices = pattern.profile_tensors(
-            like=frequency_hz
+            like=reduced_offset
         )
-        component_frequency = (
-            central_frequency_hz[..., None]
-            - ZEEMAN_HZ_PER_GAUSS
-            * field_strength_gauss[..., None]
-            * shift_factors
-            * bulk_doppler_factor[..., None]
-        )
-        # Use the solar-spectropolarimetry convention in which the reduced
-        # coordinate increases toward redder wavelength.  In frequency units
-        # this is (nu_component - nu), not (nu - nu_component). Voigt
-        # absorption is even, but Faraday--Voigt dispersion is odd.
+        # The profile receives only dimensionless Doppler-width coordinates.
         offset = (
-            component_frequency[..., None, :]
-            - frequency_hz.reshape(*([1] * central_frequency_hz.ndim), -1, 1)
-        ) / doppler_width_hz[..., None, None]
+            reduced_offset[..., :, None]
+            - zeeman_splitting[..., None, None] * shift_factors
+        )
         absorption, dispersion = self.profile.dimensionless(
             offset,
             damping[..., None, None],
             assume_nonnegative_damping=True,
         )
-        scale = strengths.reshape(*([1] * central_frequency_hz.ndim), 1, -1)
+        scale = strengths.reshape(*([1] * zeeman_splitting.ndim), 1, -1)
         scaled_absorption = absorption * scale
         scaled_dispersion = dispersion * scale
         return {
@@ -257,7 +355,7 @@ class PolarizedLineOpacity(nn.Module):
         damping_hydrogen_neutral: torch.Tensor,
         normalize_to_alpha500: bool,
         return_diagnostics: bool = False,
-        frequency_hz: torch.Tensor | None = None,
+        line_velocity_offsets_km_s: torch.Tensor | None = None,
     ):
         wavelength = torch.as_tensor(
             wavelength_angstrom,
@@ -327,19 +425,21 @@ class PolarizedLineOpacity(nn.Module):
                 allow_zero=True,
             )
 
-        if frequency_hz is None:
-            wavelength_vacuum = air_to_vacuum_angstrom(wavelength)
-            frequency = SPEED_OF_LIGHT / (wavelength_vacuum * 1.0e-10)
+        if line_velocity_offsets_km_s is None:
+            velocity_offsets = self.velocity_offsets_km_s(wavelength)
         else:
-            frequency = torch.as_tensor(
-                frequency_hz,
-                dtype=temperature.dtype,
+            velocity_offsets = torch.as_tensor(
+                line_velocity_offsets_km_s,
                 device=temperature.device,
+                dtype=temperature.dtype,
             )
-            if frequency.shape != wavelength.shape:
-                raise ValueError("frequency_hz must match the wavelength grid.")
-            if not torch.isfinite(frequency).all() or torch.any(frequency <= 0):
-                raise ValueError("frequency_hz must be finite and strictly positive.")
+            if (
+                velocity_offsets.shape != (len(self.lines), len(wavelength))
+                or not torch.isfinite(velocity_offsets).all()
+            ):
+                raise ValueError(
+                    "line_velocity_offsets_km_s must be finite [line,wavelength]"
+                )
         continuum_extinction_ratio = None
         if normalize_to_alpha500:
             continuum_extinction_ratio = continuum_extinction / alpha500[..., None]
@@ -368,16 +468,22 @@ class PolarizedLineOpacity(nn.Module):
         line_absorption = {}
         damping_values = {}
         doppler_widths = {}
-        rest_frequencies = self.line_rest_frequency_hz.to(temperature)
+        rest_frequencies = temperature.new_tensor(self._rest_frequencies_hz)
+        # Rationalized D-1 avoids cancellation around zero velocity.
+        bulk_shift_km_s = (
+            -2 * (velocity_los / 1000) / ((1 + beta) * (bulk_doppler_factor + 1))
+        )
         atomic_masses = self.line_atomic_mass_kg.to(temperature)
         for line_index, (line, pattern) in enumerate(zip(self.lines, self.patterns)):
             rest_frequency = rest_frequencies[line_index]
             mass = atomic_masses[line_index]
-            doppler_velocity = torch.sqrt(
-                2.0 * K_BOLTZMANN * temperature / mass + microturbulence.square()
+            doppler_velocity_km_s = torch.sqrt(
+                (2.0 * K_BOLTZMANN / mass / 1e6) * temperature
+                + (microturbulence / 1000).square()
             )
-            central_frequency = rest_frequency * bulk_doppler_factor
-            doppler_width = central_frequency * doppler_velocity / SPEED_OF_LIGHT
+            width_km_s = bulk_doppler_factor * doppler_velocity_km_s
+            # Hz occurs only at the physical opacity/damping unit boundary.
+            doppler_width = rest_frequency * (width_km_s / (SPEED_OF_LIGHT / 1000))
             total_damping = damping_rate(
                 line,
                 temperature,
@@ -385,14 +491,21 @@ class PolarizedLineOpacity(nn.Module):
                 damping_hydrogen_neutral,
             )
             damping_parameter = total_damping / (4.0 * torch.pi * doppler_width)
+            reduced_offset = (
+                velocity_offsets[line_index] + bulk_shift_km_s[..., None]
+            ) / width_km_s[..., None]
+            # kG -> km/s, then divide by thermal/turbulent width. Doppler
+            # factors cancel in the Zeeman displacement in line-width units.
+            zeeman_km_s_per_kG = (
+                ZEEMAN_HZ_PER_GAUSS
+                * SPEED_OF_LIGHT
+                / self._rest_frequencies_hz[line_index]
+            )
+            splitting = (
+                (field_strength / 1000) * zeeman_km_s_per_kG / doppler_velocity_km_s
+            )
             groups = self._group_profiles(
-                pattern,
-                frequency,
-                central_frequency,
-                doppler_width,
-                damping_parameter,
-                field_strength,
-                bulk_doppler_factor,
+                pattern, reduced_offset, splitting, damping_parameter, doppler_width
             )
             phi_b, psi_b = groups["blue"]
             phi_p, psi_p = groups["pi"]

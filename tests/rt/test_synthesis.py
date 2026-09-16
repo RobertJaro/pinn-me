@@ -18,7 +18,7 @@ def test_lte_synthesizer_requires_an_explicit_line_selection():
 def test_lte_synthesizer_runs_from_packaged_stic_resources():
     grid = torch.tensor([-4.0, -2.0, 0.0])
     atmosphere = StratifiedAtmosphere(
-        log_tau500=grid,
+        depth_coordinate=grid,
         temperature=torch.full((1, 3), 5_500.0),
         velocity_field=torch.zeros(1, 3, 3),
         microturbulence=torch.full((1, 3), 1_000.0),
@@ -55,7 +55,7 @@ def test_lte_synthesizer_uses_unrestricted_combined_plasma_state():
         requires_grad=True,
     )
     base = {
-        "log_tau500": grid,
+        "depth_coordinate": grid,
         "velocity_field": torch.zeros(1, 3, 3, dtype=torch.float64),
         "microturbulence": torch.full((1, 3), 1_000.0, dtype=torch.float64),
         "magnetic_field": torch.zeros(1, 3, 3, dtype=torch.float64),
@@ -101,7 +101,7 @@ def test_lte_synthesizer_uses_unrestricted_combined_plasma_state():
 def test_lte_synthesizer_rejects_unordered_wavelengths_and_superluminal_los():
     grid = torch.tensor([-4.0, -2.0, 0.0])
     base = {
-        "log_tau500": grid,
+        "depth_coordinate": grid,
         "temperature": torch.full((1, 3), 5_500.0),
         "microturbulence": torch.full((1, 3), 1_000.0),
         "magnetic_field": torch.zeros(1, 3, 3),

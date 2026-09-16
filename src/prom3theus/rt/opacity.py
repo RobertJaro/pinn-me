@@ -692,12 +692,18 @@ class ContinuumOpacity(nn.Module):
             temperature, fe_i_population_over_partition
         )
         excitation_temperature = line.lower_excitation_ev * ELECTRON_VOLT / K_BOLTZMANN
-        log_population = (
-            torch.log(reservoir)
-            + math.log(line.lower_statistical_weight)
-            - excitation_temperature / temperature
+        # Multiply the reservoir directly rather than routing it through
+        # log/exp.  A hot cell above the photospheric fade carries an exactly
+        # zero reservoir, where log() is -inf: the forward population is still
+        # a correct zero, but its derivative becomes inf * 0 = NaN and poisons
+        # the whole backward pass.  The Boltzmann factor stays above 1e-5 over
+        # the supported temperature range, so the product needs no log-space
+        # dynamic range to remain exact.
+        return (
+            reservoir
+            * line.lower_statistical_weight
+            * torch.exp(-excitation_temperature / temperature)
         )
-        return torch.exp(log_population)
 
     def reference_lower_level_populations(
         self,

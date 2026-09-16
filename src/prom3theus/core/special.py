@@ -54,8 +54,10 @@ class Faddeeva(nn.Module):
         length = self.length.to(dtype=dtype, device=value.device)
         coefficients = self.coefficients.to(dtype=dtype, device=value.device)
         inverse_sqrt_pi = self.inverse_sqrt_pi.to(dtype=dtype, device=value.device)
-        denominator = length - 1j * value
-        transformed = (length + 1j * value) / denominator
+        # Typed complex constant also keeps autograd conjugation in model dtype.
+        imaginary_value = value.new_tensor(1j) * value
+        denominator = length - imaginary_value
+        transformed = (length + imaginary_value) / denominator
         return (
             2.0 * polyval(transformed, coefficients) / denominator.square()
             + inverse_sqrt_pi / denominator

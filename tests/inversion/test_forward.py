@@ -8,21 +8,23 @@ import pytest
 import torch
 
 from prom3theus.instruments import MagneticAzimuthConvention
+from prom3theus.inversion.depth_sampling import DepthRefinement
 from prom3theus.inversion.forward import (
-    DepthRefinement,
     ForwardRuntime,
     ForwardSynthesisBackend,
     LTEForwardComposition,
     LTESynthesisBackend,
+    rotate_transverse_stokes_field,
 )
 from prom3theus.rt import (
+    RadialReferenceAtmosphere,
     LTESynthesizer,
     RayDistancePath,
     RayTraceResult,
     StratifiedAtmosphere,
     THOMSON_CROSS_SECTION_M2,
 )
-from prom3theus.training.lightning import LTEInversionModule
+from prom3theus.training.joint import JointInversionModule
 
 
 class _Backend:
@@ -75,7 +77,8 @@ class _Instrument(torch.nn.Module):
 class _AtmosphereModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.register_buffer("log_tau500", torch.tensor([-5.0, 1.0]))
+        self.reference_atmosphere = RadialReferenceAtmosphere("falc_82")
+        self.line_formation_height_bounds_Mm = (1.5, -0.1)
         self.register_buffer("solar_radius_m", torch.tensor(1.0))
 
     def trace_rays(self, coordinates, ray_direction, depth_grid):
@@ -87,7 +90,7 @@ class _AtmosphereModel(torch.nn.Module):
         position[..., 0] = 1.0
         distance = torch.arange(depth, dtype=coordinates.dtype).expand(batch, -1)
         atmosphere = StratifiedAtmosphere(
-            log_tau500=depth_grid,
+            depth_coordinate=torch.arange(depth, dtype=coordinates.dtype),
             temperature=scalar * 6000.0,
             velocity_field=torch.tensor([1.0, 2.0, 3.0]).expand(batch, depth, 3),
             microturbulence=scalar * 1000.0,
@@ -133,7 +136,7 @@ def test_lte_backend_calls_current_synthesizer_contract():
     depth = torch.tensor([-4.0, -2.0, 0.0])
     wavelength = torch.linspace(6173.1, 6173.6, 5)
     atmosphere = StratifiedAtmosphere(
-        log_tau500=depth,
+        depth_coordinate=depth,
         temperature=torch.full((1, 3), 5_500.0),
         velocity_field=torch.zeros(1, 3, 3),
         microturbulence=torch.full((1, 3), 1_000.0),
@@ -166,7 +169,7 @@ def test_lte_backend_reference_extinction_uses_combined_plasma_state():
     temperature = torch.tensor([[5_500.0, 2.0e4, 1.0e6]], dtype=torch.float64)
     pressure = torch.tensor([[1.0e-3, 1.0e2, 1.0e7]], dtype=torch.float64)
     base = {
-        "log_tau500": depth,
+        "depth_coordinate": depth,
         "velocity_field": torch.zeros(1, 3, 3, dtype=torch.float64),
         "microturbulence": torch.full((1, 3), 1_000.0, dtype=torch.float64),
         "magnetic_field": torch.zeros(1, 3, 3, dtype=torch.float64),
@@ -289,6 +292,41 @@ def test_forward_applies_only_the_instrument_magnetic_azimuth_convention():
     torch.testing.assert_close(result["atmosphere"].magnetic_field, physical)
 
 
+def test_forward_applies_phase_to_stokes_field_but_not_physical_atmosphere():
+    composition, backend, _ = _composition()
+    wavelength = torch.tensor([1.0, 2.0])
+    runtime = ForwardRuntime(
+        coarse_depth_grid=torch.tensor([-5.0, 1.0]),
+        observed_wavelength_angstrom=wavelength,
+        synthesis_wavelength_angstrom=wavelength,
+        radiance_scale=1.0,
+        carrington_angular_velocity_rad_per_s=0.0,
+        instrument_line_of_sight_velocity_correction_m_per_s=0.0,
+    )
+
+    result = composition.synthesize(
+        torch.zeros(1, 3),
+        runtime=runtime,
+        ray_direction=torch.tensor([[-1.0, 0.0, 0.0]]),
+        stokes_basis=torch.eye(3).unsqueeze(0),
+        observer_los_velocity_m_per_s=torch.zeros(1),
+        instrument_response={"gain": torch.ones(1)},
+        magnetic_azimuth_phase_rad=torch.tensor([torch.pi / 2]),
+        return_details=True,
+    )
+
+    physical = torch.tensor([4.0, 5.0, 6.0]).expand(1, 2, 3)
+    rotated = torch.tensor([-5.0, 4.0, 6.0]).expand(1, 2, 3)
+    torch.testing.assert_close(result["magnetic_field_observer"], physical)
+    torch.testing.assert_close(result["magnetic_field_phase_observer"], rotated)
+    torch.testing.assert_close(
+        result["magnetic_field_phase_observer"],
+        rotate_transverse_stokes_field(physical, torch.pi / 2),
+    )
+    torch.testing.assert_close(backend.synthesis_call["atmosphere"].magnetic_field, rotated)
+    torch.testing.assert_close(result["atmosphere"].magnetic_field, physical)
+
+
 def test_line_of_sight_velocity_correction_has_a_spectral_gradient():
     class VelocitySensitiveBackend(_Backend):
         def synthesize(self, atmosphere, wavelength_angstrom, *, radiance_scale, path):
@@ -341,7 +379,7 @@ def test_refinement_retains_coarse_gradients_and_evaluates_only_new_points():
     )
     zeros = torch.zeros((1, 3, 3))
     coarse_atmosphere = StratifiedAtmosphere(
-        log_tau500=coarse_grid,
+        depth_coordinate=coarse_grid,
         temperature=coarse_signal,
         velocity_field=zeros,
         microturbulence=torch.full((1, 3), 1000.0),
@@ -368,6 +406,8 @@ def test_refinement_retains_coarse_gradients_and_evaluates_only_new_points():
         def __init__(self):
             super().__init__()
             self.register_buffer("solar_radius_m", torch.tensor(1.0))
+            self.reference_atmosphere = RadialReferenceAtmosphere("falc_82")
+            self.line_formation_height_bounds_Mm = (1.5, -0.1)
             self.fine_temperature = torch.nn.Parameter(torch.tensor(7000.0))
             self.evaluated_points = 0
 
@@ -435,7 +475,7 @@ def test_composition_does_not_change_registered_state_names():
 
 
 def test_lightning_contains_only_thin_forward_delegates():
-    source = inspect.getsourcefile(LTEInversionModule)
+    source = inspect.getsourcefile(JointInversionModule)
     assert source is not None
     text = Path(source).read_text(encoding="utf-8")
     assert "RayDistancePath" not in text

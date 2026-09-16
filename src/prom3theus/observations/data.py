@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import math
 
 import torch
+from prom3theus.observations.loading import buffered_dataloader
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 
@@ -29,7 +30,7 @@ class ObservationDataModule(LightningDataModule):
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
         data_loading_workers: int = 1,
-        num_workers: int = 0,
+        num_workers: int = 2,
         pin_memory: bool = False,
         progress: bool = True,
     ) -> None:
@@ -67,8 +68,8 @@ class ObservationDataModule(LightningDataModule):
         )
         self.validation_stride = int(validation_stride)
         self.data_loading_workers = int(data_loading_workers)
-        self.num_workers = int(num_workers)
-        self.pin_memory = bool(pin_memory)
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
         self.progress = bool(progress)
         self.raster: ObservationRaster | None = None
         self.rasters: list[ObservationRaster] = []
@@ -86,17 +87,37 @@ class ObservationDataModule(LightningDataModule):
 
         row_stride = max(1, int(math.floor(math.sqrt(self.validation_stride))))
         column_stride = max(1, int(math.ceil(self.validation_stride / row_stride)))
-        pixels = evaluation.pixel_indices
-        selected_indices: list[int] = []
-        for row in torch.unique(pixels[:, 0], sorted=True)[::row_stride]:
-            row_indices = torch.nonzero(pixels[:, 0] == row, as_tuple=False).squeeze(-1)
-            selected_indices.extend(row_indices[::column_stride].tolist())
-        if not selected_indices:
-            raise RuntimeError(
-                "Validation lattice selected no valid observation pixels."
-            )
         self.validation_lattice_stride = (row_stride, column_stride)
+        if self.validation_stride == 1:
+            self.validation_dataset = evaluation
+            return
+        selected_indices = []
+        rank = nonempty_row = 0
+        mask = evaluation.raster.valid_mask
+        for start in range(0, mask.shape[0], 256):
+            counts = mask[start:start + 256].clone().sum(dim=1).tolist()
+            for count in counts:
+                if count:
+                    if nonempty_row % row_stride == 0:
+                        selected_indices.extend(range(rank, rank + count, column_stride))
+                    nonempty_row += 1
+                rank += count
+        if not selected_indices:
+            raise RuntimeError("Validation lattice selected no valid observation pixels")
         self.validation_dataset = Subset(evaluation, selected_indices)
+
+    def _sampling_slabs(self):
+        from types import SimpleNamespace
+        for raster in self.rasters:
+            width = raster.spatial_shape[1]
+            rows = max(1, 262144 // width)
+            for start in range(0, raster.spatial_shape[0], rows):
+                yield SimpleNamespace(
+                    surface_position_m=raster.surface_position_m[start:start + rows].clone(),
+                    coordinates=raster.coordinates[start:start + rows].clone(),
+                    valid_mask=raster.valid_mask[start:start + rows].clone(),
+                    metadata=raster.metadata,
+                )
 
     def _prepare_observation_sampling_bounds(self) -> None:
         if not self.rasters or self.raster is None:
@@ -107,7 +128,7 @@ class ObservationDataModule(LightningDataModule):
         latitude_min, latitude_max = math.inf, -math.inf
         time_min, time_max = math.inf, -math.inf
         solar_radii_m: list[float] = []
-        for raster in self.rasters:
+        for raster in self._sampling_slabs():
             position = raster.surface_position_m[raster.valid_mask].to(torch.float64)
             if not position.numel():
                 continue
@@ -157,7 +178,7 @@ class ObservationDataModule(LightningDataModule):
             raise ValueError("All observation rasters must use one solar radius.")
         center = torch.atan2(sine_sum, cosine_sum)
         longitude_min, longitude_max = math.inf, -math.inf
-        for raster in self.rasters:
+        for raster in self._sampling_slabs():
             position = raster.surface_position_m[raster.valid_mask].to(torch.float64)
             if not position.numel():
                 continue
@@ -221,13 +242,12 @@ class ObservationDataModule(LightningDataModule):
     ) -> DataLoader:
         if self.dataset is None:
             self.setup()
-        return DataLoader(
+        return buffered_dataloader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            persistent_workers=self.num_workers > 0 and shuffle,
+            pin_memory=self.pin_memory and torch.cuda.is_available(),
             collate_fn=collate_fn,
         )
 
@@ -272,7 +292,7 @@ class StoredObservationDataModule(ObservationDataModule):
         batch_size: int = 4,
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
-        num_workers: int = 0,
+        num_workers: int = 2,
         pin_memory: bool = False,
     ) -> None:
         super().__init__(
@@ -327,12 +347,14 @@ class StoredObservationDataModule(ObservationDataModule):
             )
             for raster in self.rasters
         ]
+        for dataset, name in zip(datasets, self.raster_names, strict=True):
+            dataset.sequence_name = name
         self.dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
         evaluation = ObservationPixelDataset(
             self.raster,
             auxiliary_fields=sorted(auxiliary),
             include_pixel_index=True,
-            pixel_indices=datasets[self.validation_raster_index].pixel_indices,
+            pixel_indices=datasets[self.validation_raster_index]._pixel_indices,
         )
         self._evaluation_dataset = evaluation
         self._prepare_validation_dataset(evaluation)

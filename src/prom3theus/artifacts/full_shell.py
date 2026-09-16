@@ -9,6 +9,8 @@ attempting LTE synthesis in the upper atmosphere.
 
 from __future__ import annotations
 
+from prom3theus.observations.arrays import materialize_array, read_flat_samples
+
 import math
 
 import numpy as np
@@ -19,14 +21,14 @@ from prom3theus.core import (
     project_cartesian_to_spherical,
 )
 from prom3theus.observations import ObservationRaster
-from prom3theus.training.lightning import LTEInversionModule
+from typing import Any
 
 from .errors import ArtifactExportError
 from .evaluation import resolve_storage_dtype
 
 
 def full_shell_height_grid(
-    module: LTEInversionModule,
+    module: Any,
     height_samples: int,
 ) -> torch.Tensor:
     """Return an outer-to-inner geometric-height grid for the trained shell."""
@@ -93,7 +95,7 @@ def full_shell_metadata(height_grid_m: torch.Tensor) -> dict[str, object]:
 
 @torch.inference_mode()
 def evaluate_full_shell_atmosphere(
-    module: LTEInversionModule,
+    module: Any,
     raster: ObservationRaster,
     *,
     height_grid_m: torch.Tensor,
@@ -134,11 +136,11 @@ def evaluate_full_shell_atmosphere(
             "full-shell geometric heights must span the configured shell boundaries."
         )
 
-    valid_flat = raster.valid_mask.reshape(-1)
+    valid_flat = materialize_array(raster.valid_mask).reshape(-1)
     flat_indices = torch.nonzero(valid_flat, as_tuple=False).squeeze(-1)
     if flat_indices.numel() == 0:
         raise ArtifactExportError("The canonical observation contains no valid pixels.")
-    coordinates = raster.coordinates.reshape(-1, 3).index_select(0, flat_indices)
+    coordinates = read_flat_samples(raster.coordinates, flat_indices)
     spatial_shape = raster.spatial_shape
     height_count = int(metadata["height_samples"])
     flat_size = int(valid_flat.numel())
@@ -226,9 +228,9 @@ def evaluate_full_shell_atmosphere(
         .cpu()
         .numpy(),
         "full_shell_temperature_k": scalar_fields["temperature"].reshape(shape),
-        "full_shell_microturbulence_m_per_s": scalar_fields[
-            "microturbulence"
-        ].reshape(shape),
+        "full_shell_microturbulence_m_per_s": scalar_fields["microturbulence"].reshape(
+            shape
+        ),
         "full_shell_gas_pressure_pa": scalar_fields["gas_pressure"].reshape(shape),
         "full_shell_mass_density_kg_m3": scalar_fields["mass_density"].reshape(shape),
         "full_shell_position_carrington_m": vector_fields["position"].reshape(

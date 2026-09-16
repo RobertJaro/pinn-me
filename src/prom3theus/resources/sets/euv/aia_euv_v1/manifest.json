@@ -1,0 +1,24 @@
+{
+  "compatibility": {
+    "chianti_database_release": "11.0.2",
+    "emission_measure_convention": "electron_density_squared"
+  },
+  "logical_resources": {
+    "aia_temperature_response": "aia_temperature_response.json",
+    "instrument_aia_euv": "instrument_aia_euv.json"
+  },
+  "resource_set_id": "aia_euv_v1",
+  "resource_set_type": "prom3theus-scientific-resource-set",
+  "resource_sha256": {
+    "aia_temperature_response.json": "a52f4cbc590108877949f0a0a58fbdd65d82cec844ed052c76d0987de94022aa",
+    "instrument_aia_euv.json": "ca4ce5d390f341d7d02266e6a25a99d8121811cc58fc54fb0ad5a3309122660b"
+  },
+  "runtime_files": [
+    "aia_temperature_response.json",
+    "instrument_aia_euv.json",
+    "sources.json"
+  ],
+  "schema_version": 1,
+  "source_manifest_sha256": "80d33d2d5ddbd661f91bf471e3ece318e5561281f82a10d623c93b5ea8554995",
+  "training_contract": "offline-read-only; no downloads or table conversion"
+}

@@ -10,6 +10,7 @@ import torch
 
 from prom3theus.diagnostics.sampling import (
     ValidationSampleCollector,
+    display_grid,
     integrated_stokes,
     map_coordinates,
     subsample_grid,
@@ -23,6 +24,24 @@ def test_rectangular_subsample_never_exceeds_limit():
     assert columns.dtype == np.int64
     assert rows.size * columns.size <= 127
     assert rows[0] == columns[0] == 0
+
+
+def test_lte_display_grid_preserves_validation_lattice_with_shared_sampler():
+    all_rows = np.arange(0, 101, 4)
+    all_columns = np.arange(0, 79, 4)
+    pixels = torch.cartesian_prod(
+        torch.as_tensor(all_rows), torch.as_tensor(all_columns)
+    )
+    data = SimpleNamespace(
+        _evaluation_dataset=SimpleNamespace(pixel_indices=pixels),
+        validation_dataset=SimpleNamespace(indices=list(range(len(pixels)))),
+    )
+    rows, columns = display_grid(
+        SimpleNamespace(datamodule=data), SimpleNamespace(spatial_shape=(101, 79)), 127
+    )
+    row_indices, column_indices = subsample_grid(len(all_rows), len(all_columns), 127)
+    np.testing.assert_array_equal(rows, all_rows[row_indices])
+    np.testing.assert_array_equal(columns, all_columns[column_indices])
 
 
 @pytest.mark.parametrize(

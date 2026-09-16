@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
+import pytest
 import numpy as np
 import torch
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -53,7 +55,49 @@ def test_stokes_plotter_accepts_the_canonical_observation_contract():
     figure.clear()
 
 
-def test_stokes_plotter_accepts_hmi_six_filter_validation_profiles():
+def test_phase_plotter_displays_wrapped_phase_in_degrees_and_binary_distance():
+    coordinates = torch.tensor(
+        (
+            ((1.0, 10.0, 0.0), (2.0, 10.0, 0.0)),
+            ((1.0, 20.0, 0.0), (2.0, 20.0, 0.0)),
+        )
+    )
+    outputs = {
+        "phase_rad": torch.tensor((0.0, math.pi / 2.0, math.pi, -math.pi / 2.0)),
+        "pixel_index": torch.tensor(((0, 0), (0, 1), (1, 0), (1, 1))),
+    }
+
+    figure = StokesPlotter().phase_figure(
+        outputs,
+        SimpleNamespace(coordinates=coordinates),
+        "phase-test",
+        rows=np.array((0, 1)),
+        columns=np.array((0, 1)),
+        step=3_000,
+        cold_steps=2_000,
+        handoff_step=15_000,
+    )
+
+    phase_image = figure.axes[0].images[0]
+    binary_image = figure.axes[1].images[0]
+    np.testing.assert_allclose(
+        np.asarray(phase_image.get_array()),
+        np.array(((0.0, 90.0), (-180.0, -90.0))),
+    )
+    np.testing.assert_allclose(
+        np.asarray(binary_image.get_array()),
+        np.array(((0.0, 1.0), (0.0, 1.0))),
+        atol=1.0e-6,
+    )
+    assert phase_image.get_clim() == (-180.0, 180.0)
+    assert "deg" in figure.axes[0].get_title()
+    assert "active" in figure._suptitle.get_text()
+    figure.canvas.draw()
+    figure.clear()
+
+
+@pytest.mark.parametrize("objective_config", [None, {"type": "asinh_mse", "asinh_scale": 1e-3}])
+def test_stokes_plotter_accepts_hmi_six_filter_validation_profiles(objective_config):
     """HMI uses the same I/Q/U/V validation figure as resolved spectra."""
 
     wavelength = torch.tensor(
@@ -87,6 +131,7 @@ def test_stokes_plotter_accepts_hmi_six_filter_validation_profiles():
         rows=np.array((0, 1)),
         columns=np.array((0, 1)),
         line_centers_angstrom=(6173.3352,),
+        objective_config=objective_config,
     )
 
     assert len(figure.axes) >= 12
@@ -97,6 +142,8 @@ def test_stokes_plotter_accepts_hmi_six_filter_validation_profiles():
         axis for axis in figure.axes if axis.get_xlabel().startswith("fit-window")
     ]
     assert len(colorbar_axes) == 4
+    if objective_config:
+        assert sum("asinh" in axis.get_xlabel() for axis in colorbar_axes) == 3
     assert all(axis.xaxis.get_offset_text().get_text() == "" for axis in colorbar_axes)
     figure.clear()
 
@@ -254,3 +301,20 @@ def test_thermodynamic_panels_show_explicit_log10_values():
     colorbar_labels = [axis.get_xlabel() for axis in figure.axes[8:]]
     assert all("log" in label for label in colorbar_labels)
     figure.clear()
+
+
+@pytest.mark.parametrize('name', ['b_r', 'b_theta', 'b_phi', 'field_strength'])
+def test_magnetic_colorbars_include_sparse_strong_fields(name):
+    from prom3theus.diagnostics.plotting import DiagnosticPlotter, FIELD_STYLES
+
+    values = np.full((32, 32, 6), 20., dtype=np.float32)
+    values[0, 0, 0] = 200.
+    if name != 'field_strength':
+        values[1, 1, 0] = -300.
+    norm = DiagnosticPlotter._field_norm(values, FIELD_STYLES[name])
+    assert norm.vmax >= values.max()
+    assert norm.vmin <= values.min()
+    if name != 'field_strength':
+        assert norm.vmax == 300.
+        assert norm.vmin == -300.
+    np.testing.assert_array_equal(DiagnosticPlotter._display_values(values, FIELD_STYLES[name]), values)

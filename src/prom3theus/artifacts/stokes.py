@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from prom3theus.observations.arrays import materialize_array, read_flat_samples
+
 from collections.abc import Iterator
 from typing import Any
 
@@ -13,7 +15,6 @@ from prom3theus.observations import (
     ObservationRaster,
     ObservationSpec,
 )
-from prom3theus.training.lightning import LTEInversionModule
 
 from .errors import ArtifactExportError
 from .evaluation import resolve_storage_dtype
@@ -32,7 +33,7 @@ def _flatten_auxiliary(
     value = raster.auxiliary.get(name)
     if value is None:
         return None
-    return value.reshape(-1, *value.shape[2:]).index_select(0, flat_indices)
+    return read_flat_samples(value, flat_indices)
 
 
 def stokes_batches(
@@ -44,9 +45,9 @@ def stokes_batches(
 ) -> Iterator[tuple[dict[str, Any], torch.Tensor]]:
     """Yield canonical synthesis inputs for each valid-pixel batch."""
 
-    coordinates = raster.coordinates.reshape(-1, 3).index_select(0, flat_indices)
-    rays = raster.ray_direction.reshape(-1, 3).index_select(0, flat_indices)
-    bases = raster.stokes_basis.reshape(-1, 3, 3).index_select(0, flat_indices)
+    coordinates = read_flat_samples(raster.coordinates, flat_indices)
+    rays = read_flat_samples(raster.ray_direction, flat_indices)
+    bases = read_flat_samples(raster.stokes_basis, flat_indices)
     observer_los = _flatten_auxiliary(
         raster, "observer_los_velocity_m_per_s", flat_indices
     )
@@ -95,7 +96,7 @@ def stokes_batches(
 
 @torch.inference_mode()
 def evaluate_stokes(
-    module: LTEInversionModule,
+    module: Any,
     raster: ObservationRaster,
     spec: ObservationSpec,
     *,
@@ -108,7 +109,7 @@ def evaluate_stokes(
         raise ValueError("stokes_batch_size must be positive.")
     torch_dtype, numpy_dtype = resolve_storage_dtype(storage_dtype)
     parameter = next(module.atmosphere_model.parameters())
-    flat_valid = raster.valid_mask.reshape(-1)
+    flat_valid = materialize_array(raster.valid_mask).reshape(-1)
     flat_indices = torch.nonzero(flat_valid, as_tuple=False).squeeze(-1)
     if flat_indices.numel() == 0:
         raise ArtifactExportError("The canonical observation contains no valid pixels.")
@@ -163,7 +164,7 @@ def evaluate_stokes(
         module.train(was_training)
     shape = (*raster.spatial_shape, 4, wavelength_count)
     predicted = predicted_flat.reshape(shape)
-    observed = raster.stokes.detach().to(torch_dtype).cpu().numpy()
+    observed = materialize_array(raster.stokes).detach().to(torch_dtype).cpu().numpy()
     return {
         "wavelength_angstrom": (
             raster.wavelength_angstrom.detach().to(torch_dtype).cpu().numpy()

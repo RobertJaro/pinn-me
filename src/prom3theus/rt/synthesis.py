@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
 from prom3theus.core import SPEED_OF_LIGHT
+
 from .atomic import AtomicDatabase, SpectralLine
 from .opacity import (
     STICSpectralState,
@@ -105,22 +107,22 @@ class LTESynthesizer(nn.Module):
         self.register_buffer("log_tau500", depth_grid)
         self.register_buffer(
             "_prepared_wavelength_air_angstrom",
-            torch.empty(0, dtype=torch.float64),
+            torch.empty(0),
             persistent=False,
         )
         self.register_buffer(
             "_prepared_wavelength_vacuum_angstrom",
-            torch.empty(0, dtype=torch.float64),
+            torch.empty(0),
             persistent=False,
         )
         self.register_buffer(
             "_prepared_continuum_wavelength_vacuum_angstrom",
-            torch.empty(0, dtype=torch.float64),
+            torch.empty(0),
             persistent=False,
         )
         self.register_buffer(
-            "_prepared_frequency_hz",
-            torch.empty(0, dtype=torch.float64),
+            "_prepared_line_velocity_offsets_km_s",
+            torch.empty(0),
             persistent=False,
         )
         self.register_buffer(
@@ -135,7 +137,7 @@ class LTESynthesizer(nn.Module):
         )
         self.register_buffer(
             "_prepared_stic_weight",
-            torch.empty(0, dtype=torch.float64),
+            torch.empty(0),
             persistent=False,
         )
 
@@ -171,8 +173,8 @@ class LTESynthesizer(nn.Module):
                 "wavelength_angstrom must be finite and strictly increasing"
             )
 
-    def _atmosphere_grid(self, atmosphere: "StratifiedAtmosphere") -> torch.Tensor:
-        grid = atmosphere.log_tau500
+    def _atmosphere_grid(self, atmosphere: StratifiedAtmosphere) -> torch.Tensor:
+        grid = atmosphere.depth_coordinate
         if grid.ndim != 1 or grid.numel() < 2:
             raise ValueError(
                 "Atmosphere depth grid must be one-dimensional with at least two points"
@@ -230,8 +232,8 @@ class LTESynthesizer(nn.Module):
         self._prepared_wavelength_air_angstrom = wavelength
         self._prepared_wavelength_vacuum_angstrom = wavelength_vacuum
         self._prepared_continuum_wavelength_vacuum_angstrom = continuum_wavelength
-        self._prepared_frequency_hz = wavelength_vacuum.new_tensor(SPEED_OF_LIGHT) / (
-            wavelength_vacuum * 1.0e-10
+        self._prepared_line_velocity_offsets_km_s = (
+            self.line_opacity.velocity_offsets_km_s(wavelength)
         )
         self._prepared_stic_lower_indices = (
             spectral_state.lower_indices.detach().clone()
@@ -243,7 +245,7 @@ class LTESynthesizer(nn.Module):
 
     def _gas_pressure(
         self,
-        atmosphere: "StratifiedAtmosphere",
+        atmosphere: StratifiedAtmosphere,
         grid: torch.Tensor,
     ) -> torch.Tensor:
         del grid
@@ -255,6 +257,60 @@ class LTESynthesizer(nn.Module):
             )
         return atmosphere.gas_pressure
 
+    def refinement_extinction(
+        self,
+        atmosphere: StratifiedAtmosphere,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(alpha500, line_centre_extinction)`` in m^-1 for sampling.
+
+        Depth refinement guided by ``alpha500`` alone concentrates samples
+        where the continuum forms.  A line core reaches unit optical depth
+        while ``tau500`` is still far below one, so those layers carry almost
+        no continuum contribution weight even though they dominate the
+        polarized signal.  Returning both extinctions lets the sampler cover
+        the continuum and the line cores from the same LTE reservoirs the
+        synthesis itself uses, in one shared plasma-state evaluation.
+        """
+
+        temperature = atmosphere.temperature
+        gas_pressure = self._gas_pressure(atmosphere, None)
+        plasma_state = self.continuum_opacity.prepare_plasma_state(
+            temperature,
+            gas_pressure,
+        )
+        lte_temperature = plasma_state.temperature
+        lte_gas_pressure = plasma_state.gas_pressure
+        alpha500 = self.continuum_opacity.volume_extinction_at_5000(
+            lte_temperature,
+            lte_gas_pressure,
+            plasma_state,
+        )
+        line_thermodynamics = self.continuum_opacity.reference_line_thermodynamics(
+            lte_temperature,
+            lte_gas_pressure,
+            plasma_state,
+            include_electron_density=self.requires_stark_electron_density,
+        )
+        lower_level_populations = (
+            self.continuum_opacity.reference_lower_level_populations(
+                self.lines,
+                lte_temperature,
+                lte_gas_pressure,
+                plasma_state,
+                fe_i_population_over_partition=line_thermodynamics[
+                    "fe_i_population_over_partition"
+                ],
+            )
+        )
+        line_center = self.line_opacity.line_center_extinction(
+            lte_temperature,
+            atmosphere.microturbulence,
+            lower_level_populations=lower_level_populations,
+            damping_electron_density=line_thermodynamics.get("electron_density"),
+            damping_hydrogen_neutral=line_thermodynamics["hydrogen_neutral"],
+        )
+        return alpha500, line_center
+
     @staticmethod
     def _source_vector(source_function: torch.Tensor) -> torch.Tensor:
         zeros = torch.zeros_like(source_function)
@@ -262,7 +318,7 @@ class LTESynthesizer(nn.Module):
 
     def forward(
         self,
-        atmosphere: "StratifiedAtmosphere",
+        atmosphere: StratifiedAtmosphere,
         wavelength_angstrom=None,
         *,
         path: TransferPath,
@@ -309,7 +365,9 @@ class LTESynthesizer(nn.Module):
                 self._prepared_stic_upper_indices,
                 self._prepared_stic_weight.to(model_temperature),
             )
-            frequency_hz = self._prepared_frequency_hz.to(model_temperature)
+            velocity_offsets = self._prepared_line_velocity_offsets_km_s.to(
+                model_temperature
+            )
         else:
             wavelength = torch.as_tensor(
                 wavelength_angstrom,
@@ -322,19 +380,23 @@ class LTESynthesizer(nn.Module):
                 (wavelength_vacuum, wavelength.new_tensor([5000.0]))
             )
             spectral_state = None
-            frequency_hz = None
+            velocity_offsets = None
         model_gas_pressure = self._gas_pressure(atmosphere, grid)
-        if (
-            not torch.isfinite(model_temperature).all()
-            or not torch.isfinite(model_gas_pressure).all()
-            or not torch.isfinite(atmosphere.microturbulence).all()
-            or not torch.isfinite(atmosphere.velocity_field).all()
-            or not torch.isfinite(atmosphere.magnetic_field).all()
-            or torch.any(model_temperature <= 0)
-            or torch.any(model_gas_pressure <= 0)
-            or torch.any(atmosphere.microturbulence < 0)
-            or torch.any(atmosphere.v_los.abs() >= SPEED_OF_LIGHT)
-        ):
+        # Reduce on the device before the Python branch: Python ``or`` would
+        # force a separate CUDA synchronization for every atmospheric field.
+        if not torch.stack(
+            [
+                torch.isfinite(model_temperature).all(),
+                torch.isfinite(model_gas_pressure).all(),
+                torch.isfinite(atmosphere.microturbulence).all(),
+                torch.isfinite(atmosphere.velocity_field).all(),
+                torch.isfinite(atmosphere.magnetic_field).all(),
+                (model_temperature > 0).all(),
+                (model_gas_pressure > 0).all(),
+                (atmosphere.microturbulence >= 0).all(),
+                (atmosphere.v_los.abs() < SPEED_OF_LIGHT).all(),
+            ]
+        ).all():
             raise ValueError(
                 "LTE atmospheric fields must be finite, temperature and gas pressure "
                 "must be positive, microturbulence must be non-negative, and |v_los| < c."
@@ -390,7 +452,7 @@ class LTESynthesizer(nn.Module):
             damping_hydrogen_neutral=damping_hydrogen_neutral,
             normalize_to_alpha500=not isinstance(path, RayDistancePath),
             return_diagnostics=return_diagnostics,
-            frequency_hz=frequency_hz,
+            line_velocity_offsets_km_s=velocity_offsets,
         )
         if return_diagnostics:
             propagation, propagation_diagnostics = propagation_result

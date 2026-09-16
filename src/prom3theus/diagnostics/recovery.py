@@ -37,7 +37,6 @@ PARAMETER_SCALES = (500.0, 2_000.0, 1_000.0, 1_000.0, 1_000.0, 500.0)
 def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
     if steps < 1:
         raise ValueError("steps must be positive")
-    torch.manual_seed(0)
     dtype = torch.float32
     target_device = torch.device(device)
     depth = 11
@@ -76,7 +75,7 @@ def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
         magnetic = physical_profiles[2:5].transpose(0, 1).unsqueeze(0)
         microturbulence = 1_000.0 + physical_profiles[5].unsqueeze(0)
         return StratifiedAtmosphere(
-            log_tau500=log_tau500,
+            depth_coordinate=log_tau500,
             temperature=temperature,
             velocity_field=torch.stack(
                 (torch.zeros_like(velocity), torch.zeros_like(velocity), -velocity),
@@ -102,11 +101,8 @@ def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
         )
     inferred_scaled = torch.nn.Parameter(0.05 * torch.randn_like(truth_scaled))
     optimizer = torch.optim.Adam((inferred_scaled,), lr=0.03)
-    stokes_loss = StokesObjective(
-        type="huber",
-        stokes_sigmas={"I": 5.0e-3, "Q": 2.0e-3, "U": 2.0e-3, "V": 2.0e-3},
-        huber_delta=1.0,
-    ).to(target_device)
+    stokes_loss = StokesObjective(type="mse").to(target_device)
+    component_weights = target.new_tensor([10000., 62500., 62500., 62500.])
     losses = []
     for _ in range(steps):
         optimizer.zero_grad()
@@ -116,9 +112,7 @@ def run_recovery(steps: int = 500, device: str = "cpu") -> dict:
             path=OpticalDepthPath(mu=1.0),
             radiance_scale=radiance_scale,
         )
-        # Match the shipped LTE configurations: noise-standardized Huber
-        # residuals with equal component preference.
-        loss = stokes_loss(prediction, target).mean()
+        loss = (stokes_loss(prediction, target).mean(dim=(0, 2)) * component_weights).sum()
         loss.backward()
         optimizer.step()
         losses.append(float(loss.detach()))

@@ -10,6 +10,8 @@ Resource ownership is split into peer modules:
 - `common_atomic.py` builds the common atomic metadata and STiC/Wittmann table;
 - `hinode_sp.py` builds the complete Hinode/SP namespace;
 - `hmi_stokes.py` builds the complete HMI namespace;
+- `aia_euv.py` converts one byte-pinned, provenance-complete AIA response
+  artifact into the independently sealed `aia_euv_v1` runtime set; and
 - `build.py` verifies pinned inputs, invokes each registered builder, seals the
   complete bundle, and checks byte-for-byte reproducibility.
 
@@ -25,6 +27,21 @@ The complete builder performs five operations:
 2. runs the pinned STiC/Wittmann EOS to regenerate the continuum and
    thermodynamic lookup covering 5000 A, HMI 6173 A, and Hinode 6301/6302 A,
    and generates the complete pinned FALC_82 reference atmosphere;
+
+The lookup spans `3.4 <= log10(T/K) <= 4.0` and `-1.5 <= log10(Pgas/Pa) <= 7.0`.
+**The 10 kK temperature ceiling must not be raised.** It looks conservative
+next to the `cop` continuum's own limits -- COOLOP switches off at 12 kK
+(contributing under 0.01% of alpha500 by then), LUKEOP at 30 kK, and the HOTOP
+term meant to replace them is a stub returning zero -- but the binding
+constraint is the STiC/CHIANTI charge bridge in `HybridSolarEOS`. At the
+table's thin, hot corner LTE is already fully ionized while coronal
+equilibrium is not, so the bridge's monotone logit margin peaks at exactly
+log10(T) = 4.00, falls to 0.03 by 4.08 and turns negative by 4.10: a hotter
+table makes the hybrid EoS unconstructible, and the runtime raises "The
+STiC/CHIANTI charge bridge is not monotone for this state." The pressure
+ceiling carries no such coupling, since raising it only extends the cool,
+dense corner; it reaches 10 MPa so a shell floor near -2 Mm stays inside the
+tabulated domain instead of relying on the bounded pressure continuation.
 3. reduces the default CHIANTI 11.0.2 zero-density coronal equilibrium to the
    single required free-electrons-per-H mapping using the same STiC abundance
    and atomic-mass convention;
@@ -59,6 +76,41 @@ inverse-square gravity and `HybridSolarEOS`. The builder stores the pinned FALC
 values and their provenance; the runtime constructs the configurable coronal
 continuation rather than embedding it in the resource.
 
+The interior continuation below the table follows the same split. FALC_82 stops
+at -68815.4366781354 m, so any shell whose floor lies deeper needs a downward
+continuation; extrapolating the tabulated gradient instead reaches roughly
+48 kK by -0.5 Mm, about four times the real solar value. Runtime therefore
+integrates a hydrostatic adiabat from the native bottom, again with
+inverse-square gravity and `HybridSolarEOS`, using the Kippenhahn & Weigert
+`dlnT/dlnP` for a partly ionized hydrogen gas. Its ionization degree is LTE
+Saha closed on the shared EoS mass density: this reproduces the tabulated
+electron density to better than one percent everywhere inside the STiC table,
+and continues that same LTE physics past the table's 10 kK ceiling, above which
+the runtime EoS blends toward CHIANTI coronal equilibrium and becomes
+several-fold too neutral for a dense convective interior. Nothing at or above
+the native bottom moves, and a shell floor inside the table adds no
+continuation at all, so no pinned resource changes and this builder is not
+involved.
+
+The initial AIA converter is intentionally separate from the exact legacy LTE
+rebuild. It retains the audited SuNeRF/CHIANTI 11.0.2 response nodes for 171,
+193, and 211 Angstrom without resampling:
+
+```bash
+python -m resource_builder.aia_euv \
+  --source-response /path/to/aia_reference.sunerf.npz \
+  --output-directory build/reproduced-aia-euv-v1
+```
+
+The input is pinned by both file SHA256 and semantic response ID. This v1 set
+stores total response only, evaluated at fixed `log10(ne/cm^-3) = 9` with the
+`ne^2` emission-measure convention. It does not claim component-resolved
+emissivities, a density-dependent response, or an analytic high-temperature
+tail. Runtime gives the response exact compact support while leaving the
+atmosphere temperature itself unrestricted. A one-cell (0.05 dex) quintic
+smootherstep makes the response and its first derivative reach zero at each
+support edge before the exact-zero exterior branch.
+
 Create an isolated Python 3.11 environment, install the tested generator
 dependencies, then run from the project root:
 
@@ -76,3 +128,13 @@ inventory differs from the committed production contract.
 To install a verified reproduction, compare/review it first and then replace
 `src/prom3theus/resources/data` as one complete directory. Do not overlay
 individual files: the runtime intentionally rejects stale or mixed bundles.
+
+# Coronal energy cooling table
+
+The optional coronal energy constraint uses an independently prepared CHIANTI
+radiative-loss table. Run `conda run --no-capture-output -n sunerf python -m
+resource_builder.coronal_cooling --database-root /path/to/chianti/11.0.2` with
+fiasco 0.8.2 and the existing CHIANTI ASCII/HDF5 database. See
+[the energy constraint documentation](../docs/coronal-energy.md) for units,
+abundance assumptions, and activation. This is separate from the sealed LTE
+bundle and the instrument-specific AIA response.

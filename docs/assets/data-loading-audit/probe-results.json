@@ -1,0 +1,84 @@
+{
+  "environment": {
+    "python": "3.11.15",
+    "torch": "2.12.0",
+    "numpy": "2.4.6",
+    "platform": "macOS-14.6.1-arm64-arm-64bit",
+    "cuda_available": false,
+    "torch_threads": 1
+  },
+  "scope": "Synthetic local files, warm OS cache; no GPU or production storage claims.",
+  "duplicated_existing_payload": {
+    "native_bytes": 65664,
+    "snapshot_array_bytes": 65664,
+    "new_array_files": 1
+  },
+  "disk_tensor_mapping_calls": {
+    "metadata_only": 0,
+    "100_slice_copies": 100
+  },
+  "disk_tensor_inplace_update_lost": true,
+  "missing_payload": "restore succeeded; first slice raised FileNotFoundError",
+  "worker_rebuild_without_process_group": "old_generation",
+  "cached_native_slab": {
+    "bulk_payload_reads": 1,
+    "mapping_calls_for_100_cache_hits": 400
+  },
+  "training_read_semaphore_entries": 0,
+  "two_restored_loaders_identical_first_batch": true,
+  "close_then_prepare": "TypeError: object of type 'NoneType' has no len()",
+  "warm_cache_benchmark": [
+    {
+      "batch_size": 64,
+      "batches": 1024,
+      "fields": 6,
+      "np_load_calls_per_current_batch": 6,
+      "current_seconds": [
+        1.0884463749825954,
+        1.4268311249325052,
+        1.601820999989286
+      ],
+      "reused_mappings_seconds": [
+        0.014872666914016008,
+        0.013916750089265406,
+        0.013854542048648
+      ],
+      "median_current_over_prototype": 102.52617283348948
+    },
+    {
+      "batch_size": 256,
+      "batches": 256,
+      "fields": 6,
+      "np_load_calls_per_current_batch": 6,
+      "current_seconds": [
+        0.27163862506859004,
+        0.2887915000319481,
+        0.31780733296182007
+      ],
+      "reused_mappings_seconds": [
+        0.005457833060063422,
+        0.0041524580447003245,
+        0.004153083893470466
+      ],
+      "median_current_over_prototype": 69.53664010640139
+    },
+    {
+      "batch_size": 4096,
+      "batches": 16,
+      "fields": 6,
+      "np_load_calls_per_current_batch": 6,
+      "current_seconds": [
+        0.017100750003010035,
+        0.017342375009320676,
+        0.024580625002272427
+      ],
+      "reused_mappings_seconds": [
+        0.0025185419945046306,
+        0.000854874961078167,
+        0.000805291929282248
+      ],
+      "median_current_over_prototype": 20.286446321282472
+    }
+  ]
+}
+

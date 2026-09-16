@@ -39,9 +39,7 @@ def test_deterministic_grouped_keeps_uniform_radial_sampling():
     radius = torch.linalg.vector_norm(samples["position_m"][:, 0], dim=-1)
     height = (radius - domain.solar_radius_m) / 1.0e6
 
-    torch.testing.assert_close(
-        height, torch.linspace(0.0, 20.0, 5, dtype=height.dtype)
-    )
+    torch.testing.assert_close(height, torch.linspace(0.0, 20.0, 5, dtype=height.dtype))
 
 
 def test_random_sides_balances_four_angular_faces_and_returns_outward_normals():
@@ -55,7 +53,7 @@ def test_random_sides_balances_four_angular_faces_and_returns_outward_normals():
         solar_radius_m=695_700_000.0,
     )
 
-    samples = domain.random_sides(5, 8)
+    samples = domain.random_sides(40)
     position = samples["position_m"]
     normal = samples["normal"]
     radial = position / torch.linalg.vector_norm(position, dim=-1, keepdim=True)
@@ -67,8 +65,8 @@ def test_random_sides_balances_four_angular_faces_and_returns_outward_normals():
     )
     latitude_tangent = torch.linalg.cross(radial, longitude_tangent, dim=-1)
 
-    assert position.shape == normal.shape == (5, 8, 3)
-    assert samples["time_hours"].shape == (5, 8, 1)
+    assert position.shape == normal.shape == (40, 3)
+    assert samples["time_hours"].shape == (40, 1)
     torch.testing.assert_close(
         torch.linalg.vector_norm(normal, dim=-1),
         torch.ones_like(normal[..., 0]),
@@ -77,28 +75,28 @@ def test_random_sides_balances_four_angular_faces_and_returns_outward_normals():
         (normal * radial).sum(dim=-1), torch.zeros_like(normal[..., 0])
     )
     torch.testing.assert_close(
-        longitude[:, :2],
-        torch.full_like(longitude[:, :2], 0.1),
+        longitude[:10],
+        torch.full_like(longitude[:10], 0.1),
     )
     torch.testing.assert_close(
-        longitude[:, 2:4],
-        torch.full_like(longitude[:, 2:4], 0.35),
+        longitude[10:20],
+        torch.full_like(longitude[10:20], 0.35),
     )
     torch.testing.assert_close(
-        latitude[:, 4:6],
-        torch.full_like(latitude[:, 4:6], -0.2),
+        latitude[20:30],
+        torch.full_like(latitude[20:30], -0.2),
     )
     torch.testing.assert_close(
-        latitude[:, 6:],
-        torch.full_like(latitude[:, 6:], 0.1),
+        latitude[30:],
+        torch.full_like(latitude[30:], 0.1),
     )
-    assert torch.all((normal[:, :2] * longitude_tangent[:, :2]).sum(dim=-1) < 0)
-    assert torch.all((normal[:, 2:4] * longitude_tangent[:, 2:4]).sum(dim=-1) > 0)
-    assert torch.all((normal[:, 4:6] * latitude_tangent[:, 4:6]).sum(dim=-1) < 0)
-    assert torch.all((normal[:, 6:] * latitude_tangent[:, 6:]).sum(dim=-1) > 0)
+    assert torch.all((normal[:10] * longitude_tangent[:10]).sum(dim=-1) < 0)
+    assert torch.all((normal[10:20] * longitude_tangent[10:20]).sum(dim=-1) > 0)
+    assert torch.all((normal[20:30] * latitude_tangent[20:30]).sum(dim=-1) < 0)
+    assert torch.all((normal[30:] * latitude_tangent[30:]).sum(dim=-1) > 0)
 
 
-def test_deterministic_sides_are_repeatable_and_cover_radial_endpoints():
+def test_deterministic_sides_are_repeatable_flat_and_cover_radial_domain():
     domain = SphericalShellDomain(
         longitude_center_rad=0.0,
         longitude_offset_bounds_rad=(-0.1, 0.1),
@@ -108,12 +106,48 @@ def test_deterministic_sides_are_repeatable_and_cover_radial_endpoints():
         solar_radius_m=695_700_000.0,
     )
 
-    first = domain.deterministic_sides(3, 8)
-    second = domain.deterministic_sides(3, 8)
+    first = domain.deterministic_sides(24)
+    second = domain.deterministic_sides(24)
     for name in first:
         torch.testing.assert_close(first[name], second[name])
-    radius = torch.linalg.vector_norm(first["position_m"][:, 0], dim=-1)
+    assert first["position_m"].shape == (24, 3)
+    radius = torch.linalg.vector_norm(first["position_m"], dim=-1)
     height = (radius - domain.solar_radius_m) / 1.0e6
-    torch.testing.assert_close(
-        height, torch.tensor([0.0, 10.0, 20.0], dtype=height.dtype)
+    assert torch.all((height >= 0.0) & (height <= 20.0))
+    assert height.amin() < 1.0
+    assert height.amax() > 15.0
+
+
+def test_random_samplers_allocate_in_bulk_without_point_or_face_loops(monkeypatch):
+    import ast
+    import inspect
+    import textwrap
+
+    domain = SphericalShellDomain(
+        0.0, (-0.1, 0.1), (-0.1, 0.1), (0.0, 1.0), (0.0, 20.0), 695700000.0
     )
+    original = torch.rand
+    calls = []
+
+    def counted(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append(result.numel())
+        return result
+
+    monkeypatch.setattr(torch, "rand", counted)
+    for name, args in (
+        ("random_grouped", (16, 32)),
+        ("random_top", (512,)),
+        ("random_sides", (512,)),
+    ):
+        method = getattr(domain, name)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        assert not any(
+            isinstance(node, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp))
+            for node in ast.walk(tree)
+        )
+        for dtype, expected_calls in ((None, 2), (torch.float32, 1)):
+            calls.clear()
+            method(*args, dtype=dtype)
+            assert len(calls) == expected_calls
+            assert min(calls) >= 512

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from prom3theus.observations.arrays import materialize_array, read_flat_samples
+
 import math
 
 import numpy as np
@@ -19,7 +21,7 @@ from prom3theus.observations import (
     ObservationRaster,
     resolve_velocity_synthesis_mode,
 )
-from prom3theus.training.lightning import LTEInversionModule
+from typing import Any
 
 from .errors import ArtifactExportError
 from .validation import (
@@ -43,7 +45,7 @@ def _spatial_los_offset(
 ) -> torch.Tensor:
     """Normalize one observation LOS offset to a CPU ``[Y, X]`` tensor."""
 
-    offset = torch.as_tensor(value).detach().cpu()
+    offset = torch.as_tensor(materialize_array(value)).detach().cpu()
     if tuple(offset.shape) == (*spatial_shape, 1):
         offset = offset[..., 0]
     if tuple(offset.shape) != spatial_shape:
@@ -131,10 +133,10 @@ def select_export_device(
 
 
 def depth_grid(
-    module: LTEInversionModule,
+    module: Any,
     depth_samples: int | None,
 ) -> torch.Tensor:
-    """Build the requested fixed or model-native optical-depth grid."""
+    """Build the requested fixed Stokes reference sampling grid."""
 
     parameter = next(module.atmosphere_model.parameters())
     if depth_samples is None:
@@ -142,7 +144,7 @@ def depth_grid(
     else:
         if type(depth_samples) is not int or depth_samples < 2:
             raise ValueError("depth_samples must be an integer of at least two.")
-        source = module.atmosphere_model.log_tau500
+        source = module.sample_depth_grid(randomize=False)
         depth = torch.linspace(
             source[0],
             source[-1],
@@ -155,7 +157,7 @@ def depth_grid(
 
 @torch.inference_mode()
 def evaluate_atmosphere(
-    module: LTEInversionModule,
+    module: Any,
     raster: ObservationRaster,
     *,
     depth_grid: torch.Tensor,
@@ -180,13 +182,13 @@ def evaluate_atmosphere(
             "The trained instrument LOS-velocity correction is not finite."
         )
 
-    valid_flat = raster.valid_mask.reshape(-1)
+    valid_flat = materialize_array(raster.valid_mask).reshape(-1)
     flat_indices = torch.nonzero(valid_flat, as_tuple=False).squeeze(-1)
     if flat_indices.numel() == 0:
         raise ArtifactExportError("The canonical observation contains no valid pixels.")
-    coordinates = raster.coordinates.reshape(-1, 3).index_select(0, flat_indices)
-    rays = raster.ray_direction.reshape(-1, 3).index_select(0, flat_indices)
-    bases = raster.stokes_basis.reshape(-1, 3, 3).index_select(0, flat_indices)
+    coordinates = read_flat_samples(raster.coordinates, flat_indices)
+    rays = read_flat_samples(raster.ray_direction, flat_indices)
+    bases = read_flat_samples(raster.stokes_basis, flat_indices)
     spatial_shape = raster.spatial_shape
     observation_los_offset = _observation_los_offset(raster, mode)
     flat_observation_los_offset = observation_los_offset.reshape(-1)
@@ -231,7 +233,7 @@ def evaluate_atmosphere(
             atmosphere, trace = model.trace_rays(
                 coordinates[start:stop].to(parameter),
                 rays[start:stop].to(parameter),
-                depth_grid,
+                module.forward_composition.sampling_heights(depth_grid),
             )
             selected = flat_indices[start:stop].cpu().numpy()
 
@@ -333,7 +335,7 @@ def evaluate_atmosphere(
 
     shape = (*spatial_shape, depth)
     vector_shape = (*shape, 3)
-    coordinates_grid = raster.coordinates.detach().cpu().numpy()
+    coordinates_grid = materialize_array(raster.coordinates).detach().cpu().numpy()
     scene_basis_matrix = scene_basis(raster).astype(numpy_dtype)
     velocity_scene = np.einsum(
         "ij,ndj->ndi", scene_basis_matrix, vector_fields["velocity"]
@@ -345,15 +347,17 @@ def evaluate_atmosphere(
     inertial_observer_velocity = vector_fields["inertial_velocity_observer"].reshape(
         vector_shape
     )
-    synthesis_observer_velocity = vector_fields[
-        "synthesis_velocity_observer"
-    ].reshape(vector_shape)
+    synthesis_observer_velocity = vector_fields["synthesis_velocity_observer"].reshape(
+        vector_shape
+    )
     solar_inertial_los = -inertial_observer_velocity[..., 2]
     instrument_corrected_los = -synthesis_observer_velocity[..., 2]
     observation_los = -observer_velocity[..., 2]
     result = {
-        "log_tau500": depth_grid.detach().to(torch_dtype).cpu().numpy(),
-        "depth_coordinate": depth_grid.detach().to(torch_dtype).cpu().numpy(),
+        "stokes_reference_log_tau500": depth_grid.detach()
+        .to(torch_dtype)
+        .cpu()
+        .numpy(),
         "temperature_k": scalar_fields["temperature"].reshape(shape),
         "microturbulence_m_per_s": scalar_fields["microturbulence"].reshape(shape),
         "gas_pressure_pa": scalar_fields["gas_pressure"].reshape(shape),
@@ -403,7 +407,7 @@ def evaluate_atmosphere(
         "carrington_longitude_rad": vector_fields["spherical_position"][..., 2].reshape(
             shape
         ),
-        "valid_mask": raster.valid_mask.detach().cpu().numpy(),
+        "valid_mask": materialize_array(raster.valid_mask).detach().cpu().numpy(),
         "carrington_chart_x_mm": coordinates_grid[..., 0].astype(
             numpy_dtype, copy=False
         ),
@@ -413,14 +417,18 @@ def evaluate_atmosphere(
         "time_hours": coordinates_grid[..., 2].astype(numpy_dtype, copy=False),
     }
     if mode == CARRINGTON_OBSERVER_RELATIVE_VELOCITY:
-        observer_los = observation_los_offset.to(torch_dtype).numpy().astype(
-            numpy_dtype, copy=True
+        observer_los = (
+            observation_los_offset.to(torch_dtype)
+            .numpy()
+            .astype(numpy_dtype, copy=True)
         )
         observer_los[~result["valid_mask"]] = np.nan
         result["observer_los_velocity_m_per_s"] = observer_los
     elif mode == CARRINGTON_REGISTERED_RELATIVE_VELOCITY:
-        removed = observation_los_offset.to(torch_dtype).numpy().astype(
-            numpy_dtype, copy=True
+        removed = (
+            observation_los_offset.to(torch_dtype)
+            .numpy()
+            .astype(numpy_dtype, copy=True)
         )
         removed[~result["valid_mask"]] = np.nan
         result["removed_solar_los_velocity_m_per_s"] = removed

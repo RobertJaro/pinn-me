@@ -5,7 +5,7 @@
     "hinode_sp",
     "hmi_stokes"
   ],
-  "source_manifest_sha256": "33242a985a6a8915e2676414ef920a0073cff7f3ed811142123c863aceec2bb0",
+  "source_manifest_sha256": "f4246dc138bd5be5b273e591091fe2d2773e85340cb78b5ab35056ef6f908c9a",
   "runtime_files": [
     "common/abundances.json",
     "common/chianti_thermodynamic_table.json",
@@ -53,8 +53,14 @@
     "temperature_k": 7456.57046516284,
     "log10_column_mass_g_cm2": -4.483985744660035,
     "gravity_cm_s2": 27542.28703338169,
-    "falc_log10_tau500_range": [-5.405870771873386, 1.3948466796994528],
-    "bracketing_depth_indices": [36, 37],
+    "falc_log10_tau500_range": [
+      -5.405870771873386,
+      1.3948466796994528
+    ],
+    "bracketing_depth_indices": [
+      36,
+      37
+    ],
     "integration": "STiC ceos::hydrostatic_cmass convention: tau[0]=m[0]*kappa[0]; subsequent tau increments use trapezoidal kappa500 over column mass",
     "tau500_extinction": "true absorption plus scattering at vacuum 5000 Angstrom",
     "pressure_interpolation": "linear in log10(Pgas) versus log10(tau500)",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from prom3theus.observations.arrays import materialize_array
+
 from collections.abc import Mapping
 from contextlib import contextmanager
 import json
@@ -55,7 +57,9 @@ def _fits_image(path: Path):
         raise RuntimeError(
             "HMI comparison requires the optional observations dependencies."
         ) from error
-    with fits.open(path, memmap=True) as hdus:
+    # Native vector exports can contain scaled integers (notably DISAMBIG),
+    # which Astropy cannot decode with strict memory mapping enabled.
+    with fits.open(path, memmap=False) as hdus:
         images = [hdu for hdu in hdus if int(hdu.header.get("NAXIS", 0)) == 2]
         if len(images) != 1:
             raise ValueError(f"{path} must contain exactly one two-dimensional image.")
@@ -121,7 +125,7 @@ def _reference_pixel_indices(
         observer=reference_map.observer_coordinate,
         obstime=reference_map.date,
     )
-    position = raster.surface_position_m.detach().cpu().numpy()
+    position = materialize_array(raster.surface_position_m).detach().cpu().numpy()
     coordinate = SkyCoord(
         x=position[..., 0] * u.m,
         y=position[..., 1] * u.m,
@@ -143,7 +147,7 @@ def _reference_pixel_indices(
         & (columns < full_disk_shape[1])
     )
     residual = np.hypot(row_float - rows, column_float - columns)
-    finite_residual = residual[in_bounds & raster.valid_mask.detach().cpu().numpy()]
+    finite_residual = residual[in_bounds & materialize_array(raster.valid_mask).detach().cpu().numpy()]
     maximum_residual = (
         float(np.max(finite_residual)) if finite_residual.size else float("inf")
     )
@@ -239,9 +243,7 @@ def _reference_evaluation_grid(loader: P3SLoader, header, target_time):
         cutout,
         candidate,
         np.zeros(3, dtype=np.float64),
-        scene_basis_rows=loader.module.hparams["atmosphere_config"][
-            "scene_geometry_config"
-        ]["scene_basis"],
+        scene_basis_rows=loader.state.scene.scene_basis.tolist(),
     )
     radius = np.linalg.norm(surface, axis=-1)
     longitude_grid = np.arctan2(surface[..., 1], surface[..., 0])
@@ -264,16 +266,15 @@ def _reference_evaluation_grid(loader: P3SLoader, header, target_time):
     if not np.any(valid):
         raise ValueError("Saved P3S bounds select no valid HMI surface pixels.")
     scene = torch.as_tensor(
-        loader.module.hparams["atmosphere_config"]["scene_geometry_config"][
-            "scene_basis"
-        ],
+        loader.state.scene.scene_basis,
         dtype=torch.float64,
     )
     chart = direction_to_chart_mm(
         torch.from_numpy(surface), scene, float(bounds["solar_radius_m"])
     ).numpy()
-    first_record = loader.observation.times[0]
-    origin = Time(first_record["values"][0], scale=first_record["scale"])
+    origin = Time(
+        loader.state.scene.reference_time_tai_seconds, format="unix_tai", scale="tai"
+    )
     time_hours = float((target_time - origin).to_value(u.hour))
     coordinates = np.concatenate(
         (chart, np.full((*shape, 1), time_hours, dtype=np.float64)), axis=-1
@@ -294,6 +295,12 @@ def _observer_components(
     inclination_deg: np.ndarray,
     azimuth_deg: np.ndarray,
 ) -> np.ndarray:
+    """HMI vectors in [CCD-up, CCD-left, toward-observer] basis.
+
+    Native HMI azimuth starts at CCD-up (Sun 2013, Eq. 1). The basis
+    already accounts for its 90-degree origin relative to CCD-right.
+    The separate physical-to-LTE synthesis offset does not apply here.
+    """
     inclination = np.deg2rad(inclination_deg)
     azimuth = np.deg2rad(azimuth_deg)
     transverse = field_gauss * np.sin(inclination)
@@ -797,7 +804,7 @@ def compare_hmi_save_state(
         raster = _reference_evaluation_grid(loader, header, target_time)
         rows = raster.rows
         columns = raster.columns
-        in_bounds = raster.valid_mask.detach().cpu().numpy()
+        in_bounds = materialize_array(raster.valid_mask).detach().cpu().numpy()
         maximum_alignment_residual = 0.0
         model_cartesian = loader.fields_at_coordinates(
             raster.coordinates,
@@ -827,14 +834,14 @@ def compare_hmi_save_state(
     reference_observer = reference_observer_raw.copy()
     reference_observer[..., :2] *= np.where(reference_flip, -1.0, 1.0)[..., None]
 
-    basis = raster.stokes_basis.detach().cpu().numpy()
+    basis = materialize_array(raster.stokes_basis).detach().cpu().numpy()
     model_observer = np.einsum("...ij,...j->...i", basis, model_cartesian)
     reference_cartesian = np.einsum("...ji,...j->...i", basis, reference_observer)
-    surface = raster.surface_position_m.detach().cpu().numpy()
+    surface = materialize_array(raster.surface_position_m).detach().cpu().numpy()
     model_spherical = _spherical_components(model_cartesian, surface)
     reference_spherical = _spherical_components(reference_cartesian, surface)
     model_valid = np.isfinite(model_cartesian).all(axis=-1)
-    valid = raster.valid_mask.detach().cpu().numpy() & reference_valid & model_valid
+    valid = materialize_array(raster.valid_mask).detach().cpu().numpy() & reference_valid & model_valid
     transverse = field * np.sin(np.deg2rad(inclination))
     strong = valid & (transverse >= minimum_transverse_gauss)
 

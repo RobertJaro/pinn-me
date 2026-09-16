@@ -6,15 +6,17 @@ import torch
 from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN
 from prom3theus.resources import resource_path
 from prom3theus.rt import (
+    AtomicDatabase,
     RadialReferenceAtmosphere,
+    SolarPlasmaTable,
     StratifiedAtmosphere,
     StratifiedAtmosphereModel,
 )
 
 
-def _model(depth: int = 9) -> StratifiedAtmosphereModel:
+def _model() -> StratifiedAtmosphereModel:
     return StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, depth),
+        shell_height_bounds_Mm=(1.5, -0.1),
         scene_geometry_config={
             "solar_radius_m": 695_700_000.0,
             "scene_basis": torch.eye(3),
@@ -29,9 +31,30 @@ def _model(depth: int = 9) -> StratifiedAtmosphereModel:
     )
 
 
+def _siren_model() -> StratifiedAtmosphereModel:
+    return StratifiedAtmosphereModel(
+        shell_height_bounds_Mm=(20.0, -0.1),
+        scene_geometry_config={
+            "solar_radius_m": 695_700_000.0,
+            "scene_basis": torch.eye(3),
+        },
+        model_config={
+            "type": "siren",
+            "dim": 10,
+            "n_layers": 2,
+            "first_omega_0": 30.0,
+            "hidden_omega_0": 1.0,
+            "radial_weighting_config": {
+                "near_sun_weight": 1.0,
+                "outer_weight": 0.1,
+                "exponent": 1.0,
+            },
+        },
+    )
+
+
 def _extended_model(*, maximum_height_megameter: float = 20.0, points: int = 512):
     return StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, 7),
         shell_height_bounds_Mm=(maximum_height_megameter, -0.1),
         line_formation_height_bounds_Mm=(1.5, -0.1),
         upper_atmosphere_config={
@@ -128,15 +151,33 @@ def test_complete_falc_reference_restores_only_the_unused_native_upper_nodes():
 
 
 def test_atmosphere_model_starts_at_radial_reference():
-    model = _model(13)
-    atmosphere = model(torch.tensor([[0.0, 0.0, 0.0]]))
-    height = model.depth_to_height(model.log_tau500)
+    model = _model()
+    height = torch.linspace(1.5e6, -1.0e5, 13)
+    atmosphere = model(torch.tensor([[0.0, 0.0, 0.0]]), height)
     reference = model.reference_atmosphere.logs_at_height(height)
     torch.testing.assert_close(atmosphere.temperature[0], reference[0].exp())
     torch.testing.assert_close(atmosphere.gas_pressure[0], reference[1].exp())
     torch.testing.assert_close(atmosphere.microturbulence[0], reference[2].exp())
     assert atmosphere.velocity_field.shape == (1, 13, 3)
     assert atmosphere.magnetic_field.shape == (1, 13, 3)
+
+
+def test_siren_atmosphere_starts_at_radial_reference_and_weights_radius():
+    model = _siren_model()
+    height = torch.linspace(1.5e6, -1.0e5, 13)
+    atmosphere = model(torch.tensor([[0.0, 0.0, 0.0]]), height)
+    reference = model.reference_atmosphere.logs_at_height(height)
+    torch.testing.assert_close(atmosphere.temperature[0], reference[0].exp())
+    torch.testing.assert_close(atmosphere.gas_pressure[0], reference[1].exp())
+    torch.testing.assert_close(atmosphere.microturbulence[0], reference[2].exp())
+
+    weighting = model.network.coordinate_weighting
+    normalized_radius = torch.tensor(
+        [[0.0, 0.0, -0.1], [0.0, 0.0, 2.0]], dtype=model.solar_radius_m.dtype
+    )
+    envelope = weighting.envelope(normalized_radius)
+    assert envelope[0] == pytest.approx(1.0)
+    assert 0.1 < envelope[1] < envelope[0]
 
 
 def test_atmosphere_is_a_differentiable_continuous_field():
@@ -152,7 +193,7 @@ def test_atmosphere_is_a_differentiable_continuous_field():
 def test_atmosphere_rejects_noncanonical_or_nonsmooth_activations(activation):
     with pytest.raises(ValueError, match="smooth activation"):
         StratifiedAtmosphereModel(
-            torch.linspace(-5.0, 1.0, 5),
+            shell_height_bounds_Mm=(1.5, -0.1),
             scene_geometry_config={
                 "solar_radius_m": 695_700_000.0,
                 "scene_basis": torch.eye(3),
@@ -176,10 +217,10 @@ def test_stratified_atmosphere_enforces_depth_and_dtype_contracts():
         "gas_pressure": torch.ones(1, 2),
     }
     with pytest.raises(ValueError, match="strictly increase"):
-        StratifiedAtmosphere(log_tau500=torch.tensor([0.0, -1.0]), **fields)
+        StratifiedAtmosphere(depth_coordinate=torch.tensor([0.0, -1.0]), **fields)
     with pytest.raises(TypeError, match="same dtype"):
         StratifiedAtmosphere(
-            log_tau500=torch.tensor([-1.0, 0.0]),
+            depth_coordinate=torch.tensor([-1.0, 0.0]),
             **{**fields, "gas_pressure": torch.ones(1, 2, dtype=torch.float64)},
         )
 
@@ -187,10 +228,10 @@ def test_stratified_atmosphere_enforces_depth_and_dtype_contracts():
 def test_atmosphere_model_rejects_invalid_evaluation_grids_and_rays():
     model = _model()
     coordinates = torch.tensor([[0.0, 0.0, 0.0]])
-    with pytest.raises(ValueError, match="strictly increase"):
+    with pytest.raises(ValueError, match="strictly decrease"):
         model(coordinates, torch.tensor([-4.0, -3.0, -3.5]))
-    with pytest.raises(ValueError, match="represented depth interval"):
-        model(coordinates, torch.tensor([-5.1, 0.0]))
+    with pytest.raises(ValueError, match="spherical shell"):
+        model(coordinates, torch.tensor([1.6e6, 0.0]))
     with pytest.raises(ValueError, match="finite non-zero"):
         model.trace_rays(
             coordinates,
@@ -202,7 +243,11 @@ def test_atmosphere_model_rejects_invalid_evaluation_grids_and_rays():
 def test_extended_model_keeps_ray_sampling_in_the_line_formation_domain():
     model = _extended_model(maximum_height_megameter=3.0, points=128)
 
-    ray_heights = model.depth_to_height(model.log_tau500)
+    ray_heights = torch.tensor(model.line_formation_height_bounds_Mm) * 1e6
+    sampled, trace = model.trace_rays(
+        torch.zeros(1, 3), torch.tensor([[0.0, 0.0, -1.0]]), ray_heights
+    )
+    assert sampled.depth == 2
     torch.testing.assert_close(ray_heights[[0, -1]], torch.tensor([1.5e6, -1.0e5]))
     assert model.extrapolation_enabled
     top_pressure = model.top_boundary_reference_log_pressure.exp()
@@ -248,7 +293,12 @@ def test_coronal_continuation_uses_the_native_top_and_satisfies_hydrostatics():
     base_height = heights[-point_count - 1]
     base_logs = logs[-point_count - 1]
 
-    assert heights.numel() == 25 + 37 + point_count
+    # 25 line-formation nodes, 37 restored native FALC nodes, the coronal
+    # continuation, and the adiabatic interior nodes carrying the -0.1 Mm
+    # shell floor below the FALC table bottom.
+    interior_nodes = reference.metadata()["lower_atmosphere"]["interval_count"]
+    assert interior_nodes == 16
+    assert heights.numel() == interior_nodes + 25 + 37 + point_count
     assert float(base_height) == 2073502.4593743724
     torch.testing.assert_close(
         torch.exp(base_logs),
@@ -315,6 +365,22 @@ def test_coronal_continuation_uses_the_native_top_and_satisfies_hydrostatics():
         atol=5.0e-16,
     )
     assert torch.all(torch.diff(hydrostatic_logs[:, 1]) < 0.0)
+
+
+def test_normalized_atmosphere_eos_adapter_round_trips_actual_state():
+    model = _model()
+    position = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.001]])
+    normalized = model.evaluate_position_rsun_normalized(position)
+    expected = model.thermodynamic_eos.mass_density(
+        normalized["temperature"] * model.temperature_scale_k,
+        normalized["gas_pressure"] * model.gas_pressure_scale_pa,
+    ) / model.density_scale_kg_m3
+    torch.testing.assert_close(
+        model.mass_density_normalized(
+            normalized["temperature"], normalized["gas_pressure"]
+        ),
+        expected,
+    )
 
 
 def test_zero_thermodynamic_outputs_follow_the_full_reference_through_the_corona():
@@ -394,3 +460,136 @@ def test_coronal_continuation_must_start_above_the_complete_falc_top():
             solar_radius_m=695_700_000.0,
             thermodynamic_eos=model.thermodynamic_eos,
         )
+
+
+def test_model_has_no_observation_grid_and_accepts_physical_sampling():
+    model = _model()
+    assert not hasattr(model, "log_tau500")
+    assert not hasattr(model, "depth_to_height")
+    assert "log_tau500" not in model.state_dict()
+    coordinates = torch.zeros(1, 3)
+    for height in (torch.tensor([1.5e6, -1e5]), torch.tensor([1e6, 5e5, 0.0, -1e5])):
+        atmosphere = model(coordinates, height)
+        torch.testing.assert_close(atmosphere.geometric_height_m[0], height)
+        torch.testing.assert_close(
+            atmosphere.depth_coordinate, torch.arange(height.numel()).float()
+        )
+
+
+def test_adiabatic_interior_replaces_the_runaway_table_extrapolation():
+    """A sub-photospheric shell floor must follow an adiabat, not the table.
+
+    The FALC table stops about 69 km below the surface.  Extrapolating its
+    steep bottom gradient reaches 48 kK by -0.5 Mm, which is roughly four
+    times the real solar value and drives the forward model past the hot end
+    of the photospheric fade, where the Fe I reservoir vanishes entirely.
+    """
+
+    atomic = AtomicDatabase()
+    eos = SolarPlasmaTable(atomic)
+    solar_radius_m = 695_700_000.0
+    heights = torch.tensor([-0.1e6, -0.2e6, -0.3e6, -0.5e6], dtype=torch.float64)
+
+    tabulated = RadialReferenceAtmosphere("falc_82", atomic_database=atomic)
+    interior = RadialReferenceAtmosphere(
+        "falc_82",
+        minimum_height_m=-0.5e6,
+        solar_radius_m=solar_radius_m,
+        thermodynamic_eos=eos,
+        atomic_database=atomic,
+    )
+
+    extrapolated_temperature = tabulated.logs_at_height(heights)[0].exp()
+    temperature, pressure, microturbulence = interior.logs_at_height(heights)
+    temperature, pressure = temperature.exp(), pressure.exp()
+
+    assert float(extrapolated_temperature[-1]) > 45_000.0
+    # Standard solar envelope values at these depths, to within ten percent.
+    expected = torch.tensor([8932.0, 9695.0, 10357.0, 11558.0], dtype=torch.float64)
+    torch.testing.assert_close(temperature, expected, rtol=0.1, atol=0.0)
+    assert torch.all(temperature[1:] > temperature[:-1])
+    assert torch.all(pressure[1:] > pressure[:-1])
+    # Microturbulence is held at the native bottom value.
+    torch.testing.assert_close(
+        microturbulence, torch.full_like(microturbulence, float(microturbulence[0]))
+    )
+    # The continuation stays far below the hot end of the photospheric fade,
+    # so the Fe I reservoir survives everywhere inside the shell.  The old
+    # extrapolation ran past it and zeroed the line opacity outright.
+    fade_top = eos.eos.transition_temperature_bounds_k[1]
+    assert float(temperature[-1]) < 0.5 * fade_top
+    assert float(extrapolated_temperature[-1]) > fade_top
+    weight = eos.prepare_plasma_state(
+        temperature, torch.full_like(temperature, 1.0e5)
+    ).photospheric_weight
+    assert torch.all(weight > 0.95)
+
+
+def test_interior_continuation_joins_the_falc_table_continuously():
+    atomic = AtomicDatabase()
+    eos = SolarPlasmaTable(atomic)
+    plain = RadialReferenceAtmosphere("falc_82", atomic_database=atomic)
+    interior = RadialReferenceAtmosphere(
+        "falc_82",
+        minimum_height_m=-0.5e6,
+        solar_radius_m=695_700_000.0,
+        thermodynamic_eos=eos,
+        atomic_database=atomic,
+    )
+
+    # Nothing at or above the FALC table bottom may move.
+    above = torch.tensor([0.0, 0.5e6, -0.05e6, -0.0688e6], dtype=torch.float64)
+    for extended, original in zip(
+        interior.logs_at_height(above), plain.logs_at_height(above), strict=True
+    ):
+        torch.testing.assert_close(extended, original)
+
+    # The stored table stays strictly ascending in height through the join.
+    heights = interior.thermodynamic_height_ascending_m
+    assert torch.all(heights[1:] > heights[:-1])
+    assert float(heights[0]) == -0.5e6
+
+    # A floor inside the table adds no continuation at all.
+    shallow = RadialReferenceAtmosphere(
+        "falc_82",
+        minimum_height_m=-0.05e6,
+        solar_radius_m=695_700_000.0,
+        thermodynamic_eos=eos,
+        atomic_database=atomic,
+    )
+    assert shallow.metadata()["lower_atmosphere"] is None
+
+
+def test_interior_ionization_matches_the_stic_table_where_both_apply():
+    """Saha must agree with the tabulated composition inside the STiC table.
+
+    The interior gradient needs an ionization degree above the table's 10 kK
+    ceiling, where the runtime EoS blends toward CHIANTI coronal equilibrium
+    and turns several-fold too neutral for a dense interior.  Saha continues
+    the same LTE physics instead -- but only legitimately so if the two agree
+    wherever the table itself is valid.
+    """
+
+    from prom3theus.rt.atmosphere import _hydrogen_ionization_fraction
+
+    eos = SolarPlasmaTable(AtomicDatabase())
+    temperature = torch.tensor([6000.0, 8000.0, 9000.0, 9900.0], dtype=torch.float64)
+    gas_pressure = torch.tensor(
+        [1.2e4, 1.8e4, 2.2e4, 3.0e4], dtype=torch.float64
+    )
+    assert torch.all(temperature < eos.eos.transition_temperature_bounds_k[0])
+
+    saha = _hydrogen_ionization_fraction(eos, temperature, gas_pressure)
+    tabulated = eos.electron_density(temperature, gas_pressure) / (
+        eos.mass_density(temperature, gas_pressure)
+        / (eos.eos.mass_u_per_h_nucleus * ATOMIC_MASS_UNIT)
+    )
+
+    torch.testing.assert_close(saha, tabulated, rtol=0.05, atol=1.0e-4)
+    # And it keeps rising with depth past the ceiling, which the blended
+    # coronal-equilibrium electron density does not.
+    hot = torch.tensor([10400.0, 11000.0, 11600.0, 12100.0], dtype=torch.float64)
+    hot_pressure = torch.tensor([5.0e4, 7.4e4, 1.08e5, 1.55e5], dtype=torch.float64)
+    hot_saha = _hydrogen_ionization_fraction(eos, hot, hot_pressure)
+    assert torch.all(hot_saha[1:] > hot_saha[:-1])
+    assert float(hot_saha[-1]) > 2.0 * float(saha[-1])

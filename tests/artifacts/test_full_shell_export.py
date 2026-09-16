@@ -9,7 +9,7 @@ from prom3theus.artifacts.full_shell import (
     full_shell_height_grid,
     full_shell_metadata,
 )
-from prom3theus.artifacts.export import export_artifact
+from prom3theus.artifacts.export import export_save_state
 from prom3theus.cli.main import _build_parser
 from prom3theus.rt import StratifiedAtmosphereModel
 
@@ -124,7 +124,6 @@ def test_full_shell_evaluation_uses_radial_columns_and_shared_valid_mask():
 
 def test_full_shell_evaluation_matches_real_extrapolation_model_contract():
     model = StratifiedAtmosphereModel(
-        torch.linspace(-5.0, 1.0, 5),
         shell_height_bounds_Mm=(20.0, -0.1),
         line_formation_height_bounds_Mm=(1.5, -0.1),
         upper_atmosphere_config={
@@ -196,7 +195,7 @@ def test_cli_requires_an_explicit_full_shell_opt_in():
 
 def test_full_shell_sample_count_is_validated_even_without_opt_in(tmp_path):
     with pytest.raises(ValueError, match="full_shell_samples"):
-        export_artifact(
+        export_save_state(
             tmp_path,
             tmp_path / "result.npz",
             include_full_shell=False,

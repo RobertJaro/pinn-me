@@ -8,6 +8,7 @@ from numbers import Integral
 import numpy as np
 import torch
 import torch.distributed as dist
+from prom3theus.observations.bulk import read_native_grid
 
 
 def subsample_grid(
@@ -43,25 +44,21 @@ def display_grid(trainer, raster, maximum: int) -> tuple[np.ndarray, np.ndarray]
     evaluation_dataset = getattr(data_module, "_evaluation_dataset", None)
     if evaluation_dataset is None:
         evaluation_dataset = getattr(validation, "dataset", None)
-    pixel_indices = getattr(evaluation_dataset, "pixel_indices", None)
     subset_indices = getattr(validation, "indices", None)
-    if pixel_indices is None or subset_indices is None:
+    if subset_indices is None:
         return subsample_grid(*raster.spatial_shape, maximum)
 
-    selected = pixel_indices[torch.as_tensor(subset_indices, dtype=torch.long)]
+    if hasattr(evaluation_dataset, "pixels_at"):
+        selected = evaluation_dataset.pixels_at(torch.as_tensor(subset_indices, dtype=torch.long))
+    else:
+        pixel_indices = getattr(evaluation_dataset, "pixel_indices", None)
+        if pixel_indices is None:
+            return subsample_grid(*raster.spatial_shape, maximum)
+        selected = pixel_indices[torch.as_tensor(subset_indices, dtype=torch.long)]
     all_rows = torch.unique(selected[:, 0], sorted=True).cpu().numpy()
     all_columns = torch.unique(selected[:, 1], sorted=True).cpu().numpy()
-    stride = max(
-        1,
-        int(math.ceil(math.sqrt(all_rows.size * all_columns.size / maximum))),
-    )
-    rows = all_rows[::stride]
-    columns = all_columns[::stride]
-    while rows.size * columns.size > maximum:
-        stride += 1
-        rows = all_rows[::stride]
-        columns = all_columns[::stride]
-    return rows, columns
+    rows, columns = subsample_grid(all_rows.size, all_columns.size, maximum)
+    return all_rows[rows], all_columns[columns]
 
 
 def map_coordinates(
@@ -71,7 +68,7 @@ def map_coordinates(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return two-dimensional Carrington-chart center grids in Mm."""
 
-    coords = raster.coordinates[rows][:, columns].detach().float().cpu().numpy()
+    coords = read_native_grid(raster.coordinates, rows, columns).detach().float().cpu().numpy()
     if coords.shape[-1] != 3:
         raise ValueError(
             "Observation coordinates must end in [x_mm, y_mm, time_hours]."

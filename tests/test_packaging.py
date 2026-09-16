@@ -15,6 +15,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_CONFIGS = {
+    "hmi_aia_dynamic.yaml",
     "hinode_lte_mhs.yaml",
     "hinode_lte_mhs_extrapolation.yaml",
     "hmi_lte_mhs.yaml",
@@ -32,6 +33,12 @@ RESOURCE_FILES = {
     "hinode_sp/solar_reference_630nm.json",
     "hmi_stokes/instrument_hmi.json",
     "hmi_stokes/solar_reference_617nm.json",
+    "sources.json",
+}
+AIA_RESOURCE_FILES = {
+    "aia_temperature_response.json",
+    "instrument_aia_euv.json",
+    "manifest.json",
     "sources.json",
 }
 
@@ -111,6 +118,14 @@ def test_wheel_contains_only_the_public_package_configs_and_metadata(
     }
     assert resource_members == RESOURCE_FILES
 
+    aia_resource_prefix = "prom3theus/resources/sets/euv/aia_euv_v1/"
+    aia_resource_members = {
+        name.removeprefix(aia_resource_prefix)
+        for name in names
+        if name.startswith(aia_resource_prefix)
+    }
+    assert aia_resource_members == AIA_RESOURCE_FILES
+
     config_members = {
         Path(name).name
         for name in names
@@ -160,7 +175,7 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         name.removeprefix("docs/")
         for name in members
         if name.startswith("docs/") and name.endswith(".md")
-    } == {"architecture.md", "porting-plan.md"}
+    } == {path.name for path in (PROJECT_ROOT / "docs").glob("*.md")}
     assert {
         name.removeprefix("scripts/")
         for name in members
@@ -172,7 +187,18 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         "hmi/prepare.sh",
         "hmi/run.sh",
         "resources/rebuild.sh",
+        "sdo/download.sh",
+        "sdo/prepare.sh",
+        "sdo/run.sh",
     }
+    assert {
+        name.removeprefix("scripts/")
+        for name in members
+        if name.startswith("scripts/") and name.endswith(".py")
+    } == set()
+    assert not any(
+        name.startswith("scripts/") and name.endswith(".json") for name in members
+    )
     assert {
         name.removeprefix("resource_builder/")
         for name in members
@@ -181,6 +207,8 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         "README.md",
         "__init__.py",
         "_shared.py",
+        "aia_euv.py",
+        "coronal_cooling.py",
         "build.py",
         "common_atomic.py",
         "hinode_sp.py",
@@ -203,6 +231,12 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         for name in members
         if name.startswith("src/prom3theus/resources/data/") and name.endswith(".json")
     } == RESOURCE_FILES
+    assert {
+        name.removeprefix("src/prom3theus/resources/sets/euv/aia_euv_v1/")
+        for name in members
+        if name.startswith("src/prom3theus/resources/sets/euv/aia_euv_v1/")
+        and name.endswith(".json")
+    } == AIA_RESOURCE_FILES
 
 
 def test_wheel_runs_from_an_isolated_installation(
@@ -254,10 +288,13 @@ configs = installation / "share" / "prom3theus" / "configs"
 assert {path.name for path in configs.glob("*.yaml")} == {
     "hinode_lte_mhs.yaml",
     "hinode_lte_mhs_extrapolation.yaml",
+    "hmi_aia_dynamic.yaml",
     "hmi_lte_mhs.yaml",
     "hmi_lte_dynamic.yaml",
 }
-assert {load_config(path).solver.kind for path in configs.glob("*.yaml")} == {"lte"}
+assert {load_config(path).solver.kind for path in configs.glob("*.yaml")} == {
+    "joint",
+}
 resources = validate_resource_bundle()
 assert resources["supported_instruments"] == ["hinode_sp", "hmi_stokes"]
 print(prom3theus.__version__)
