@@ -5,7 +5,7 @@ import os.path
 import numpy as np
 from astropy import units as u
 from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import LogNorm, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
@@ -14,6 +14,7 @@ from tqdm import tqdm
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix
 from pme.evaluation.loader import PINNMEOutput
+from pme.data.hmi_time import load_hmi_date_obs_map
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -43,7 +44,7 @@ if __name__ == '__main__':
         # if os.path.exists(out_path):
         #     continue
 
-        ref_map = Map(f)
+        ref_map = load_hmi_date_obs_map(f) if os.path.basename(f).lower().startswith('hmi.') else Map(f)
         if args.resolution is not None:
             ref_map = ref_map.resample(tuple(args.resolution) * u.pix)
         # bl = SkyCoord(-500 * u.arcsec, -500 * u.arcsec, frame=ref_map.coordinate_frame)
@@ -69,7 +70,8 @@ if __name__ == '__main__':
 
         pAng = -np.deg2rad(ref_map.meta.get('CROTA2', 0))
         latc, lonc = ref_map.carrington_latitude.to_value(u.rad), ref_map.carrington_longitude.to_value(u.rad)
-        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng,
+            observer_distance=(ref_map.dsun / ref_map.rsun_meters).to_value(u.dimensionless_unscaled))
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         parameter_cube = pinnme.load_parameters(coords=coords, progress=False)
@@ -85,6 +87,9 @@ if __name__ == '__main__':
         v_img = np.einsum('...ij,...j->...i', rtp_to_img_transform, v_rtp)
 
         b_field = np.linalg.norm(b_img, axis=-1)
+        # Same logarithmic 1–1000 G opacity scale as the reference-comparison panels.
+        angle_alpha_norm = LogNorm(vmin=1, vmax=1000, clip=True)
+        angle_alpha = angle_alpha_norm(np.nan_to_num(np.abs(b_field), nan=0, posinf=0, neginf=0)).filled(0)
         inc = np.arccos(b_img[..., 2] / (b_field + 1e-8))
         azi = np.arctan2(-b_img[..., 0], b_img[..., 1])
 
@@ -123,13 +128,13 @@ if __name__ == '__main__':
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$|B|$ [G]')
 
         ax = axs[1, 1]
-        im = ax.imshow(np.rad2deg(inc % np.pi), cmap='seismic_r', origin='lower', vmin=0, vmax=180)
+        im = ax.imshow(np.rad2deg(inc), cmap='berlin', origin='lower', vmin=0, vmax=180, alpha=angle_alpha)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\theta$ [deg]')
 
         ax = axs[1, 2]
-        im = ax.imshow(np.rad2deg(azi % np.pi), cmap='twilight', origin='lower', vmin=0, vmax=180)
+        im = ax.imshow(np.rad2deg(azi % np.pi), cmap='twilight', origin='lower', vmin=0, vmax=180, alpha=angle_alpha)
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05, axes_class=plt.Axes)
         fig.colorbar(im, cax=cax, orientation='vertical', label=r'$\phi$ [deg]')

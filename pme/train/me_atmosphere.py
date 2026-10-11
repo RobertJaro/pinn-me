@@ -6,6 +6,8 @@ The formalism follows the computations on p. 159 in Landi Degl'Innocenti & Lando
 Also a lot of inspiration is taken from AAR github: https://github.com/aasensio/milne/blob/master/maths.f90
 
 '''
+from functools import lru_cache
+
 import torch
 from astropy import constants as const
 from astropy import units as u
@@ -22,6 +24,8 @@ class MEAtmosphere(nn.Module):
         super().__init__()
 
         self.voigt = Voigt()
+        # Retain the legacy module/buffer names for existing checkpoints.
+        # Synthesis uses voigt.forward_pair_unit to share its Faddeeva evaluation.
         self.faraday_voigt = FaradayVoigt()
 
         self.register_buffer('c', torch.tensor(const.c.to_value(u.m / u.s), dtype=torch.float32))  # Speed of light
@@ -35,56 +39,56 @@ class MEAtmosphere(nn.Module):
         zeeman_strength_lookup = {k: nn.Parameter(torch.tensor(v, dtype=torch.float32), requires_grad=False)
                                   for k, v in zeeman_strength_lookup.items()}
         self.zeeman_strength_lookup = nn.ParameterDict(zeeman_strength_lookup)
+        self._build_transition_cache()
+
+    def _build_transition_cache(self):
+        # Atomic levels are fixed. Read their scalars once, never per synthesis.
+        j_up, j_low = (float(value.detach().cpu()) for value in (self.j_up, self.j_low))
+        assert (2 * j_up + 1) % 1 == 0, 'nUp must be integer'
+        transitions, splittings = [], []
+        for i_up in range(int(2 * j_up + 1)):
+            m_up = j_up - i_up
+            for component, delta_m in zip(('b', 'p', 'r'), (-1, 0, 1)):
+                m_low = m_up + delta_m
+                if abs(m_low) <= abs(j_low):
+                    key = get_zeeman_lookup_id(j_up, j_low, m_up, m_low)
+                    transitions.append((component, key))
+                    splittings.append(self.g_up * m_up - self.g_low * m_low)
+        self._transitions = tuple(transitions)
+        # Derived data must move with the model, but add no checkpoint keys.
+        values = torch.stack(splittings) if splittings else self.g_up.new_empty(0)
+        self.register_buffer('_transition_splittings', values, persistent=False)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        # Recompute in the new dtype rather than widening rounded splittings.
+        self._build_transition_cache()
+        return self
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        # Rebuild from the loaded atomic constants, including legacy checkpoints.
+        self._build_transition_cache()
 
     def calculate_voigt_faraday_profiles(self, nu, nu_m, damping, lambda_dop, **kwargs):
-        gamma = torch.ones_like(nu) * damping  # [batch, n_lambda]
-        sigma = torch.ones_like(nu)
-
-        assert (2 * self.j_up + 1) % 1 == 0, 'nUp must be integer'
-        nUp = int(2 * self.j_up + 1)
-
-        phi_b = torch.zeros_like(nu)
-        psi_b = torch.zeros_like(nu)
-        phi_p = torch.zeros_like(nu)
-        psi_p = torch.zeros_like(nu)
-        phi_r = torch.zeros_like(nu)
-        psi_r = torch.zeros_like(nu)
-
-        for iUp in range(0, nUp):
-            MUp = self.j_up - iUp
-
-            iLow = 1
-            MLow = MUp - 2 + iLow
-
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-                strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                splitting = self.g_up * MUp - self.g_low * MLow
-
-                mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_b += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_b += strength * self.faraday_voigt(nu - mu, sigma, gamma)
-
-            iLow = 2
-            MLow = MUp - 2 + iLow
-
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-                strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                splitting = self.g_up * MUp - self.g_low * MLow
-                mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-
-                phi_p += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_p += strength * self.faraday_voigt(nu - mu, sigma, gamma)
-
-            iLow = 3
-            MLow = MUp - 2 + iLow
-            if torch.abs(MLow) <= torch.abs(self.j_low):
-                strength = self.zeeman_strength(self.j_up, self.j_low, MUp, MLow)
-                splitting = self.g_up * MUp - self.g_low * MLow
-
-                mu = torch.ones_like(nu) * (lambda_dop - 1 * splitting * nu_m)  # [batch, n_lambda]
-                phi_r += strength * self.voigt(nu - mu, sigma, gamma)
-                psi_r += strength * self.faraday_voigt(nu - mu, sigma, gamma)
-        return {'phi_b': phi_b, 'psi_b': psi_b, 'phi_p': phi_p, 'psi_p': psi_p, 'phi_r': phi_r, 'psi_r': psi_r}
+        """Synthesize physical profiles with nonnegative damping and unit sigma."""
+        if not hasattr(self, '_transitions'):  # Legacy whole-module pickle.
+            self._build_transition_cache()
+        profiles = {}
+        for (component, key), splitting in zip(self._transitions, self._transition_splittings.unbind()):
+            shift = lambda_dop - splitting * nu_m
+            phi, psi = self.voigt.forward_pair_unit(nu - shift, damping)
+            strength = self.zeeman_strength_lookup[key]
+            for prefix, value in (('phi', phi), ('psi', psi)):
+                name = f'{prefix}_{component}'
+                contribution = strength * value
+                profiles[name] = profiles[name] + contribution if name in profiles else contribution
+        for component in ('b', 'p', 'r'):
+            for prefix in ('phi', 'psi'):
+                name = f'{prefix}_{component}'
+                if name not in profiles:
+                    profiles[name] = torch.zeros_like(nu)
+        return profiles
 
     def zeeman_strength(self, j_up, j_low, MUp, MLow):
         # avoid recomputing the same strength
@@ -192,25 +196,41 @@ class MEAtmosphere(nn.Module):
         # voigt and faraday voigt profiles
         profiles = self.calculate_voigt_faraday_profiles(**state)
         state.update(profiles)
-        # eta
-        state['eta_I'] = self.eta_I(**state)
-        state['eta_Q'] = self.eta_Q(**state)
-        state['eta_U'] = self.eta_U(**state)
-        state['eta_V'] = self.eta_V(**state)
-        # rho
-        state['rho_Q'] = self.rho_Q(**state)
-        state['rho_U'] = self.rho_U(**state)
-        state['rho_V'] = self.rho_V(**state)
-        # delta
-        state['delta'] = self.delta(**state)
+        mode = getattr(self, '_compile_solver_mode', None)
+        if mode is not None and self.training and torch.is_grad_enabled():
+            # Compile only real tensor algebra. Replay, Faddeeva and instrument
+            # response integration remain eager. Validation/export use eager too.
+            return compiled_profile_solver(mode)(**state)
+        return self._solve_profiles(**state)
 
-        stokes_i = self.compute_I(**state)
-        stokes_q = self.compute_Q(**state)
-        stokes_u = self.compute_U(**state)
-        stokes_v = self.compute_V(**state)
-
-        # return the Stokes parameters
-        return stokes_i, stokes_q, stokes_u, stokes_v
+    @staticmethod
+    def _solve_profiles(phi_p, phi_r, phi_b, psi_p, psi_r, psi_b,
+                        sin_inc2, cos_inc, sin_inc2_cos2azi, sin_inc2_sin2azi,
+                        kl, b0, b1, mu, **kwargs):
+        # Shared propagation coefficients and Unno-Rachkovsky intermediates.
+        phi_sigma = (phi_r + phi_b) * 0.5
+        phi_linear = phi_p - phi_sigma
+        psi_linear = psi_p - (psi_r + psi_b) * 0.5
+        eta_i = (phi_p * sin_inc2 + phi_sigma * (1 + cos_inc.square())) * kl
+        eta_q = phi_linear * sin_inc2_cos2azi * kl
+        eta_u = phi_linear * sin_inc2_sin2azi * kl
+        eta_v = (phi_r - phi_b) * cos_inc * kl
+        rho_q = psi_linear * sin_inc2_cos2azi * kl
+        rho_u = psi_linear * sin_inc2_sin2azi * kl
+        rho_v = kl * (psi_r - psi_b) * cos_inc
+        k = 1 + eta_i
+        k2 = k.square()
+        rho_q2, rho_u2, rho_v2 = rho_q.square(), rho_u.square(), rho_v.square()
+        dot = eta_q * rho_q + eta_u * rho_u + eta_v * rho_v
+        delta = k2 * (k2 - eta_q.square() - eta_u.square() - eta_v.square()
+                      + rho_q2 + rho_u2 + rho_v2) - dot.square()
+        source = mu * b1 / delta
+        polarized_source = -source
+        intensity = b0 + source * (k * (k2 + rho_q2 + rho_u2 + rho_v2))
+        q = polarized_source * (k2 * eta_q + k * (eta_v * rho_u - eta_u * rho_v) + rho_q * dot)
+        u = polarized_source * (k2 * eta_u + k * (eta_q * rho_v - eta_v * rho_q) + rho_u * dot)
+        v = polarized_source * (k2 * eta_v + k * (eta_u * rho_q - eta_q * rho_u) + rho_v * dot)
+        return intensity, q, u, v
 
     def forward(self, wavelength_grid, b_field, sin_inc2_cos2azi, sin_inc2_sin2azi,
                 sin_inc2, cos_inc,
@@ -265,6 +285,17 @@ class MEAtmosphere(nn.Module):
         continuum_intensity = b0 + mu * b1
         integrated[0] = integrated[0] + continuum_weights * continuum_intensity
         return tuple(integrated)
+
+
+@lru_cache(maxsize=4)
+def compiled_profile_solver(mode='default'):
+    """Process-local callable, excluded from state dicts and module exports.
+
+    Compilation is lazy on the first training invocation. Failures are surfaced
+    rather than silently falling back to eager execution.
+    """
+    return torch.compile(MEAtmosphere._solve_profiles, backend='inductor',
+                         mode=mode, fullgraph=True)
 
 
 class HMIMEAtmosphere(MEAtmosphere):

@@ -49,9 +49,8 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         transformed_coords[..., 1] += 0.3 # translate in y
         transformed_coords = cartesian_to_spherical(transformed_coords, f=np)
         spheromak_coords = np.concatenate([transformed_coords, time_coords], axis=-1)
-        R, THETA, PHI, T = (spheromak_coords[..., 0],
+        R, THETA, T = (spheromak_coords[..., 0],
                             spheromak_coords[..., 1],
-                            spheromak_coords[..., 2],
                             spheromak_coords[..., 3])
 
         # Calculate the spheromak solution
@@ -60,7 +59,6 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         R_0 = 0.5
         B_0 = 5e4
         n = 1
-        m = 0
         gamma = (4.0 * u.km / u.s).to_value(u.Rsun / u.s)
         C_alpha = 4.4934e1
         alpha_0 = C_alpha / R_0
@@ -79,7 +77,6 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         E_theta = - B_phi * dalpha_dt / alpha * R
         E_phi = B_theta * dalpha_dt / alpha * R
         #
-        # c = np.stack([R, THETA, PHI], -1)
         B_rtp = np.stack([B_r, B_theta, B_phi], -1)
         E_rtp = np.stack([E_r, E_theta, E_phi], -1)
 
@@ -137,15 +134,8 @@ class SpheromakTestSetGenerator(TestSetGenerator):
         carrington_map = Map(dummy_carrington, carrington_header)
         helioprojective_map = carrington_map.reproject_to(helioprojective_header)
 
-        # Compute mu for the helioprojective map
+        # Geometry and mu come from the same finite-distance projection.
         map_coords = all_coordinates_from_map(helioprojective_map)
-        projective_coords = map_coords.transform_to(frames.Helioprojective)
-        radial_distance = np.sqrt(
-            projective_coords.Tx ** 2 +
-            projective_coords.Ty ** 2) / helioprojective_map.rsun_obs
-        mu = np.sqrt(1 - radial_distance.to_value() ** 2)
-        mu = mu.astype(np.float32)
-        transformed_parameters['mu'] = mu
 
         # Convert B and V
         b_r = transformed_parameters.pop('b_r')
@@ -166,7 +156,11 @@ class SpheromakTestSetGenerator(TestSetGenerator):
             u.rad), helioprojective_map.carrington_longitude.to_value(u.rad)
 
         pAng = -np.deg2rad(helioprojective_map.meta.get('CROTA2', 0))
-        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(
+            lon, lat, lonc, latc, pAng=pAng,
+            observer_distance=(helioprojective_map.dsun / helioprojective_map.rsun_meters).to_value(u.dimensionless_unscaled),
+        )
+        transformed_parameters['mu'] = a_matrix[..., 0, 2].astype(np.float32)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         # transform b vector to image frame

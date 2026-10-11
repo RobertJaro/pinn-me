@@ -21,8 +21,8 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from pytorch_lightning import LightningDataModule
 from scipy.signal import fftconvolve
-from sklearn.utils import shuffle
 from sunpy.coordinates import frames
+from pme.data.util import observer_ray_and_mu
 from sunpy.map import Map, all_coordinates_from_map, make_fitswcs_header
 from torch.utils.data import DataLoader, Dataset, RandomSampler, Sampler
 from tqdm import tqdm
@@ -48,10 +48,11 @@ class CombinedDataset(Dataset):
             sample_indices = [sample_indices]
         batch = {}
         for i, j in sample_indices:
-            instrument_id = self.datasets[i][j]['instrument_id']
+            sample = self.datasets[i][j]
+            instrument_id = sample['instrument_id']
             if instrument_id not in batch:
                 batch[instrument_id] = {}
-            for tensor_key, tensor_value in self.datasets[i][j].items():
+            for tensor_key, tensor_value in sample.items():
                 if tensor_key == 'instrument_id':
                     continue
                 if tensor_key not in batch[instrument_id]:
@@ -170,7 +171,7 @@ class BatchesDataset(Dataset):
 
     def __getitem__(self, idx):
         # lazy load data
-        data = {k: torch.tensor(v[idx * self.batch_size: (idx + 1) * self.batch_size], dtype=torch.float32) for k, v in
+        data = {k: torch.from_numpy(np.asarray(v[idx * self.batch_size: (idx + 1) * self.batch_size])) for k, v in
                 self.data.items()}
         data['lin_idx'] = torch.tensor([idx], dtype=torch.long)
         return data
@@ -193,10 +194,10 @@ class TensorsDataset(BatchesDataset):
 
     def __init__(self, tensors, work_directory, batch_size, filter_nans=True, shuffle=True, ds_name=None, **kwargs):
         # filter nan entries
-        nan_mask = np.any([np.any(np.isnan(t), axis=tuple(range(1, t.ndim))) for t in tensors.values()], axis=0)
-        if nan_mask.sum() > 0 and filter_nans:
-            # print(f'Filtering {nan_mask.sum()} nan entries')
-            tensors = {k: v[~nan_mask] for k, v in tensors.items()}
+        if filter_nans:
+            nan_mask = np.any([np.any(np.isnan(t), axis=tuple(range(1, t.ndim))) for t in tensors.values()], axis=0)
+            if nan_mask.any():
+                tensors = {k: v[~nan_mask] for k, v in tensors.items()}
 
         # shuffle data
         if shuffle:
@@ -212,7 +213,8 @@ class TensorsDataset(BatchesDataset):
             # microbatch size, which may be only a few hundred samples.
             chunk_size = min(self.STORAGE_CHUNK_SIZE, max(1, v.shape[0]))
             z = zarr.open_array(coords_zarr_path, mode='w', shape=v.shape,
-                                chunks=(chunk_size, *v.shape[1:]), dtype='float32')
+                                chunks=(chunk_size, *v.shape[1:]),
+                                dtype=v.dtype if np.issubdtype(v.dtype, np.integer) else 'float32')
             for i in range(0, v.shape[0], chunk_size):
                 z[i:i + chunk_size] = v[i:i + chunk_size]
             batches_paths[k] = coords_zarr_path
@@ -374,13 +376,13 @@ class GenericDataModule(LightningDataModule):
 
         train_dataset = BatchDataset(coords, mu, stokes_profile, batch_size=self.batch_size)
 
-        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=False,
                                  sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
         return data_loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
-                                 pin_memory=True, shuffle=False)
+                                 pin_memory=False, shuffle=False)
         return data_loader
 
 
@@ -481,10 +483,13 @@ class HinodeDataModule(GenericDataModule):
                                          rotation_angle=ref_header['CROTA2'] * u.rad)
         ref_map = Map(ref_data, map_header)
 
-        # compute mu
-        coords = all_coordinates_from_map(ref_map)
-        radial_distance = np.sqrt(coords.Tx ** 2 + coords.Ty ** 2) / ref_map.rsun_obs
-        mu = np.cos(radial_distance.to_value(u.dimensionless_unscaled) * np.pi / 2)
+        # Derive the viewing angle from the same finite-distance observer geometry.
+        coords = all_coordinates_from_map(ref_map).transform_to(frames.HeliographicCarrington)
+        _, mu = observer_ray_and_mu(
+            coords.lon.to_value(u.rad), coords.lat.to_value(u.rad),
+            ref_map.carrington_longitude.to_value(u.rad), ref_map.carrington_latitude.to_value(u.rad),
+            (ref_map.dsun / ref_map.rsun_meters).to_value(u.dimensionless_unscaled),
+        )
         mu = mu.astype(np.float32)
 
         # NAXIS1 = 112
@@ -674,13 +679,13 @@ class SHARPDataModule(LightningDataModule):
 
         train_dataset = BatchDataset(coords, stokes_profile, batch_size=self.batch_size)
 
-        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=True,
+        data_loader = DataLoader(train_dataset, batch_size=None, num_workers=self.num_workers, pin_memory=False,
                                  sampler=RandomSampler(train_dataset, replacement=True, num_samples=int(1e3)))
         return data_loader
 
     def val_dataloader(self):
         data_loader = DataLoader(self.valid_dataset, batch_size=None, num_workers=self.num_workers,
-                                 pin_memory=True, shuffle=False)
+                                 pin_memory=False, shuffle=False)
         return data_loader
 
 

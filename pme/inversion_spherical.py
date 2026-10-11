@@ -3,7 +3,7 @@ import copy
 import os
 
 import torch
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LambdaCallback
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
@@ -21,9 +21,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True,
                     help='config file for the simulation')
 parser.add_argument('--reload', action='store_true')
+parser.add_argument('--profile', action='store_true',
+                    help='Capture a short CPU/GPU and data-loading diagnostic window.')
 args, unknown_args = parser.parse_known_args()
 
 config = load_yaml_config(args.config, unknown_args)
+if 'seed' in config:
+    seed_everything(int(config['seed']), workers=True)
 
 base_path = config['base_path']
 os.makedirs(base_path, exist_ok=True)
@@ -54,6 +58,8 @@ if use_cached_data:
     )
 
 if use_cached_data:
+    num_workers = data_config.get('num_workers', 4)
+    data_module.num_workers = num_workers if num_workers is not None else os.cpu_count()
     # update batch settings
     if 'batch_size' in data_config:
         data_module.batch_size = data_config['batch_size']
@@ -70,6 +76,7 @@ check_val_every_n_epoch = training_config.pop('check_val_every_n_epoch', None)
 val_check_interval = training_config.pop('val_check_interval', None)
 num_sanity_val_steps = training_config.pop('num_sanity_val_steps', 0)
 epochs = training_config.pop('epochs', 50)
+max_steps = int(training_config.pop('max_steps', -1))
 instrument_config = copy.deepcopy(config.get('instrument', []))
 lambda_config = copy.deepcopy(config.get('lambda', {}))
 normalization_config = copy.deepcopy(config.get('normalization', {}))
@@ -85,6 +92,10 @@ if physics_config is not None:
         data_module.Rs_per_ds,
         physics_config.get('radius_range_Rs'),
     )
+
+if 'seed' in config:
+    # Data preparation consumes a cadence-dependent number of random draws.
+    seed_everything(int(config['seed']), workers=True)
 
 me_module = MESphericalModule(image_shape=data_module.image_shape, wavelength_config=data_module.wavelength_config,
                               model_config=model_config, normalization_config=normalization_config,
@@ -121,6 +132,9 @@ def save(*args, **kwargs):
         'instrument_config': instrument_config,
         'normalization_config': normalization_config,
         'stokes_loss_config': me_module.stokes_loss_config,
+        'continuum_normalization_mode': (
+            'per_profile' if me_module.stokes_loss.continuum_normalization else None
+        ),
         'stokes_lambda_config': me_module.stokes_lambda_config,
         'physics_config': me_module.physics_config,
         'spectral_response_files': data_module.spectral_response_files,
@@ -144,7 +158,14 @@ LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(n_gpus)))  # procs on t
 devices_per_node = max(1, LOCAL_WORLD_SIZE if n_gpus > 0 else 0)
 num_nodes = max(1, WORLD_SIZE // devices_per_node)
 
-trainer = Trainer(max_epochs=int(epochs),
+profiler = None
+diagnostic_callbacks = []
+if args.profile:
+    from pme.train.diagnostics import training_diagnostics
+    profiler, gpu_monitor = training_diagnostics(os.path.join(base_path, 'profiling'))
+    diagnostic_callbacks.append(gpu_monitor)
+
+trainer = Trainer(max_epochs=int(epochs), max_steps=max_steps,
                   logger=wandb_logger,
                   accelerator='gpu' if n_gpus >= 1 else None,
                   devices=devices_per_node if n_gpus > 0 else None,
@@ -155,6 +176,8 @@ trainer = Trainer(max_epochs=int(epochs),
                   val_check_interval=val_check_interval,
                   use_distributed_sampler=False,
                   gradient_clip_val=0.5,
-                  callbacks=[checkpoint_callback, save_callback])
+                  profiler=profiler,
+                  callbacks=[checkpoint_callback, save_callback, *diagnostic_callbacks])
 
 trainer.fit(me_module, data_module, ckpt_path='last')
+save()  # Also persist the final step when a step budget ends between validations.

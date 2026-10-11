@@ -9,6 +9,8 @@ from dateutil.parser import parse
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
 from sunpy.map import Map, all_coordinates_from_map
+from sunpy.coordinates import frames
+from pme.data.util import observer_ray_and_mu
 
 from pme.data.phi_util import load_fix_phi_header
 
@@ -70,10 +72,12 @@ def crop_off_limb(s_map: Map, limit=0.9):
 
 
 def detrend_mu(s_map, deg=3):
-    coords = all_coordinates_from_map(s_map)
-    radius = np.sqrt(coords.Tx ** 2 + coords.Ty ** 2) / s_map.rsun_obs
-    radius = radius.to_value(u.dimensionless_unscaled)
-    mu = np.sqrt(1 - radius ** 2)
+    coords = all_coordinates_from_map(s_map).transform_to(frames.HeliographicCarrington)
+    _, mu = observer_ray_and_mu(
+        coords.lon.to_value(u.rad), coords.lat.to_value(u.rad),
+        s_map.carrington_longitude.to_value(u.rad), s_map.carrington_latitude.to_value(u.rad),
+        observer_distance=(s_map.dsun / s_map.rsun_meters).to_value(u.dimensionless_unscaled),
+    )
 
     valid = (np.isnan(s_map.data) == False) & (mu >= 0)
     x = mu[valid].ravel()

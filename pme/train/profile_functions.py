@@ -57,9 +57,13 @@ class Faddeeva(nn.Module):
         polynomial = polyval(transformed, coefficients)
         return 2 * polynomial / denominator.square() + inv_sqrt_pi / denominator
 
-    def forward(self, z):
+    def forward(self, z, assume_upper_half_plane=False):
         if not torch.is_complex(z):
             z = torch.complex(z, torch.zeros_like(z))
+
+        if assume_upper_half_plane:
+            # Physical ME damping is nonnegative; avoid evaluating reflection.
+            return self._upper_half_plane(z)
 
         upper_half_plane = z.imag >= 0
         upper_z = torch.where(upper_half_plane, z, -z)
@@ -92,6 +96,25 @@ class Voigt(nn.Module):
     def __init__(self):
         super().__init__()
         self.faddeeva = Faddeeva()
+
+    def forward_pair_unit(self, x, gamma):
+        """Unit-width absorption/dispersion; caller guarantees gamma >= 0.
+
+        Broadcast the per-profile damping instead of allocating wavelength-sized
+        sigma/gamma arrays. The generic methods still support reflection.
+        """
+        value = self.faddeeva(x + 1j * gamma, assume_upper_half_plane=True)
+        return value.real / np.sqrt(np.pi), value.imag / np.sqrt(np.pi)
+
+    def forward_pair(self, x, sigma, gamma):
+        """Return absorption and dispersion from one shared Faddeeva graph.
+
+        Keep the original arithmetic for each component so existing Stokes
+        synthesis and checkpoint buffers retain their numerical conventions.
+        """
+        z = (x + 1j * gamma) / sigma
+        value = self.faddeeva(z)
+        return value.real / (sigma * np.sqrt(np.pi)), value.imag / sigma / np.sqrt(np.pi)
 
     def forward(self, x, sigma, gamma):
         ''' Compute the Voigt and anomalous dispersion profiles

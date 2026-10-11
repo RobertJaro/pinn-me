@@ -9,6 +9,8 @@ def donwload_ds(ds, dir, client, process=None):
     os.makedirs(dir, exist_ok=True)
     r = client.export(ds, protocol='fits', process=process)
     r.wait()
+    if r.status != 0:
+        raise RuntimeError(f'JSOC export failed for {ds}: {r.status}')
     download_result = r.download(dir)
     return download_result
 
@@ -36,6 +38,8 @@ def main():
     parser.add_argument('--t_end', type=str, required=False, default=None)
     parser.add_argument('--cadence', type=str, required=False, default='720s')
     parser.add_argument('--series', type=str, required=False, default='S_720s')
+    parser.add_argument('--segments', type=str, default=None,
+                        help='Comma-separated segments; default exports all segments')
     args = parser.parse_args()
 
     t_start = args.t_start
@@ -52,12 +56,8 @@ def main():
 
     download_series(download_dir=download_dir, email=email,
                     t_start=t_start, t_end=t_end,
-                    cadence=cadence, series=series)
+                    cadence=cadence, series=series, segments=args.segments)
 
 
 if __name__ == '__main__':
     main()
-
-
-def main():  # workaround for entry_points
-    pass

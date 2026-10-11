@@ -31,7 +31,7 @@ from pme.data.hmi_transmission import (
     resolve_hmi_transmission_profile,
 )
 from pme.data.hmi_time import load_hmi_date_obs_map
-from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix, observer_ray_and_mu
 from pme.instrument import hmi_wavelength_config
 from pme.loader.util import MultiprocessingWrapper
 from pme.train.data_loader import TensorsDataset, CombinedDataset, TimeStratifiedBatchSampler
@@ -114,14 +114,14 @@ def spherical_data_cache_signature(data_config):
 
 class SphericalDataModule(LightningDataModule):
 
-    CACHE_VERSION = 15
+    CACHE_VERSION = 17
 
     def __init__(self, train_configs, valid_config, work_directory,
                  seconds_per_dt=24 * 60 * 60, Rs_per_ds=1, gauss_per_dB=1e3,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
                  batch_size=65536, dataset_batch_size=4096,
-                 num_workers=None):
+                 num_workers=4, num_dataset_workers=None):
         super().__init__()
         self.cache_version = self.CACHE_VERSION
         self.spectral_response_files = {}
@@ -131,6 +131,7 @@ class SphericalDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.dataset_batch_size = dataset_batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
+        self.num_dataset_workers = num_dataset_workers if num_dataset_workers is not None else self.num_workers
         self._validate_batch_sizes()
 
         ref_time = parse(ref_time) if isinstance(ref_time, str) else ref_time
@@ -167,8 +168,8 @@ class SphericalDataModule(LightningDataModule):
             if 'first_n_samples' in train_config:  # apply subsampling for debugging
                 first_n_samples = train_config.pop('first_n_samples')
                 train_files = train_files[:first_n_samples]
-            with Pool(num_workers) as p:
-                print(f'Processing {len(train_files)} training files with {num_workers} workers...')
+            with Pool(self.num_dataset_workers) as p:
+                print(f'Processing {len(train_files)} training files with {self.num_dataset_workers} workers...')
                 ds_ids = [f'train_{i:02d}_{j:03d}' for j in range(len(train_files))]
                 ds_normalization = train_config.pop('stokes_normalization', stokes_normalization)
                 instrument_id = train_config.pop('instrument_id')
@@ -221,6 +222,9 @@ class SphericalDataModule(LightningDataModule):
         for ds in train_datasets:
             if ds.store_plot_image:
                 self.plot_dataset(ds)
+                for key in ('integrated_V', 'latitude', 'longitude', 'v_obs_los'):
+                    delattr(ds, key)
+                ds.store_plot_image = False
 
         # log times in hours
         times = [(d.time - ref_time).total_seconds() / 3600 for d in train_datasets]
@@ -588,46 +592,26 @@ class SphericalDataset(TensorsDataset):
         self.obs_lat = map_data['obs_lat']
         self.obs_lon = map_data['obs_lon']
         self.pAng = map_data['pAng']
+        self.observer_distance = map_data['observer_distance']
+        self.observer_velocity = np.asarray(map_data['observer_velocity'], dtype=np.float64)
+        self.detector_mapping = map_data.get('detector_mapping')
+        self.mu_limit = mu_limit
         self.time = map_data['time']
         self.wcs = map_data['wcs']
+        if tuple(self.wcs.wcs.ctype) != ('HPLN-TAN', 'HPLT-TAN'):
+            raise ValueError('Spherical pixel caches require helioprojective HPLN-TAN/HPLT-TAN WCS.')
 
-        # primary saved data
-        mu = map_data['mu']  # x, y
-        v_obs_los = map_data['v_obs_los']  # x, y
-        spherical_coords = map_data['spherical_coords']  # x, y, 3
-        pix = map_data['pix']
-        detector_coords = map_data.get('detector_coords')
-
-        # normalize stokes vector
-        stokes /= self.stokes_normalization
-
-        # normalize centered pixel coordinates per frame
-        pix /= max((pix.shape[0] - 1) / 2, (pix.shape[1] - 1) / 2, 1.0)
-
-        # remove off limb pixels
-        spherical_coords[(mu < mu_limit) | np.isnan(mu)] = np.nan
-        stokes[(mu < mu_limit) | np.isnan(mu)] = np.nan
-        pix[(mu < mu_limit) | np.isnan(mu)] = np.nan
-        if detector_coords is not None:
-            detector_coords[(mu < mu_limit) | np.isnan(mu)] = np.nan
-
-        # Match the finite-sample mask used by the tensor training store so the
-        # collocation box is not enlarged by coordinates whose Stokes target or
-        # auxiliary geometry is invalid.
-        physics_valid = np.isfinite(spherical_coords).all(axis=-1)
-        physics_valid &= np.isfinite(stokes).all(axis=(-2, -1))
-        physics_valid &= np.isfinite(mu)
-        physics_valid &= np.isfinite(v_obs_los)
-        physics_valid &= np.isfinite(pix).all(axis=-1)
-        if detector_coords is not None:
-            physics_valid &= np.isfinite(detector_coords).all(axis=-1)
-
-        # Store compact TRAIN-footprint metadata before the coordinates are
-        # flattened into the tensor store. The circular longitude bounds avoid
-        # turning a small field across +/-pi into an almost full-sphere box.
-        self.physics_bounds = _summarize_physics_coordinates(
-            spherical_coords[physics_valid]
-        )
+        # Full-frame geometry is temporary: keep one mask for filtering and bounds.
+        mu = map_data['mu']
+        spherical_coords = map_data['spherical_coords']
+        v_obs_los = map_data['v_obs_los']
+        stokes = np.asarray(stokes, dtype=np.float32) / self.stokes_normalization
+        valid = np.isfinite(stokes).all(axis=(-2, -1))
+        valid &= np.isfinite(spherical_coords).all(axis=-1)
+        valid &= np.isfinite(mu) & (mu >= mu_limit) & np.isfinite(v_obs_los)
+        stokes[~valid] = np.nan
+        spherical_coords = np.where(valid[..., None], spherical_coords, np.nan)
+        self.physics_bounds = _summarize_physics_coordinates(spherical_coords[valid])
         self.physics_bounds['normalized_time'] = float(self.normalized_time)
 
         # Plot Data Overview
@@ -649,73 +633,105 @@ class SphericalDataset(TensorsDataset):
                                             dtype=torch.float32).reshape(
             (1, -1))
 
-        tensors = {'stokes': stokes.reshape((-1, *stokes.shape[2:])),
-                   'spherical_coords': spherical_coords.reshape((-1, *spherical_coords.shape[2:])),
-                   'mu': mu.reshape((-1, 1)), 'v_obs_los': v_obs_los.reshape((-1, 1)),
-                   'pix': pix.reshape((-1, 2))
-                   }
-        if detector_coords is not None:
-            tensors['detector_coords'] = detector_coords.reshape((-1, 2))
+        # Filter once. Integer pixel IDs preserve the original image location
+        # after filtering/shuffling without storing any derived geometry.
+        filter_nans = kwargs.pop('filter_nans', True)
+        shuffle = kwargs.pop('shuffle', True)
+        flat_stokes = stokes.reshape((-1, *stokes.shape[2:]))
+        tensors = {'stokes': flat_stokes[valid.ravel()] if filter_nans else flat_stokes}
+        if filter_nans or shuffle:
+            count = int(np.prod(self.image_shape))
+            index_dtype = np.int32 if count <= np.iinfo(np.int32).max else np.int64
+            indices = np.arange(count, dtype=index_dtype)[:, None]
+            tensors['pixel_index'] = indices[valid.ravel()] if filter_nans else indices
+        super().__init__(tensors=tensors, work_directory=work_directory,
+                         filter_nans=False, shuffle=shuffle, **kwargs)
 
-        super().__init__(tensors=tensors, work_directory=work_directory, **kwargs)
-
-    def __getitem__(self, *args):
-        out = super().__getitem__(*args)
-
-        out['instrument_id'] = self.instrument_id  # add instrument id to output
-
-        # load spherical coordinates
-        spherical_coords = out.pop('spherical_coords')
-        co_lat = spherical_coords[..., 1]
-        lat = np.pi / 2 - co_lat
-        lon = spherical_coords[..., 2]
-
-        # convert to cartesian coordinates in models units
-        coords = spherical_to_cartesian(spherical_coords, torch)
-        coords /= self.Rs_per_ds  # normalize to solar radius
-
-        # append time
-        normalized_time = torch.ones((*coords.shape[:-1], 1), dtype=torch.float32) * self.normalized_time
-        coords = torch.cat([normalized_time, coords], -1)
-        out['coords'] = coords
-
-        # add lambda grid
-        wavelength_grid = torch.ones((*coords.shape[:-1], 1), dtype=torch.float32) * self.wavelength_grid
-        out['wavelength_grid'] = wavelength_grid
-
-        cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
-        out['cartesian_to_spherical_transform'] = torch.tensor(cartesian_to_spherical_transform, dtype=torch.float32)
-
-        img_to_rtp_transform = image_to_spherical_matrix(lon, lat,
-                                                         self.obs_lon.to_value(u.rad), self.obs_lat.to_value(u.rad),
-                                                         self.pAng.to_value(u.rad))
-        rtp_to_img_transform = np.transpose(img_to_rtp_transform, (0, 2, 1))
-        out['rtp_to_img_transform'] = torch.tensor(rtp_to_img_transform, dtype=torch.float32)
-
+    def __getitem__(self, idx):
+        out = super().__getitem__(idx)
+        out['instrument_id'] = self.instrument_id
+        pixel_index = out.pop('pixel_index', None)
+        if pixel_index is None:
+            pixel_index = np.arange(idx * self.batch_size, idx * self.batch_size + len(out['stokes']))
+        else:
+            pixel_index = pixel_index.numpy().reshape(-1)
+        geometry = spherical_geometry_from_pixels(
+            pixel_index, self.image_shape, self.wcs,
+            self.obs_lon.to_value(u.rad), self.obs_lat.to_value(u.rad),
+            self.pAng.to_value(u.rad), self.observer_distance, self.observer_velocity,
+            self.Rs_per_ds, self.normalized_time,
+        )
+        valid = np.isfinite(out['stokes'].numpy()).all(axis=(-2, -1))
+        valid &= np.isfinite(geometry['mu'][..., 0]) & (geometry['mu'][..., 0] >= self.mu_limit)
+        for key, value in geometry.items():
+            value[~valid] = np.nan
+            out[key] = torch.from_numpy(value.astype(np.float32))
+        out['wavelength_grid'] = self.wavelength_grid.expand(len(pixel_index), -1)
+        if self.detector_mapping is not None:
+            row, column = np.divmod(pixel_index, self.image_shape[1])
+            origin, step = self.detector_mapping
+            detector = np.stack([column, row], axis=-1) * step + origin
+            detector = np.clip(detector, 0, 1).astype(np.float32)
+            detector[~valid] = np.nan
+            out['detector_coords'] = torch.from_numpy(detector)
         return out
 
 
-def load_v_observer_LOS(s_map):
-    hgc_out = all_coordinates_from_map(s_map)
-    hpc_out = hgc_out.transform_to(frame=frames.Helioprojective)
+def spherical_geometry_from_pixels(pixel_index, image_shape, wcs, obs_lon, obs_lat,
+                                   p_angle, observer_distance, observer_velocity,
+                                   Rs_per_ds, normalized_time):
+    """Reconstruct a batch's surface geometry from pixel IDs and frame metadata.
 
-    # Components of the satellite velocity
-    v_sdo_r = s_map.meta['OBS_VR']  # positive is away from Sun
-    v_sdo_w = s_map.meta['OBS_VW']
-    v_sdo_n = s_map.meta['OBS_VN']
+    WCS supplies helioprojective angles. Analytic ray/sphere intersection avoids
+    constructing SunPy coordinate objects on every dataset read.
+    """
+    row, column = np.divmod(pixel_index, image_shape[1])
+    if tuple(wcs.wcs.ctype) != ('HPLN-TAN', 'HPLT-TAN'):
+        raise ValueError('Spherical pixel caches require helioprojective HPLN-TAN/HPLT-TAN WCS.')
+    tx, ty = wcs.pixel_to_world_values(column, row)
+    tx = np.asarray(tx) * u.Unit(wcs.wcs.cunit[0]).to(u.rad)
+    ty = np.asarray(ty) * u.Unit(wcs.wcs.cunit[1]).to(u.rad)
+    dx, dy, dz = np.cos(ty) * np.sin(tx), np.sin(ty), np.cos(ty) * np.cos(tx)
+    discriminant = 1 - observer_distance ** 2 * (dx ** 2 + dy ** 2)
+    with np.errstate(invalid='ignore'):
+        travel = observer_distance * dz - np.sqrt(discriminant)
+    surface = np.stack([travel * dx, travel * dy, observer_distance - travel * dz], axis=-1)
+    # Observer-centered west/north/radial axes expressed in Carrington Cartesian.
+    sl, cl, sb, cb = np.sin(obs_lon), np.cos(obs_lon), np.sin(obs_lat), np.cos(obs_lat)
+    observer_basis = np.array([[-sl, -sb * cl, cb * cl],
+                               [cl, -sb * sl, cb * sl], [0., cb, sb]])
+    xyz = surface @ observer_basis.T
+    lon = np.arctan2(xyz[..., 1], xyz[..., 0])
+    lat = np.arctan2(xyz[..., 2], np.hypot(xyz[..., 0], xyz[..., 1]))
+    spherical = np.stack([np.ones_like(lon), np.pi / 2 - lat, lon], axis=-1)
+    c2s = cartesian_to_spherical_matrix(spherical)
+    rtp2img = np.swapaxes(image_to_spherical_matrix(
+        lon, lat, obs_lon, obs_lat, p_angle, observer_distance=observer_distance,
+    ), -1, -2)
+    ray = np.stack([-dx, -dy, dz], axis=-1)
+    v_obs_los = ray @ observer_velocity
+    pixel_center = (np.asarray(image_shape) - 1) / 2
+    pix = (np.stack([row, column], axis=-1) - pixel_center) / max(*pixel_center, 1.)
+    coords = np.concatenate([np.full((*lon.shape, 1), normalized_time),
+                             spherical_to_cartesian(spherical) / Rs_per_ds], axis=-1)
+    return {'coords': coords, 'mu': rtp2img[..., 2, 0:1].copy(),
+            'cartesian_to_spherical_transform': c2s, 'rtp_to_img_transform': rtp2img,
+            'v_obs_los': v_obs_los[..., None], 'pix': pix}
 
-    theta_x = hpc_out.Tx.to_value(u.rad)
-    theta_y = hpc_out.Ty.to_value(u.rad)
 
-    theta_p = np.arctan2(np.sqrt(np.cos(theta_y) ** 2 * np.sin(theta_x) ** 2 + np.sin(theta_y) ** 2),
-                         np.cos(theta_y) * np.cos(theta_x))
-    psi = np.arctan2(-np.cos(theta_y) * np.sin(theta_x), np.sin(theta_y))
-
-    # satellite motion
-    v_obs_los = (v_sdo_w * np.sin(theta_p) * np.sin(psi) -
-                 v_sdo_n * np.sin(theta_p) * np.cos(psi) +
-                 v_sdo_r * np.cos(theta_p))
-    return v_obs_los
+def load_v_observer_LOS(s_map, ray=None):
+    if ray is None:
+        carrington = all_coordinates_from_map(s_map).transform_to(frames.HeliographicCarrington)
+        ray, _ = observer_ray_and_mu(
+            carrington.lon.to_value(u.rad), carrington.lat.to_value(u.rad),
+            s_map.carrington_longitude.to_value(u.rad), s_map.carrington_latitude.to_value(u.rad),
+            (s_map.dsun / s_map.rsun_meters).to_value(u.dimensionless_unscaled),
+        )
+    # Preserve the FITS OBS_VW/OBS_VN/OBS_VR sign convention: a receding
+    # observer contributes positive Doppler velocity at disk center.
+    return (-s_map.meta['OBS_VW'] * ray[..., 0]
+            + s_map.meta['OBS_VN'] * ray[..., 1]
+            + s_map.meta['OBS_VR'] * ray[..., 2])
 
 
 def load_phi_wavelength_config(data, header=None, num_wl=6):
@@ -813,9 +829,7 @@ class HMISphericalDataset(SphericalDataset):
         # The map frame and latent coordinate now share the same DATE-OBS time.
         # T_REC remains only the JSOC/calibration record identity.
         map_data['time'] = SphericalDataModule._hmi_date_obs(ref_file)
-        map_data['detector_coords'] = load_hmi_detector_coords(
-            source_map, output_shape=s_map.data.shape
-        )
+        map_data['detector_mapping'] = hmi_detector_mapping(source_map, output_shape=s_map.data.shape)
         stokes = load_stokes_data(data, resolution)
 
         super().__init__(stokes, map_data, wavelength_config, *args, **kwargs)
@@ -993,13 +1007,6 @@ def load_map_data(s_map):
     # convert world coordinates to cartesian
     map_coords = all_coordinates_from_map(s_map)
 
-    projective_coords = map_coords.transform_to(frames.Helioprojective)
-    radial_distance = np.sqrt(projective_coords.Tx ** 2 + projective_coords.Ty ** 2) / s_map.rsun_obs
-    radial_distance = radial_distance.to_value(u.dimensionless_unscaled)  # convert to dimensionless
-    with np.errstate(invalid='ignore'):  # ignore invalid values for off-limb
-        mu = np.sqrt(1 - radial_distance ** 2)
-        mu = mu.astype(np.float32)
-
     carrington_coords = map_coords.transform_to(frames.HeliographicCarrington)
     lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
     r = np.ones_like(lon)  # carrington_coords.radius
@@ -1014,46 +1021,47 @@ def load_map_data(s_map):
     obs_lat = s_map.carrington_latitude.to(u.rad)
     obs_lon = s_map.carrington_longitude.to(u.rad)
 
+    observer_distance = (s_map.dsun / s_map.rsun_meters).to_value(u.dimensionless_unscaled)
+    ray, mu = observer_ray_and_mu(
+        lon, lat, obs_lon.to_value(u.rad), obs_lat.to_value(u.rad), observer_distance,
+    )
+    mu = mu.astype(np.float32)
+
     # load observer velocity
-    v_obs_los = load_v_observer_LOS(s_map).astype(np.float32)
+    v_obs_los = load_v_observer_LOS(s_map, ray=ray).astype(np.float32)
 
-    # centered pixel coordinates; SphericalDataset applies the final scalar normalization
-    pix_coords = np.stack(np.mgrid[0:s_map.data.shape[0], 0:s_map.data.shape[1]], -1)  # y, x
-    pix_coords = pix_coords.astype(np.float32)
-    pix_coords[..., 0] -= (s_map.data.shape[0] - 1) / 2
-    pix_coords[..., 1] -= (s_map.data.shape[1] - 1) / 2
-
-    return {'mu': mu, 'v_obs_los': v_obs_los, 'pix': pix_coords,
+    return {'mu': mu, 'v_obs_los': v_obs_los,
             'obs_lat': obs_lat, 'obs_lon': obs_lon, 'pAng': pAng,
+            'observer_distance': observer_distance,
+            'observer_velocity': [-s_map.meta['OBS_VW'], s_map.meta['OBS_VN'], s_map.meta['OBS_VR']],
             'time': time, 'spherical_coords': spherical_coords, 'wcs': s_map.wcs,
             'instrument': s_map.instrument}
 
 
-def load_hmi_detector_coords(s_map, output_shape=None, ccd_size=4096):
-    """Map an HMI image or cutout onto normalized full-detector coordinates.
-
-    Full-disk arrays use their exact physical pixel indices. Cutouts must carry
-    the exact ``CCD_X0/Y0`` origins written by ``subframe_hmi``. Coordinates
-    are returned in the ``[x, y]`` order expected by grid sampling.
-    """
+def hmi_detector_mapping(s_map, output_shape=None, ccd_size=4096):
+    """Compact affine map from output [column,row] to normalized CCD coordinates."""
     if ccd_size < 2:
         raise ValueError('ccd_size must be at least 2.')
     height, width = s_map.data.shape[-2:]
     output_height, output_width = (height, width) if output_shape is None else output_shape[-2:]
     if height == ccd_size and width == ccd_size:
-        # A full HMI image is already indexed in physical detector pixels;
-        # CRPIX is the moving solar reference point, not the CCD center.
-        source_x = np.arange(width, dtype=np.float64)
-        source_y = np.arange(height, dtype=np.float64)
+        origin = np.zeros(2, dtype=np.float64)
     elif 'CCD_X0' in s_map.meta and 'CCD_Y0' in s_map.meta:
-        source_x = np.arange(width, dtype=np.float64) + float(s_map.meta['CCD_X0'])
-        source_y = np.arange(height, dtype=np.float64) + float(s_map.meta['CCD_Y0'])
+        origin = np.array([float(s_map.meta['CCD_X0']), float(s_map.meta['CCD_Y0'])])
     else:
-        raise ValueError(
-            'HMI cutouts require CCD_X0 and CCD_Y0 metadata. Regenerate the cutout with pme.data.subframe_hmi.'
-        )
-    detector_x = np.linspace(source_x[0], source_x[-1], output_width)
-    detector_y = np.linspace(source_y[0], source_y[-1], output_height)
-    x_grid, y_grid = np.meshgrid(detector_x, detector_y)
-    coords = np.stack([x_grid, y_grid], axis=-1) / (ccd_size - 1)
+        raise ValueError('HMI cutouts require CCD_X0 and CCD_Y0 metadata. '
+                         'Regenerate the cutout with pme.data.subframe_hmi.')
+    if not np.isfinite(origin).all():
+        raise ValueError('HMI detector origin must be finite.')
+    step = np.array([(width - 1) / max(output_width - 1, 1),
+                     (height - 1) / max(output_height - 1, 1)], dtype=np.float64)
+    return origin / (ccd_size - 1), step / (ccd_size - 1)
+
+
+def load_hmi_detector_coords(s_map, output_shape=None, ccd_size=4096):
+    """Map an HMI image or cutout to normalized full-detector [x,y] coordinates."""
+    shape = s_map.data.shape[-2:] if output_shape is None else output_shape[-2:]
+    origin, step = hmi_detector_mapping(s_map, output_shape, ccd_size)
+    row, column = np.indices(shape)
+    coords = np.stack([column, row], axis=-1) * step + origin
     return np.clip(coords, 0, 1).astype(np.float32)

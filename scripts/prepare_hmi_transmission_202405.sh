@@ -10,6 +10,7 @@ python3 -m pme.data.hmi_transmission \
 
 
 python3 -m pme.data.hmi_transmission \
-  --input "/glade/work/rjarolim/data/hmi_stokes/20240323_720s_subframe" \
+  --input "/glade/work/rjarolim/data/hmi_stokes/20240323_720s" \
   --email "robert.jarolim@uni-graz.at" \
-  --output "/glade/work/rjarolim/data/hmi_calibration/20240323"
+  --output "/glade/work/rjarolim/data/hmi_calibration/20240323" \
+  --overwrite

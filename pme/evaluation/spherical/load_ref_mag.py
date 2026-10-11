@@ -9,11 +9,9 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 from sunpy.map import Map, all_coordinates_from_map
 
-from pme.data.differential_rotation import carrington_rotation_velocity
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
-    image_to_spherical_matrix, spherical_to_cartesian_matrix
+    image_to_spherical_matrix
 from pme.evaluation.loader import SPINNMEOutput
-from pme.loader.spherical import load_v_observer_LOS
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -62,7 +60,8 @@ if __name__ == '__main__':
     if 'CROTA2' not in ref_map.meta:
         ref_map.meta['CROTA2'] = ref_map.meta['CROTA']
     pAng = -np.deg2rad(ref_map.meta['CROTA2'])
-    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng,
+        observer_distance=(ref_map.dsun / ref_map.rsun_meters).to_value(u.dimensionless_unscaled))
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
     parameter_cube = pinnme.load_parameters(coords=coords)

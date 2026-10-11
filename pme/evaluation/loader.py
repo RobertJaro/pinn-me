@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix
 from pme.model import jacobian
+from pme.train.stokes_loss import StokesLossModule
 from pme.train.spherical_synthesis import (
     correct_spherical_limb_effects,
     field_free_forward_parameters,
@@ -67,6 +68,7 @@ class PINNMEOutput:
         self.spectral_response_by_acquisition = state.get('spectral_response_by_acquisition', {})
         self.stokes_normalization_by_instrument = state.get('stokes_normalization_by_instrument', {})
         self.stokes_loss_config = state.get('stokes_loss_config', {'type': 'mse'})
+        self.continuum_normalization_mode = state.get('continuum_normalization_mode')
         self.stokes_lambda_config = state.get('stokes_lambda_config')
         self.physics_config = state.get('physics_config')
 
@@ -220,7 +222,7 @@ class SPINNMEOutput(PINNMEOutput):
         return value.reshape(-1, *trailing_shape)
 
     def synthesize_observation(self, coords, cartesian_to_spherical_transform,
-                               rtp_to_img_transform, v_obs_los, mu,
+                               rtp_to_img_transform, v_obs_los, mu=None,
                                wavelength_grid=None, instrument_id=None,
                                spectral_offsets=None, spectral_weights=None,
                                continuum_weights=None, detector_coords=None,
@@ -233,10 +235,19 @@ class SPINNMEOutput(PINNMEOutput):
         training. HMI response maps are sampled per detector pixel and per batch,
         so a full-disk evaluation does not materialize the dense response cube.
         Wavelengths and response offsets are in meters; velocities are in m/s.
+        mu is derived from rtp_to_img_transform. If supplied, it must agree with
+        that projection; omit it to use the geometry directly.
         """
         instrument_id, forward_model = self._instrument(instrument_id)
         if batch_size < 1:
             raise ValueError('batch_size must be positive.')
+        if denormalize_stokes and self.continuum_normalization_mode in ('target_only', 'per_profile'):
+            raise ValueError(
+                'Continuum-normalized profiles cannot be restored to absolute '
+                'intensities using the instrument scalar alone. Evaluate with '
+                'denormalize_stokes=False and multiply by the observed per-pixel continuum estimate '
+                'in the desired intensity units.'
+            )
         if denormalize_stokes and instrument_id not in self.stokes_normalization_by_instrument:
             raise KeyError(
                 f'No saved Stokes normalization for {instrument_id!r}; this is likely an older inversion artifact.'
@@ -251,7 +262,13 @@ class SPINNMEOutput(PINNMEOutput):
                                 'cartesian_to_spherical_transform')
         rtp2img = self._flat_tensor(rtp_to_img_transform, (3, 3), 'rtp_to_img_transform')
         v_obs = self._flat_tensor(v_obs_los, (1,), 'v_obs_los')
-        mu = self._flat_tensor(mu, (1,), 'mu')
+        projected_mu = rtp2img[..., 2, 0:1]
+        if mu is not None:
+            supplied_mu = self._flat_tensor(mu, (1,), 'mu')
+            if supplied_mu.shape != projected_mu.shape or not torch.allclose(
+                    supplied_mu, projected_mu, atol=2e-6, rtol=2e-6, equal_nan=True):
+                raise ValueError('mu must match the radial-to-LOS projection in rtp_to_img_transform.')
+        mu = projected_mu
         for name, value in (('cartesian_to_spherical_transform', c2s),
                             ('rtp_to_img_transform', rtp2img), ('v_obs_los', v_obs), ('mu', mu)):
             if value.shape[0] != n_points:
@@ -381,6 +398,9 @@ class SPINNMEOutput(PINNMEOutput):
                     )
                     stokes = artifact_correction['stokes_corr']
 
+            if self.continuum_normalization_mode == 'per_profile':
+                stokes = StokesLossModule(**self.stokes_loss_config).normalize_profile(stokes)
+
             append('_index', index)
             for key, value in raw.items():
                 if value is not None:
@@ -442,11 +462,13 @@ class SPINNMEOutput(PINNMEOutput):
         img_to_rtp = image_to_spherical_matrix(
             spherical_coords[..., 2], latitude, map_data['obs_lon'].to_value(u.rad),
             map_data['obs_lat'].to_value(u.rad), map_data['pAng'].to_value(u.rad),
+            observer_distance=map_data['observer_distance'],
         )
         rtp2img = np.swapaxes(img_to_rtp, -1, -2).astype(np.float32)
         detector_coords = load_hmi_detector_coords(source_map)
-        pix = map_data['pix'].astype(np.float32)
-        pix /= max((pix.shape[0] - 1) / 2, (pix.shape[1] - 1) / 2, 1.0)
+        center = (np.asarray(source_map.data.shape) - 1) / 2
+        pix = np.moveaxis(np.indices(source_map.data.shape), 0, -1).astype(np.float32)
+        pix = (pix - center) / max(*center, 1.)
         pix[invalid] = np.nan
 
         if spectral_response_file is None:

@@ -8,12 +8,13 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize, SymLogNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
-from sunpy.map import Map, all_coordinates_from_map
+from sunpy.map import all_coordinates_from_map
 
 from pme.data.differential_rotation import carrington_rotation_velocity
+from pme.data.hmi_time import load_hmi_date_obs_map
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
     image_to_spherical_matrix, spherical_to_cartesian_matrix
-from pme.evaluation.loader import PINNMEOutput, SPINNMEOutput
+from pme.evaluation.loader import SPINNMEOutput
 from pme.loader.spherical import load_v_observer_LOS
 
 if __name__ == '__main__':
@@ -38,7 +39,7 @@ if __name__ == '__main__':
     pinnme = SPINNMEOutput(in_path)
 
     # load reference maps
-    ref_map = Map(args.ref_map_fld)
+    ref_map = load_hmi_date_obs_map(args.ref_map_fld)
 
     # convert HPC min/max to world pixel coordinates
     if args.hpc_range is not None:
@@ -64,7 +65,8 @@ if __name__ == '__main__':
 
     latc, lonc = np.deg2rad(ref_map.meta['CRLT_OBS']), np.deg2rad(ref_map.meta['CRLN_OBS'])
     pAng = -np.deg2rad(ref_map.meta['CROTA2'])
-    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+    a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng,
+        observer_distance=(ref_map.dsun / ref_map.rsun_meters).to_value(u.dimensionless_unscaled))
     rtp_to_img_transform = np.linalg.inv(a_matrix)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
@@ -87,11 +89,11 @@ if __name__ == '__main__':
 
     ########################################################################################################################
     # load reference map
-    fld_ref = Map(args.ref_map_fld).reproject_to(ref_map.wcs).data
-    inc_ref = Map(args.ref_map_inc).reproject_to(ref_map.wcs).data
-    azi_ref = Map(args.ref_map_azi).reproject_to(ref_map.wcs).data
-    amb_ref = Map(args.ref_map_disambig).reproject_to(ref_map.wcs).data
-    vlos_ref = Map(args.ref_map_vlos_mag).reproject_to(ref_map.wcs).data
+    fld_ref = load_hmi_date_obs_map(args.ref_map_fld).reproject_to(ref_map.wcs).data
+    inc_ref = load_hmi_date_obs_map(args.ref_map_inc).reproject_to(ref_map.wcs).data
+    azi_ref = load_hmi_date_obs_map(args.ref_map_azi).reproject_to(ref_map.wcs).data
+    amb_ref = load_hmi_date_obs_map(args.ref_map_disambig).reproject_to(ref_map.wcs, order='nearest-neighbor').data
+    vlos_ref = load_hmi_date_obs_map(args.ref_map_vlos_mag).reproject_to(ref_map.wcs).data
     vlos_ref = vlos_ref / 100  # convert cm/s to m/s
 
     # correct for observer LOS

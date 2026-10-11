@@ -127,24 +127,22 @@ class SphericalTestSetGenerator(TestSetGenerator):
         dummy_carrington = np.zeros_like(b_r)
         carrington_map = Map(dummy_carrington, carrington_header)
         helioprojective_map = carrington_map.reproject_to(helioprojective_header)
-        # Compute mu for the helioprojective map
-        helioprojective_coords = all_coordinates_from_map(helioprojective_map)
-        helioprojective_coords = helioprojective_coords.transform_to(frames.Helioprojective)
-        radial_distance = np.sqrt(
-            helioprojective_coords.Tx ** 2 + helioprojective_coords.Ty ** 2) / helioprojective_map.rsun_obs
-        mu = np.sqrt(1 - radial_distance ** 2)
-        mu = mu.astype(np.float32)
-        transformed_parameters['mu'] = mu
+        # Geometry and mu come from the same finite-distance projection.
+        map_coords = all_coordinates_from_map(helioprojective_map)
 
         # Transform vector quantities -- B, V -- to image coordinates
         # create transformation matrix
-        carrington_coords = helioprojective_coords.transform_to(frames.HeliographicCarrington)
+        carrington_coords = map_coords.transform_to(frames.HeliographicCarrington)
         lat, lon = carrington_coords.lat.to_value(u.rad), carrington_coords.lon.to_value(u.rad)
         latc, lonc = helioprojective_map.carrington_latitude.to_value(
             u.rad), helioprojective_map.carrington_longitude.to_value(u.rad)
 
         pAng = -np.deg2rad(helioprojective_map.meta.get('CROTA2', 0))
-        a_matrix = image_to_spherical_matrix(lon, lat, lonc, latc, pAng=pAng)
+        a_matrix = image_to_spherical_matrix(
+            lon, lat, lonc, latc, pAng=pAng,
+            observer_distance=(helioprojective_map.dsun / helioprojective_map.rsun_meters).to_value(u.dimensionless_unscaled),
+        )
+        transformed_parameters['mu'] = a_matrix[..., 0, 2].astype(np.float32)
         rtp_to_img_transform = np.linalg.inv(a_matrix)
 
         # stack b vector

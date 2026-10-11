@@ -3,7 +3,7 @@ import torch
 from astropy import units as u
 
 def spherical_to_cartesian_matrix(c):
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    t, p = c[..., 1], c[..., 2]
     sin = np.sin
     cos = np.cos
     #
@@ -16,7 +16,7 @@ def spherical_to_cartesian_matrix(c):
 
 
 def cartesian_to_spherical_matrix(c, f=np):
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    t, p = c[..., 1], c[..., 2]
     sin = f.sin
     cos = f.cos
     #
@@ -29,7 +29,7 @@ def cartesian_to_spherical_matrix(c, f=np):
 
 def vector_spherical_to_cartesian(v, c, f=np):
     vr, vt, vp = v[..., 0], v[..., 1], v[..., 2]
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    t, p = c[..., 1], c[..., 2]
     sin = f.sin
     cos = f.cos
     #
@@ -42,7 +42,7 @@ def vector_spherical_to_cartesian(v, c, f=np):
 
 def vector_cartesian_to_spherical(v, c, f=np):
     vx, vy, vz = v[..., 0], v[..., 1], v[..., 2]
-    r, t, p = c[..., 0], c[..., 1], c[..., 2]
+    t, p = c[..., 1], c[..., 2]
     sin = f.sin
     cos = f.cos
     #
@@ -80,7 +80,48 @@ def cartesian_to_spherical(v, f=np, eps=1e-8):
     t = f.arccos(arg)
     return f.stack([r, t, p], -1)
 
-def image_to_spherical_matrix(lon, lat, lonc, latc, pAng):
+def observer_ray_and_mu(lon, lat, lonc, latc, observer_distance, radius=1.0):
+    """Return the surface-to-observer unit ray and its dot product with radial.
+
+    Angles are radians; distance and radius must use the same units. Image
+    axes are solar west, solar north, and Sun-center to observer, respectively.
+    """
+    distance = np.asarray(observer_distance)
+    radius = np.asarray(radius)
+    if np.any(~np.isfinite(distance)) or np.any(distance <= radius):
+        raise ValueError('observer_distance must be finite and outside the surface radius.')
+    # Avoid allocating a full 3x3 transform for every full-disk pixel.
+    delta_lon = np.asarray(lon) - lonc
+    radial = np.stack([
+        np.cos(lat) * np.sin(delta_lon),
+        np.sin(lat) * np.cos(latc) - np.cos(lat) * np.sin(latc) * np.cos(delta_lon),
+        np.sin(lat) * np.sin(latc) + np.cos(lat) * np.cos(latc) * np.cos(delta_lon),
+    ], axis=-1)
+    ray = -radius[..., None] * radial
+    ray[..., 2] += distance
+    ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
+    mu = np.clip(np.sum(radial * ray, axis=-1), -1., 1.)
+    return ray, mu
+
+
+def image_to_spherical_matrix(lon, lat, lonc, latc, pAng, observer_distance=None, radius=1.0):
+    """Map image vectors to local (radial, colatitude, longitude) components.
+
+    With observer_distance, use the finite-distance LOS and helioprojective
+    tangent axes, followed by the image roll. The radial/LOS element [0, 2]
+    is mu. Omitting distance retains the legacy parallel-ray transformation.
+    """
+    if observer_distance is not None:
+        ray, _ = observer_ray_and_mu(lon, lat, lonc, latc, observer_distance, radius)
+        # Tangent along increasing helioprojective longitude, then latitude.
+        image_x = np.stack([ray[..., 2], np.zeros_like(ray[..., 0]), -ray[..., 0]], axis=-1)
+        image_x /= np.linalg.norm(image_x, axis=-1, keepdims=True)
+        image_y = np.cross(ray, image_x)
+        cos_p, sin_p = np.cos(pAng), np.sin(pAng)
+        rolled_x = cos_p * image_x - sin_p * image_y
+        rolled_y = sin_p * image_x + cos_p * image_y
+        basis = np.stack([rolled_x, rolled_y, ray], axis=-1)
+        return image_to_spherical_matrix(lon, lat, lonc, latc, 0) @ basis
     sin = np.sin
     cos = np.cos
 

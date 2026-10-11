@@ -9,20 +9,28 @@ from torch import nn
 class StokesLossModule(nn.Module):
     """Apply the Stokes transform followed by an elementwise squared residual.
 
-    Prediction and target remain in the loader-scaled intensity units. The supplied
-    normalization may transform individual Stokes components (for example asinh on
-    Q/U/V), but this module does not estimate or divide by a local continuum.
+    Optionally divide each Stokes vector by its own 90th-percentile I.
+    Predictions must include the instrument response before this transform.
+    Apply component scaling (linear or asinh) after continuum normalization.
     """
 
-    def __init__(self, type='mse'):
+    def __init__(self, type='mse', continuum_normalization=False, continuum_quantile=0.9):
         super().__init__()
         if type != 'mse':
             raise ValueError(f'Unknown Stokes loss type {type!r}; expected "mse".')
         self.loss_type = 'mse'
+        self.continuum_normalization = continuum_normalization
+        if not 0 < continuum_quantile <= 1:
+            raise ValueError('continuum_quantile must be in (0, 1].')
+        self.continuum_quantile = float(continuum_quantile)
 
     def configuration(self):
         """Return a canonical, checkpoint-safe description of the objective."""
-        return {'type': self.loss_type}
+        config = {'type': self.loss_type}
+        if self.continuum_normalization:
+            config['continuum_normalization'] = True
+            config['continuum_quantile'] = self.continuum_quantile
+        return config
 
     @staticmethod
     def _validate_profiles(prediction, target):
@@ -45,13 +53,42 @@ class StokesLossModule(nn.Module):
         reduction instead of being silently treated as missing data.
         """
         self._validate_profiles(target, target)
-        return torch.isfinite(target).all(dim=(-2, -1))
+        valid = torch.isfinite(target).all(dim=(-2, -1))
+        if self.continuum_normalization:
+            continuum = self._continuum(target).squeeze(-1).squeeze(-1)
+            valid = valid & torch.isfinite(continuum) & (continuum > 0)
+        return valid
+
+    def _continuum(self, target):
+        intensity = target[..., 0:1, :]
+        # torch.quantile does not support float16/bfloat16 under mixed precision.
+        if intensity.dtype in (torch.float16, torch.bfloat16):
+            intensity = intensity.float()
+        return torch.quantile(intensity, self.continuum_quantile, dim=-1, keepdim=True)
+
+    def normalize_profile(self, stokes):
+        """Normalize all four components by this profile's own continuum proxy.
+
+        Keep the synthetic denominator in the autograd graph. Invalid predictions
+        remain non-finite rather than being masked out of the objective.
+        """
+        continuum = self._continuum(stokes)
+        continuum = continuum.masked_fill(
+            ~torch.isfinite(continuum) | (continuum <= 0), torch.nan,
+        )
+        return stokes / continuum
+
+    def transform_profiles(self, prediction, target, normalization):
+        """Return the common training/validation representation of both profiles."""
+        self._validate_profiles(prediction, target)
+        if self.continuum_normalization:
+            prediction = self.normalize_profile(prediction)
+            target = self.normalize_profile(target)
+        return normalization(prediction), normalization(target)
 
     def elementwise(self, prediction, target, normalization):
         """Return an unreduced loss with the profile input shape."""
-        self._validate_profiles(prediction, target)
-        prediction = normalization(prediction)
-        target = normalization(target)
+        prediction, target = self.transform_profiles(prediction, target, normalization)
         return (prediction - target).square()
 
     def forward(self, prediction, target, normalization):

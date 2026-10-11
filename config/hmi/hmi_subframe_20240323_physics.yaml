@@ -35,11 +35,10 @@ model:
     type: fourier
     num_frequencies: [16, 64, 64, 64]
     max_frequencies: [50, 2048, 2048, 2048]
-  # Apply sinh independently to each B component (0.1 model units = 100 G near zero).
-  b_sinh_scale: 0.1
-  # Apply sinh independently to each velocity component (about 1.93 km/s per
-  # latent unit near zero for Rs_per_ds=1 and dt=10 h).
-  v_sinh_scale: 0.1
+  # Apply sinh independently to each B component (scale in G).
+  b_sinh_scale: 10
+  # Apply sinh independently to each velocity component (scale in km/s).
+  v_sinh_scale: 1
 
 training:
   epochs: 5000
@@ -64,9 +63,9 @@ physics:
   radius_range_Rs: [1.0, 1.01]
   constraints:
     divergence: 1.0e-4
-    potential: 0.0
+    potential: 1.0e-4
     induction: 1.0e-4
-    force_free: 1.0e-4
+    force_free: 0.0
 
 lambda:
   I: 1.0

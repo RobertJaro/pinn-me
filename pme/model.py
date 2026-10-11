@@ -208,7 +208,8 @@ class MEModel(MLPModel):
 
 class _BaseMESphericalModel:
 
-    def __init__(self, vector_potential=False, b_sinh_scale=None, v_sinh_scale=None):
+    def __init__(self, vector_potential=False, b_sinh_scale=None, v_sinh_scale=None,
+                 source_function='independent'):
         if b_sinh_scale is not None and b_sinh_scale <= 0:
             raise ValueError('b_sinh_scale must be positive or None.')
         if v_sinh_scale is not None and v_sinh_scale <= 0:
@@ -218,6 +219,9 @@ class _BaseMESphericalModel:
                 'b_sinh_scale cannot be used with vector_potential because a nonlinear '
                 'post-curl mapping would no longer guarantee a divergence-free field.'
             )
+        if source_function not in ('independent', 'ratio'):
+            raise ValueError('source_function must be independent or ratio.')
+        self.source_function = source_function
         self.vector_potential = vector_potential
         self.b_sinh_scale = b_sinh_scale
         self.v_sinh_scale = v_sinh_scale
@@ -233,9 +237,11 @@ class _BaseMESphericalModel:
         return torch.sinh(v) * float(self.v_sinh_scale)
 
     def _decode_output(self, params, x):
-        if params.shape[-1] != 11:
+        ratio_source = getattr(self, 'source_function', 'independent') == 'ratio'
+        n_outputs = 10 if ratio_source else 11
+        if params.shape[-1] != n_outputs:
             raise RuntimeError(
-                'Expected 11 spherical atmosphere outputs, '
+                f'Expected {n_outputs} spherical atmosphere outputs, '
                 f'received {params.shape[-1]}. '
                 'Legacy scale-channel checkpoints are incompatible with the linear parameterization.'
             )
@@ -256,19 +262,22 @@ class _BaseMESphericalModel:
             b_x, b_y, b_z = b.split(1, dim=-1)
             a_jac_matrix = None
 
-        v = self._scale_velocity_vector(params[..., 7:10])
+        b1 = torch.sigmoid(params[..., 5:6] if ratio_source else params[..., 6:7])
+        b0 = 1 - b1 if ratio_source else torch.sigmoid(params[..., 5:6])
+        velocity_start = 6 if ratio_source else 7
+        v = self._scale_velocity_vector(params[..., velocity_start:velocity_start + 3])
         output = {
             'b_x': b_x,
             'b_y': b_y,
             'b_z': b_z,
             'vmac': F.softplus(params[..., 3:4]) * 1000.0,
             'damping': torch.sigmoid(params[..., 4:5]),
-            'b0': torch.sigmoid(params[..., 5:6]),
-            'b1': torch.sigmoid(params[..., 6:7]),
+            'b0': b0,
+            'b1': b1,
             'v_x': v[..., 0:1],
             'v_y': v[..., 1:2],
             'v_z': v[..., 2:3],
-            'kl': 1e-3 + F.softplus(params[..., 10:11]),
+            'kl': 1e-3 + F.softplus(params[..., -1:]),
             'a_jac_matrix': a_jac_matrix,
         }
         return output
@@ -277,12 +286,13 @@ class _BaseMESphericalModel:
 class MESphericalModel(MLPModel, _BaseMESphericalModel):
 
     def __init__(self, vector_potential=False, b_sinh_scale=None,
-                 v_sinh_scale=None, **kwargs):
+                 v_sinh_scale=None, source_function='independent', **kwargs):
         _BaseMESphericalModel.__init__(
             self, vector_potential=vector_potential,
             b_sinh_scale=b_sinh_scale, v_sinh_scale=v_sinh_scale,
+            source_function=source_function,
         )
-        MLPModel.__init__(self, in_dim=4, out_dim=11, **kwargs)
+        MLPModel.__init__(self, in_dim=4, out_dim=10 if source_function == 'ratio' else 11, **kwargs)
 
     def forward(self, x):
         return self._decode_output(MLPModel.forward(self, x), x)
@@ -291,12 +301,13 @@ class MESphericalModel(MLPModel, _BaseMESphericalModel):
 class MESphericalSirenModel(SirenModel, _BaseMESphericalModel):
 
     def __init__(self, vector_potential=False, b_sinh_scale=None,
-                 v_sinh_scale=None, **kwargs):
+                 v_sinh_scale=None, source_function='independent', **kwargs):
         _BaseMESphericalModel.__init__(
             self, vector_potential=vector_potential,
             b_sinh_scale=b_sinh_scale, v_sinh_scale=v_sinh_scale,
+            source_function=source_function,
         )
-        SirenModel.__init__(self, in_dim=4, out_dim=11, **kwargs)
+        SirenModel.__init__(self, in_dim=4, out_dim=10 if source_function == 'ratio' else 11, **kwargs)
 
     def forward(self, x):
         return self._decode_output(SirenModel.forward(self, x), x)
@@ -312,8 +323,20 @@ def jacobian(output, coords):
 
 class NormalizationModule(nn.Module):
 
-    def __init__(self, asinh_alphas=None):
+    def __init__(self, asinh_alphas=None, stokes_scales=None):
         super().__init__()
+
+        if stokes_scales is not None:
+            if asinh_alphas is not None:
+                raise ValueError('Use either stokes_scales or asinh_alphas, not both.')
+            if isinstance(stokes_scales, dict):
+                stokes_scales = [stokes_scales[k] for k in ('I', 'Q', 'U', 'V')]
+            stokes_scales = torch.as_tensor(stokes_scales, dtype=torch.float32)
+            if (stokes_scales.numel() != 4 or not torch.isfinite(stokes_scales).all()
+                    or not (stokes_scales > 0).all()):
+                raise ValueError('stokes_scales must contain four finite positive I/Q/U/V scales.')
+            stokes_scales = stokes_scales.reshape(4, 1)
+        self.register_buffer('stokes_scales', stokes_scales)
 
         if isinstance(asinh_alphas, dict):
             asinh_alphas = [asinh_alphas[k] for k in ('Q', 'U', 'V')]
@@ -330,6 +353,9 @@ class NormalizationModule(nn.Module):
         self.register_buffer('asinh_alphas', asinh_alphas)
 
     def forward(self, stokes):
+        # getattr also supports normalization modules restored from older artifacts.
+        if getattr(self, 'stokes_scales', None) is not None:
+            return stokes / self.stokes_scales
         stokes_i = stokes[..., 0:1, :]
         stokes_q = stokes[..., 1:2, :]
         stokes_u = stokes[..., 2:3, :]

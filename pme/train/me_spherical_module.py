@@ -30,6 +30,10 @@ from pme.train.physics_regularization import (
     split_stokes_and_physics_config,
 )
 from pme.train.soap import SOAP
+from pme.train.muon import MuonAdamW
+from pme.train.replay import StokesReplayBuffer
+from pme.train.metrics import TrainingMetricWindow
+from pme.train.numerics import write_numerical_report
 from pme.train.spherical_synthesis import (
     correct_spherical_limb_effects,
     field_free_forward_parameters,
@@ -50,10 +54,15 @@ class MESphericalModule(LightningModule):
                  stokes_loss_config=None,
                  physics_config=None, physics_domain=None,
                  time_shift_config=None,
-                 lambda_config=None):
+                 lambda_config=None, optimizer_config=None, replay_config=None, metric_log_interval=50,
+                 compile_config=None):
         super().__init__()
         lr_params = lr_params if lr_params is not None else {"start": 1e-3, "end": 1e-4, "iterations": 1e5}
 
+        if isinstance(metric_log_interval, bool) or not isinstance(metric_log_interval, int) or metric_log_interval < 1:
+            raise ValueError('metric_log_interval must be a positive integer.')
+        self.metric_log_interval = metric_log_interval
+        self._train_metrics = TrainingMetricWindow()
         self.image_shape = image_shape
 
         # init model
@@ -62,6 +71,19 @@ class MESphericalModule(LightningModule):
         # Legacy configurations may still contain the removed exponential
         # magnitude-scale switch. B/A and V now use direct linear outputs.
         model_config.pop('scale', None)
+        # Configuration scales are physical: gauss for B and km/s for velocity.
+        # Parameter models operate in the normalized dataset units.
+        if model_config.get('b_sinh_scale') is not None:
+            model_config['b_sinh_scale'] /= gauss_per_dB
+        if model_config.get('v_sinh_scale') is not None:
+            km_per_ds = Rs_per_ds * (1 * u.Rsun).to_value(u.km)
+            model_config['v_sinh_scale'] *= seconds_per_dt / km_per_ds
+        normalized_profiles = (stokes_loss_config or {}).get('continuum_normalization', False)
+        expected_source = 'ratio' if normalized_profiles else 'independent'
+        model_config.setdefault('source_function', expected_source)
+        if model_config['source_function'] != expected_source:
+            raise ValueError('Continuum-normalized fits require source_function=ratio; '
+                             'absolute-intensity fits require source_function=independent.')
         if model_type == 'mlp':
             self.parameter_model = MESphericalModel(**model_config)
         elif model_type == 'siren':
@@ -98,6 +120,19 @@ class MESphericalModule(LightningModule):
             if artifact_correction:
                 artifact_correction_models[instrument_id] = ArtifactCorrectionModule()
 
+        self.compile_config = dict(compile_config or {})
+        unknown = self.compile_config.keys() - {'me_solver', 'mode'}
+        if unknown:
+            raise ValueError(f'Unknown compile settings: {sorted(unknown)}')
+        enabled = self.compile_config.get('me_solver', False)
+        if not isinstance(enabled, bool):
+            raise ValueError('compile_config.me_solver must be a boolean.')
+        mode = self.compile_config.get('mode', 'default')
+        if mode not in ('default', 'reduce-overhead', 'max-autotune', 'max-autotune-no-cudagraphs'):
+            raise ValueError(f'Unknown compilation mode: {mode}')
+        for forward_model in forward_models.values():
+            forward_model._compile_solver_mode = mode if enabled else None
+
         self.forward_models = nn.ModuleDict(forward_models)
         self.velocity_correction_models = nn.ModuleDict(velocity_correction_models)
         self.limb_correction_models = nn.ModuleDict(limb_correction_models)
@@ -105,6 +140,9 @@ class MESphericalModule(LightningModule):
         self.hmi_instrument_ids = tuple(hmi_instrument_ids)
 
         self.lr_params = lr_params
+        self.optimizer_config = copy.deepcopy(optimizer_config or {'type': 'soap'})
+        self.optimizer_config.setdefault('type', 'soap')
+        self.replay_buffer = StokesReplayBuffer(**replay_config) if replay_config is not None else None
 
         self.validation_outputs = {}
         normalization_config = normalization_config if normalization_config is not None else {}
@@ -144,6 +182,7 @@ class MESphericalModule(LightningModule):
         # time shift config
         time_shift_config = {'scale': 0.0, 'iterations': 0.0} if time_shift_config is None else time_shift_config
         scale_value = time_shift_config['scale'] / seconds_per_dt
+        self._time_shift_enabled = scale_value > 0
         self.time_shift_scale = nn.Parameter(torch.tensor(scale_value, dtype=torch.float32), requires_grad=False)
         self.time_shift_scale_gamma = scale_value / time_shift_config['iterations'] if time_shift_config['iterations'] > 0 else 0.0
         #
@@ -218,6 +257,7 @@ class MESphericalModule(LightningModule):
                       list(self.velocity_correction_models.parameters()) +
                       list(self.limb_correction_models.parameters()) +
                       list(self.artifact_correction_models.parameters()))
+        parameters = [p for p in parameters if p.requires_grad]
         if isinstance(self.lr_params, dict):
             learning_rate = float(self.lr_params['start'])
             end_learning_rate = float(self.lr_params['end'])
@@ -231,7 +271,26 @@ class MESphericalModule(LightningModule):
         else:
             raise ValueError(f"Invalid lr_params: {self.lr_params}, must be dict or float/int")
 
-        optimizer = SOAP(parameters, lr=learning_rate, weight_decay=0.0)
+        if not np.isfinite(learning_rate) or learning_rate <= 0:
+            raise ValueError('Learning rates must be finite and positive.')
+        if isinstance(self.lr_params, dict) and not np.isfinite(end_learning_rate):
+            raise ValueError('Learning rates must be finite and positive.')
+        optimizer_config = copy.deepcopy(self.optimizer_config)
+        optimizer_type = optimizer_config.pop('type')
+        optimizer_config.setdefault('weight_decay', 0.0)
+        if optimizer_type == 'soap':
+            optimizer = SOAP(parameters, lr=learning_rate, **optimizer_config)
+        elif optimizer_type == 'muon':
+            # MLP Linear weights and SIREN SineLayer.linear weights only.
+            hidden_weights = [layer.weight for layer in self.parameter_model.hidden_layers.modules()
+                              if isinstance(layer, nn.Linear) and layer.weight.requires_grad]
+            if not hidden_weights:
+                raise ValueError('Muon requires at least one trainable hidden weight matrix.')
+            hidden_ids = {id(p) for p in hidden_weights}
+            auxiliary = [p for p in parameters if id(p) not in hidden_ids]
+            optimizer = MuonAdamW(hidden_weights, auxiliary, lr=learning_rate, **optimizer_config)
+        else:
+            raise ValueError(f'Unknown optimizer type: {optimizer_type!r}. Use soap or muon.')
         if not isinstance(self.lr_params, dict):
             return optimizer
 
@@ -251,6 +310,9 @@ class MESphericalModule(LightningModule):
 
     def training_step(self, batch, batch_nb):
         self._set_stokes_lambda_step(int(self.global_step))
+        replay_counts = None
+        if self.replay_buffer is not None:
+            batch, replay_counts = self.replay_buffer.mix(batch)
         instrument_ids = list(batch.keys())
 
         coords = torch.cat([batch[k]['coords'] for k in instrument_ids])
@@ -261,8 +323,8 @@ class MESphericalModule(LightningModule):
         ds_lengths = {k: batch[k]['coords'].shape[0] for k in instrument_ids}
 
         # apply random shift to time coordinate
-        if self.time_shift_scale.item() > 0:
-            coords = random_time_shift_coords(coords, self.seconds_per_dt, scale=self.time_shift_scale.item())
+        if self._time_shift_enabled:
+            coords = random_time_shift_coords(coords, self.seconds_per_dt, scale=self.time_shift_scale)
 
         # forward step
         # Physics collocation points manage their own derivative graph below.
@@ -282,7 +344,7 @@ class MESphericalModule(LightningModule):
         stokes_pred_profiles = []
         stokes_true_profiles = []
         for instrument_id, n_samples in ds_lengths.items():
-            ds_mu = batch[instrument_id]['mu']
+            ds_mu = batch[instrument_id]['rtp_to_img_transform'][..., 2, 0:1]
             ds_wavelength_grid = batch[instrument_id]['wavelength_grid']
             ds_stokes_true = batch[instrument_id]['stokes']
             ds_spectral_response = self._get_spectral_response(batch[instrument_id], instrument_id)
@@ -347,7 +409,24 @@ class MESphericalModule(LightningModule):
         )
         total_loss = stokes_total + physics.total
         logging_loss.update(physics.metrics)
-        assert torch.isfinite(total_loss), "Encountered non-finite total loss."
+        if not torch.isfinite(total_loss):
+            detail = write_numerical_report(self, 'forward', {
+                'batch': batch, 'decoded': output, 'forward_parameters': forward_params,
+                'predicted_stokes': stokes_pred_profiles, 'observed_stokes': stokes_true_profiles,
+                'predicted_continuum': self.stokes_loss._continuum(stokes_pred_profiles.detach()),
+                'observed_continuum': self.stokes_loss._continuum(stokes_true_profiles.detach()),
+                'elementwise_loss': stokes_loss, 'stokes_total': stokes_total,
+                'physics_total': physics.total, 'total_loss': total_loss,
+            })
+            raise RuntimeError(f'Encountered non-finite total loss. {detail}')
+        if self.replay_buffer is not None:
+            # Reuse the transformed residuals; priorities use equal I/Q/U/V
+            # weights after normalization, independently of lambda schedules.
+            per_profile = stokes_loss.detach().mean(dim=(-2, -1))
+            scores = dict(zip(instrument_ids, per_profile.split(list(ds_lengths.values()))))
+            self.replay_buffer.update(batch, replay_counts, scores)
+            visits = torch.cat([replay_counts[key] for key in instrument_ids])
+            logging_loss['replay_fraction'] = (visits > 0).float().mean()
         logging_loss['loss'] = total_loss
         return logging_loss
 
@@ -376,38 +455,56 @@ class MESphericalModule(LightningModule):
             return torch.maximum(candidate, end)
         return value
 
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
+        algorithm = getattr(gradient_clip_algorithm, 'value', gradient_clip_algorithm) or 'norm'
+        if gradient_clip_val is None or gradient_clip_val <= 0 or algorithm != 'norm':
+            return super().configure_gradient_clipping(optimizer, gradient_clip_val, gradient_clip_algorithm)
+        parameters = [parameter for group in optimizer.param_groups for parameter in group['params']
+                      if parameter.grad is not None]
+        try:
+            # Reuse the norm calculation already required for clipping. Stop
+            # before NaN/Inf gradients can enter SOAP/Adam moments or weights.
+            torch.nn.utils.clip_grad_norm_(parameters, gradient_clip_val, error_if_nonfinite=True)
+        except RuntimeError as error:
+            if 'non-finite' not in str(error):
+                raise
+            detail = write_numerical_report(self, 'backward')
+            raise RuntimeError(f'Non-finite gradient norm; optimizer update aborted. {detail}') from error
+
     @torch.no_grad()
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
-        learning_rate = self.optimizers().param_groups[0]['lr']
-        self.log('Learning Rate', learning_rate)
-
-        # update time shift scale
-        new_scale = self.time_shift_scale - self.time_shift_scale_gamma
-        if new_scale <= 0.0:
-            new_scale = 0.0
-        self.time_shift_scale.copy_(new_scale)
-        self.log('time_shift_scale', self.time_shift_scale.item() * self.seconds_per_dt)
-
-        # Physics partitions and time-stratified Stokes batches differ by rank.
-        # Synchronizing here reports the actual DDP objective rather than rank
-        # zero's current frame/partition.
-        lambda_metrics = {
-            key: value.mean() for key, value in outputs.items()
-            if key.startswith('lambda.')
+        # Update augmentation each batch without reading a device scalar.
+        if self._time_shift_enabled:
+            self.time_shift_scale.sub_(self.time_shift_scale_gamma).clamp_(min=0)
+        metrics = {
+            key if key.startswith('lambda.') else f'train.{key}': value
+            for key, value in outputs.items()
         }
-        train_metrics = {
-            f'train.{key}': value.mean() for key, value in outputs.items()
-            if not key.startswith('lambda.')
-        }
-        if lambda_metrics:
-            self.log_dict(lambda_metrics, sync_dist=True)
-        self.log_dict(train_metrics, sync_dist=True)
+        if self._train_metrics.keys is not None and tuple(sorted(metrics)) != self._train_metrics.keys:
+            # A physics schedule can activate/deactivate terms mid-window.
+            self._flush_train_metrics()
+        self._train_metrics.add(metrics)
+        if self._train_metrics.count >= self.metric_log_interval:
+            self._flush_train_metrics()
+
+    def _flush_train_metrics(self, epoch_end=False):
+        metrics = self._train_metrics.drain()
+        if metrics:
+            metrics['Learning Rate'] = self.optimizers().param_groups[0]['lr']
+            metrics['time_shift_scale'] = self.time_shift_scale.detach() * self.seconds_per_dt
+            # Already reduced together, including physics metrics and lambdas.
+            self.log_dict(metrics, sync_dist=False, on_step=not epoch_end,
+                          on_epoch=epoch_end, batch_size=1)
+
+    def on_train_epoch_end(self):
+        # Preserve a short final window when an epoch/run ends before 50 batches.
+        self._flush_train_metrics(epoch_end=True)
 
     @torch.enable_grad()
     def validation_step(self, batch, batch_nb):
         self._set_stokes_lambda_step(int(self.global_step))
         coords = batch['coords']
-        mu = batch['mu']
+        mu = batch['rtp_to_img_transform'][..., 2, 0:1]
         stokes_true = batch['stokes']
         cartesian_to_spherical_transform = batch['cartesian_to_spherical_transform']
         rtp_to_img_transform = batch['rtp_to_img_transform']
@@ -460,10 +557,10 @@ class MESphericalModule(LightningModule):
             stokes_pred, stokes_true, self.normalization,
         )
 
-        # Keep the established validation plots and MAE metrics in their baseline
-        # normalization space, independent of the selected training objective.
-        stokes_true_normalized = self.normalization(stokes_true)
-        stokes_pred_normalized = self.normalization(stokes_pred)
+        # Plot and measure the exact transformed profiles compared by the loss.
+        stokes_pred_normalized, stokes_true_normalized = self.stokes_loss.transform_profiles(
+            stokes_pred, stokes_true, self.normalization,
+        )
 
         diff = torch.abs(stokes_true_normalized - stokes_pred_normalized)
         objective_components = objective_wavelength.sum(-1)
@@ -1037,19 +1134,29 @@ class MESphericalModule(LightningModule):
         plt.close(fig)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        checkpoint['pme_replay_config'] = (
+            self.replay_buffer.configuration() if self.replay_buffer is not None else None
+        )
+        checkpoint['pme_optimizer_type'] = self.optimizer_config['type']
         checkpoint['pme_stokes_loss_config'] = copy.deepcopy(self.stokes_loss_config)
+        if self.stokes_loss.continuum_normalization:
+            checkpoint['pme_continuum_normalization_mode'] = 'per_profile'
         checkpoint['pme_stokes_lambda_config'] = copy.deepcopy(
             self.stokes_lambda_config
         )
         checkpoint['pme_normalization_config'] = self._normalization_objective_config(
-            self.normalization.asinh_alphas
+            self.normalization.asinh_alphas, self.normalization.stokes_scales
         )
         checkpoint['pme_physics_config'] = copy.deepcopy(self.physics_config)
 
     @staticmethod
-    def _normalization_objective_config(asinh_alphas):
+    def _normalization_objective_config(asinh_alphas, stokes_scales=None):
+        config = {}
+        if stokes_scales is not None:
+            scales = NormalizationModule(stokes_scales=stokes_scales).stokes_scales
+            config['stokes_scales'] = scales.detach().cpu().reshape(-1).tolist()
         if asinh_alphas is None:
-            return {'asinh_alphas': None}
+            return {**config, 'asinh_alphas': None}
         if isinstance(asinh_alphas, dict):
             values = [asinh_alphas[key] for key in ('Q', 'U', 'V')]
         elif isinstance(asinh_alphas, (float, int)):
@@ -1058,9 +1165,18 @@ class MESphericalModule(LightningModule):
             values = torch.as_tensor(asinh_alphas).detach().cpu().reshape(-1).tolist()
         if len(values) != 3:
             raise ValueError('Normalization objective must provide Q, U, and V asinh alphas.')
-        return {'asinh_alphas': [float(value) for value in values]}
+        return {**config, 'asinh_alphas': [float(value) for value in values]}
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        self._train_metrics.clear()
+        saved_shift = checkpoint['state_dict'].get('time_shift_scale')
+        if saved_shift is not None:
+            self._time_shift_enabled = bool(saved_shift.detach().cpu() > 0)
+        if self.replay_buffer is not None:
+            self.replay_buffer.clear()
+        if (checkpoint.get('optimizer_states')
+                and checkpoint.get('pme_optimizer_type', 'soap') != self.optimizer_config['type']):
+            raise ValueError('Cannot resume with a different optimizer. Use a fresh base_path.')
         state_dict = checkpoint['state_dict']
         checkpoint_loss_config = checkpoint.get('pme_stokes_loss_config')
         if checkpoint_loss_config is None:
@@ -1071,7 +1187,17 @@ class MESphericalModule(LightningModule):
                 )
             checkpoint_loss_config = StokesLossModule().configuration()
         else:
+            if (checkpoint_loss_config.get('continuum_normalization')
+                    and checkpoint.get('pme_continuum_normalization_mode') != 'per_profile'):
+                raise RuntimeError(
+                    'This checkpoint does not normalize each profile by its own continuum. '
+                    'Use a fresh base_path for per-profile normalization and source ratios.'
+                )
             try:
+                checkpoint_loss_config = dict(checkpoint_loss_config)
+                if checkpoint_loss_config.get('continuum_normalization'):
+                    # Target-only checkpoints without this field used maximum I.
+                    checkpoint_loss_config.setdefault('continuum_quantile', 1.0)
                 checkpoint_loss_config = StokesLossModule(
                     **checkpoint_loss_config
                 ).configuration()
@@ -1084,14 +1210,16 @@ class MESphericalModule(LightningModule):
         checkpoint_normalization_config = checkpoint.get('pme_normalization_config')
         if checkpoint_normalization_config is None:
             checkpoint_normalization_config = self._normalization_objective_config(
-                state_dict.get('normalization.asinh_alphas')
+                state_dict.get('normalization.asinh_alphas'),
+                state_dict.get('normalization.stokes_scales'),
             )
         else:
             checkpoint_normalization_config = self._normalization_objective_config(
-                checkpoint_normalization_config.get('asinh_alphas')
+                checkpoint_normalization_config.get('asinh_alphas'),
+                checkpoint_normalization_config.get('stokes_scales'),
             )
         current_normalization_config = self._normalization_objective_config(
-            self.normalization.asinh_alphas
+            self.normalization.asinh_alphas, self.normalization.stokes_scales
         )
 
         if (checkpoint_loss_config != self.stokes_loss_config
