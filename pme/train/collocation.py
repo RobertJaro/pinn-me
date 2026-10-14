@@ -378,7 +378,7 @@ class SmoothSphericalCollocationSampler:
         x = radius * cos_latitude * torch.cos(longitude)
         y = radius * cos_latitude * torch.sin(longitude)
         z = radius * sin_latitude
-        coords = torch.stack([normalized_time, x, y, z], dim=-1)
+        coords = torch.stack([x, y, z, normalized_time], dim=-1)
 
         target = {"device": device, "dtype": dtype}
         coords = coords.to(**target).detach()

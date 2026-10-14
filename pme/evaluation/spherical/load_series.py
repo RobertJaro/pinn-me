@@ -1,18 +1,13 @@
 import argparse
-import glob
 import os.path
 
 import numpy as np
-from astropy import units as u
 from matplotlib import pyplot as plt
-from matplotlib.colors import Normalize, SymLogNorm
+from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from sunpy.coordinates import frames
-from sunpy.map import Map, all_coordinates_from_map
 from tqdm import tqdm
 
-from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, \
-    image_to_spherical_matrix
+from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix
 from pme.evaluation.loader import PINNMEOutput
 
 if __name__ == '__main__':
@@ -37,10 +32,7 @@ if __name__ == '__main__':
     # load reference maps
     times = pinnme.times
 
-    # resolution = 0.05 # degrees
 
-    # latitude_range = [-30, -10]
-    # longitude_range = [25, 45]
     latitude_range = args.latitude_range
     longitude_range = args.longitude_range
     resolution = args.resolution
@@ -59,21 +51,17 @@ if __name__ == '__main__':
 
     for i, target_time in tqdm(enumerate(times), total=len(times)):
         file_path = os.path.join(out_path, f'step{i:03d}.jpg')
-        # if os.path.exists(file_path):
-        #     continue
 
         normalized_time = pinnme._normalize_time(target_time)
         time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
-        coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
+        coords = np.concatenate([cartesian_coords, time_coords], axis=-1)
 
         parameter_cube = pinnme.load_parameters(coords=coords, progress=False)
         b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1) * pinnme.gauss_per_dB
         b_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, b_xyz)
-        # b_rtp[..., 1] *= -1
 
         v_xyz = np.concatenate([parameter_cube['v_x'], parameter_cube['v_y'], parameter_cube['v_z']], axis=-1) * 1e-3 * pinnme.meters_per_ds / pinnme.seconds_per_dt
         v_rtp = np.einsum('...ij,...j->...i', cartesian_to_spherical_transform, v_xyz)
-        # v_rtp[..., 1] *= -1
 
         ########################################################################################################################
         # Plot subframe in B_r, B_theta, B_phi
@@ -145,8 +133,6 @@ if __name__ == '__main__':
         out_path_bz = os.path.join(out_path, "bz_vtp")
         os.makedirs(out_path_bz, exist_ok=True)
         file_path_bz = os.path.join(out_path_bz, f"bz_vtp_step{i:03d}.jpg")
-        # if os.path.exists(file_path_bz):
-        #     continue
 
         # Fixed norms (consistent across frames)
         b_norm = Normalize(-500, 500)  # for background image

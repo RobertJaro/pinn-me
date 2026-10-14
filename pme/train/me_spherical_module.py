@@ -354,7 +354,7 @@ class MESphericalModule(LightningModule):
                 for key, value in forward_params.items()
             }
             if instrument_id in self.velocity_correction_models:
-                time_coords = batch[instrument_id]['coords'][..., 0:1]
+                time_coords = batch[instrument_id]['coords'][..., 3:4]
                 ds_forward_params['vdop'] = ds_forward_params['vdop'] + \
                     self.velocity_correction_models[instrument_id](time_coords)
             limb_correction = None
@@ -530,7 +530,7 @@ class MESphericalModule(LightningModule):
 
         v_obs_correction = torch.zeros_like(v_obs_los)
         if instrument_id in self.velocity_correction_models:
-            time_coords = coords[..., 0:1]
+            time_coords = coords[..., 3:4]
             v_obs_correction = self.velocity_correction_models[instrument_id](time_coords)
             forward_params['vdop'] += v_obs_correction
 
@@ -1134,6 +1134,7 @@ class MESphericalModule(LightningModule):
         plt.close(fig)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        checkpoint['coordinate_order'] = 'xyzt'
         checkpoint['pme_replay_config'] = (
             self.replay_buffer.configuration() if self.replay_buffer is not None else None
         )
@@ -1168,6 +1169,8 @@ class MESphericalModule(LightningModule):
         return {**config, 'asinh_alphas': [float(value) for value in values]}
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        if checkpoint.get('coordinate_order') != 'xyzt':
+            raise ValueError('Checkpoint coordinate order is incompatible with [x, y, z, t]. Use a fresh base_path.')
         self._train_metrics.clear()
         saved_shift = checkpoint['state_dict'].get('time_shift_scale')
         if saved_shift is not None:

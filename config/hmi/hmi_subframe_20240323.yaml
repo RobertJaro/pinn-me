@@ -33,8 +33,8 @@ model:
   # of 2048 resolves the approximately two-pixel HMI spatial sampling limit.
   encoding_config:
     type: fourier
-    num_frequencies: [16, 64, 64, 64]
-    max_frequencies: [50, 2048, 2048, 2048]
+    num_frequencies: [64, 64, 64, 16]
+    max_frequencies: [2048, 2048, 2048, 50]
   # Apply sinh independently to each B component (scale in G).
   b_sinh_scale: 10
   # Apply sinh independently to each velocity component (scale in km/s).

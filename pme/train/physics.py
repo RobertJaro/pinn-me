@@ -200,19 +200,19 @@ def _validate_vector_field(
 
 
 def _curl_from_jacobian(field_jacobian: torch.Tensor) -> torch.Tensor:
-    """Curl of a vector field whose Jacobian axes are [component,t,x,y,z]."""
+    """Curl of a vector field whose Jacobian axes are [component,x,y,z,t]."""
     return torch.stack(
         [
-            field_jacobian[:, 2, 2] - field_jacobian[:, 1, 3],
-            field_jacobian[:, 0, 3] - field_jacobian[:, 2, 1],
-            field_jacobian[:, 1, 1] - field_jacobian[:, 0, 2],
+            field_jacobian[:, 2, 1] - field_jacobian[:, 1, 2],
+            field_jacobian[:, 0, 2] - field_jacobian[:, 2, 0],
+            field_jacobian[:, 1, 0] - field_jacobian[:, 0, 1],
         ],
         dim=-1,
     )
 
 
 def _spatial_divergence(field_jacobian: torch.Tensor) -> torch.Tensor:
-    return field_jacobian[:, 0, 1] + field_jacobian[:, 1, 2] + field_jacobian[:, 2, 3]
+    return field_jacobian[:, 0, 0] + field_jacobian[:, 1, 1] + field_jacobian[:, 2, 2]
 
 
 def _squared_norm(value: torch.Tensor) -> torch.Tensor:
@@ -296,7 +296,7 @@ class PhysicsConstraintModule(nn.Module):
         b_jacobian = jacobian(b, coords) if needs_b_jacobian else None
         spatial_b_squared = None
         if b_jacobian is not None:
-            spatial_b_squared = b_jacobian[..., 1:].square().sum(dim=(-2, -1))
+            spatial_b_squared = b_jacobian[..., :3].square().sum(dim=(-2, -1))
 
         current_density = None
         if requested.intersection({"force_free", "potential"}) or include_diagnostics:
@@ -319,10 +319,10 @@ class PhysicsConstraintModule(nn.Module):
                         "Direct-field induction requires a magnetic-field Jacobian."
                     )
                 v_cross_b_jacobian = jacobian(v_cross_b, coords)
-                induction_lhs = b_jacobian[..., 0]
+                induction_lhs = b_jacobian[..., 3]
                 induction_rhs = _curl_from_jacobian(v_cross_b_jacobian)
             else:
-                induction_lhs = a_jac_matrix[..., 0]
+                induction_lhs = a_jac_matrix[..., 3]
                 induction_rhs = v_cross_b
             induction_residual = induction_lhs - induction_rhs
 
@@ -353,7 +353,7 @@ class PhysicsConstraintModule(nn.Module):
                 losses[name] = self._loss(residual_squared, spatial_b_squared)
                 residual_norms[name] = torch.linalg.vector_norm(current_density, dim=-1)
             elif name == "dB_dt":
-                dB_dt = b_jacobian[..., 0]
+                dB_dt = b_jacobian[..., 3]
                 residual_squared = _squared_norm(dB_dt)
                 losses[name] = self._loss(residual_squared, _squared_norm(b))
                 residual_norms[name] = torch.linalg.vector_norm(dB_dt, dim=-1)
@@ -369,7 +369,7 @@ class PhysicsConstraintModule(nn.Module):
             elif name == "gauge":
                 divergence_a = _spatial_divergence(a_jac_matrix)
                 residual_squared = divergence_a.square()
-                spatial_a_squared = a_jac_matrix[..., 1:].square().sum(dim=(-2, -1))
+                spatial_a_squared = a_jac_matrix[..., :3].square().sum(dim=(-2, -1))
                 losses[name] = self._loss(residual_squared, spatial_a_squared)
                 residual_norms[name] = divergence_a.abs()
 
@@ -381,7 +381,7 @@ class PhysicsConstraintModule(nn.Module):
                     v_cross_b, dim=-1
                 )
             if b_jacobian is not None:
-                spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
+                spherical_coords = cartesian_to_spherical(coords[..., :3], torch)
                 radial_direction = torch.stack(
                     [
                         torch.sin(spherical_coords[..., 1])
@@ -393,7 +393,7 @@ class PhysicsConstraintModule(nn.Module):
                     dim=-1,
                 )
                 radial_derivative = torch.einsum(
-                    "nci,ni->nc", b_jacobian[..., 1:], radial_direction
+                    "nci,ni->nc", b_jacobian[..., :3], radial_direction
                 )
                 diagnostics["radial_gradient_norm"] = torch.linalg.vector_norm(
                     radial_derivative, dim=-1

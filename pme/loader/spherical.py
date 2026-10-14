@@ -34,6 +34,7 @@ from pme.data.hmi_time import load_hmi_date_obs_map
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix, image_to_spherical_matrix, observer_ray_and_mu
 from pme.instrument import hmi_wavelength_config
 from pme.loader.util import MultiprocessingWrapper
+from pme.loader.polarization import polarization_selection
 from pme.train.data_loader import TensorsDataset, CombinedDataset, TimeStratifiedBatchSampler
 
 
@@ -114,14 +115,14 @@ def spherical_data_cache_signature(data_config):
 
 class SphericalDataModule(LightningDataModule):
 
-    CACHE_VERSION = 17
+    CACHE_VERSION = 19
 
     def __init__(self, train_configs, valid_config, work_directory,
                  seconds_per_dt=24 * 60 * 60, Rs_per_ds=1, gauss_per_dB=1e3,
                  stokes_normalization=83696.0,
                  ref_time=datetime(2010, 5, 1, 18, 58),
                  batch_size=65536, dataset_batch_size=4096,
-                 num_workers=4, num_dataset_workers=None):
+                 num_workers=4, num_dataset_workers=None, balance_train_configs=False):
         super().__init__()
         self.cache_version = self.CACHE_VERSION
         self.spectral_response_files = {}
@@ -129,6 +130,8 @@ class SphericalDataModule(LightningDataModule):
 
         # train parameters
         self.batch_size = batch_size
+        self.balance_train_configs = balance_train_configs
+        self.train_config_indices = []
         self.dataset_batch_size = dataset_batch_size
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
         self.num_dataset_workers = num_dataset_workers if num_dataset_workers is not None else self.num_workers
@@ -193,12 +196,12 @@ class SphericalDataModule(LightningDataModule):
                     args.append(item)
                 desc = f'Loading training datasets ({i + 1:02d}/{len(train_configs):02d})'
                 tds = [r for r in tqdm(p.imap(process_wrapper.run, args), total=len(args), desc=desc)]
+            self.train_config_indices.append(list(range(len(train_datasets), len(train_datasets) + len(tds))))
             train_datasets += tds  # append all datasets
             for dataset in tds:
                 self._register_hmi_dataset_response(dataset)
 
         self.train_datasets = train_datasets
-
         # add lambda configuration for each instrument
         # only use the first dataset for each instrument to define the lambda configuration
         # assumes that wavelength_center is the same for all datasets of the same instrument
@@ -539,12 +542,19 @@ class SphericalDataModule(LightningDataModule):
     def train_dataloader(self):
         self._validate_batch_sizes()
         datasets = self.train_datasets
+        balanced = self.balance_train_configs
+        groups = self.train_config_indices if balanced else [list(range(len(datasets)))]
+        chunks_per_batch = self.batch_size // self.dataset_batch_size
+        if chunks_per_batch % len(groups):
+            raise ValueError('batch_size must be divisible by dataset_batch_size * number of balanced train_configs.')
         for ds in datasets:
             ds.batch_size = self.dataset_batch_size
+            ds.pad_last_batch = balanced
         combined_dataset = CombinedDataset(datasets)
+        pools = [[combined_dataset.sample_indices_by_dataset[i] for i in group] for group in groups]
         sampler = TimeStratifiedBatchSampler(
-            combined_dataset.sample_indices_by_dataset,
-            self.batch_size // self.dataset_batch_size,
+            pools[0], chunks_per_batch // len(groups),
+            additional_dataset_groups=pools[1:] if balanced else None,
         )
         loader_kwargs = {
             'dataset': combined_dataset,
@@ -569,7 +579,7 @@ class SphericalDataset(TensorsDataset):
 
     def __init__(self, stokes, map_data, wavelength_config, ds_id, instrument_id, seconds_per_dt, Rs_per_ds, ref_time,
                  stokes_normalization, work_directory, oversample_factor=1,
-                 store_plot_image=False, mu_limit=1e-3,
+                 store_plot_image=False, mu_limit=1e-3, pixel_mask=None,
                  **kwargs):
         self.ds_id = ds_id
         self.instrument_id = instrument_id
@@ -609,6 +619,8 @@ class SphericalDataset(TensorsDataset):
         valid = np.isfinite(stokes).all(axis=(-2, -1))
         valid &= np.isfinite(spherical_coords).all(axis=-1)
         valid &= np.isfinite(mu) & (mu >= mu_limit) & np.isfinite(v_obs_los)
+        if pixel_mask is not None:
+            valid &= pixel_mask
         stokes[~valid] = np.nan
         spherical_coords = np.where(valid[..., None], spherical_coords, np.nan)
         self.physics_bounds = _summarize_physics_coordinates(spherical_coords[valid])
@@ -712,8 +724,8 @@ def spherical_geometry_from_pixels(pixel_index, image_shape, wcs, obs_lon, obs_l
     v_obs_los = ray @ observer_velocity
     pixel_center = (np.asarray(image_shape) - 1) / 2
     pix = (np.stack([row, column], axis=-1) - pixel_center) / max(*pixel_center, 1.)
-    coords = np.concatenate([np.full((*lon.shape, 1), normalized_time),
-                             spherical_to_cartesian(spherical) / Rs_per_ds], axis=-1)
+    coords = np.concatenate([spherical_to_cartesian(spherical) / Rs_per_ds,
+                             np.full((*lon.shape, 1), normalized_time)], axis=-1)
     return {'coords': coords, 'mu': rtp2img[..., 2, 0:1].copy(),
             'cartesian_to_spherical_transform': c2s, 'rtp_to_img_transform': rtp2img,
             'v_obs_los': v_obs_los[..., None], 'pix': pix}
@@ -809,7 +821,9 @@ def sample_hmi_spectral_response(profile_file, detector_coords):
 class HMISphericalDataset(SphericalDataset):
 
     def __init__(self, data, transmission_profile_directory, resolution=None,
-                 require_quality_zero=True, *args, **kwargs):
+                 require_quality_zero=True, polarization_filter=None, *args, **kwargs):
+        if polarization_filter is not None and resolution is not None:
+            raise ValueError('Polarization sampling requires native-resolution training images.')
         wavelength_config = hmi_wavelength_config()
         stokes_i_files, _, _, _ = data
         ref_file = stokes_i_files[0]
@@ -832,6 +846,22 @@ class HMISphericalDataset(SphericalDataset):
         map_data['detector_mapping'] = hmi_detector_mapping(source_map, output_shape=s_map.data.shape)
         stokes = load_stokes_data(data, resolution)
 
+        if polarization_filter is not None:
+            # Work on the image before flattening; training targets remain unsmoothed.
+            yy, xx = np.ogrid[:stokes.shape[0], :stokes.shape[1]]
+            radius = np.hypot(
+                (xx + 1 - s_map.meta['CRPIX1']) * s_map.meta['CDELT1'],
+                (yy + 1 - s_map.meta['CRPIX2']) * s_map.meta['CDELT2'],
+            ) / s_map.rsun_obs.to_value(u.arcsec)
+            valid = np.isfinite(map_data['spherical_coords']).all(axis=-1)
+            valid &= np.isfinite(map_data['mu']) & (map_data['mu'] >= kwargs.get('mu_limit', 1e-3))
+            valid &= np.isfinite(map_data['v_obs_los'])
+            mask, _, stats = polarization_selection(stokes, radius, valid, **polarization_filter)
+
+            self.polarization_stats = stats
+            kwargs['pixel_mask'] = mask
+
+        # The optional filter is applied before flattening and cache shuffling.
         super().__init__(stokes, map_data, wavelength_config, *args, **kwargs)
 
     def __getitem__(self, *args):

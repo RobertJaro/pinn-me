@@ -61,8 +61,8 @@ def log_wandb_image(fig, name: str, dpi: int = 100):
 
 
 def random_time_shift_coords(coords, seconds_per_dt, scale=0.1, ):
-    time_shift = torch.randn_like(coords[..., 0:1]) * scale  # small random shift
-    spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
+    time_shift = torch.randn_like(coords[..., 3:4]) * scale  # small random shift
+    spherical_coords = cartesian_to_spherical(coords[..., :3], torch)
     lat = torch.pi / 2 - spherical_coords[..., 1:2]
     lon = spherical_coords[..., 2:3]
     omega_carrington = carrington_rotation_rate()
@@ -71,5 +71,5 @@ def random_time_shift_coords(coords, seconds_per_dt, scale=0.1, ):
     spherical_coords_shift = torch.cat([spherical_coords[..., 0:1], spherical_coords[..., 1:2],
                                         lon + lon_shift], dim=-1)
     cartesian_coords_shift = spherical_to_cartesian(spherical_coords_shift, torch)
-    coords_shift = torch.cat([coords[..., 0:1] + time_shift, cartesian_coords_shift], dim=-1)
+    coords_shift = torch.cat([cartesian_coords_shift, coords[..., 3:4] + time_shift], dim=-1)
     return coords_shift

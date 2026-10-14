@@ -22,9 +22,9 @@ class FourierEncoding(nn.Module):
                  min_frequency=1.0, include_input=True):
         super().__init__()
         if num_frequencies is None:
-            num_frequencies = [8, *([64] * (in_dim - 1))] if in_dim == 4 else 64
+            num_frequencies = [*([64] * (in_dim - 1)), 8] if in_dim == 4 else 64
         if max_frequencies is None:
-            max_frequencies = [2, *([2048] * (in_dim - 1))] if in_dim == 4 else 2048
+            max_frequencies = [*([2048] * (in_dim - 1)), 2] if in_dim == 4 else 2048
 
         counts = _per_dimension(num_frequencies, in_dim, 'num_frequencies', int)
         maxima = _per_dimension(max_frequencies, in_dim, 'max_frequencies', float)
@@ -63,6 +63,88 @@ class FourierEncoding(nn.Module):
         return torch.cat(features, dim=-1)
 
 
+class GaussianFourierEncoding(nn.Module):
+    """Tancik et al. reference code: [sin((2 pi x) B^T), cos((2 pi x) B^T)].
+
+    B is sampled once from N(0, sigma^2) and stored as a fixed buffer.
+    A sequence of scales supports different bandwidths per coordinate.
+    """
+
+    def __init__(self, in_dim, num_frequencies=256, scale=10.0,
+                 include_input=False, seed=None):
+        super().__init__()
+        if not isinstance(in_dim, int) or in_dim < 1:
+            raise ValueError('in_dim must be a positive integer.')
+        if not isinstance(num_frequencies, int) or num_frequencies < 1:
+            raise ValueError('num_frequencies must be a positive integer.')
+        scales = torch.tensor(_per_dimension(scale, in_dim, 'scale', float))
+        if not torch.isfinite(scales).all() or (scales <= 0).any():
+            raise ValueError('scale must be finite and positive.')
+        generator = None if seed is None else torch.Generator().manual_seed(seed)
+        self.register_buffer('B', torch.randn(num_frequencies, in_dim,
+                                              generator=generator) * scales)
+        self.include_input = bool(include_input)
+        self.out_dim = 2 * num_frequencies + (in_dim if self.include_input else 0)
+
+    def forward(self, coords):
+        if coords.shape[-1] != self.B.shape[1]:
+            raise ValueError(f'Expected {self.B.shape[1]} input coordinates.')
+        phase = (2 * torch.pi * coords) @ self.B.T
+        features = [torch.sin(phase), torch.cos(phase)]
+        if self.include_input:
+            features.insert(0, coords)
+        return torch.cat(features, dim=-1)
+
+
+class IsotropicPositionalEncoding(nn.Module):
+    """SuNeRF spatial Fourier features for [x, y, z, time].
+
+    Frequency settings contain one entry for space, then one per remaining
+    nonspatial axis. Bounds are base-2 exponents; phases include pi.
+    Spatial directions are sampled once, uniformly on the sphere, and saved.
+    """
+
+    def __init__(self, in_dim, num_frequencies=32, min_frequencies=0,
+                 max_frequencies=6, spatial_dim=3, include_input=False, seed=None):
+        super().__init__()
+        if not isinstance(spatial_dim, int) or not 1 <= spatial_dim <= in_dim:
+            raise ValueError('spatial_dim must be an integer between 1 and in_dim.')
+        n_other = in_dim - spatial_dim
+        n_blocks = 1 + n_other
+        counts = _per_dimension(num_frequencies, n_blocks, 'num_frequencies', int)
+        minima = _per_dimension(min_frequencies, n_blocks, 'min_frequencies', float)
+        maxima = _per_dimension(max_frequencies, n_blocks, 'max_frequencies', float)
+        if any(count < 1 for count in counts):
+            raise ValueError('num_frequencies must be positive.')
+        if any(not math.isfinite(lo) or not math.isfinite(hi) or hi < lo
+               for lo, hi in zip(minima, maxima)):
+            raise ValueError('Frequency exponents must be finite with min <= max.')
+        ladders = [2 ** torch.linspace(lo, hi, count) * torch.pi
+                   for count, lo, hi in zip(counts, minima, maxima)]
+        generator = None if seed is None else torch.Generator().manual_seed(seed)
+        directions = torch.randn(counts[0], spatial_dim, generator=generator)
+        directions = F.normalize(directions, dim=-1)
+        self.register_buffer('B', ladders[0][:, None] * directions)
+        self.frequencies = nn.ParameterList(
+            nn.Parameter(ladder, requires_grad=False) for ladder in ladders[1:]
+        )
+        self.in_dim = in_dim
+        self.spatial_dim = spatial_dim
+        self.include_input = bool(include_input)
+        self.out_dim = 2 * sum(counts) + (in_dim if self.include_input else 0)
+
+    def forward(self, coords):
+        if coords.shape[-1] != self.in_dim:
+            raise ValueError(f'Expected {self.in_dim} input coordinates.')
+        phase = F.linear(coords[..., :self.spatial_dim], self.B)
+        features = [coords] if self.include_input else []
+        features.extend((phase.sin(), phase.cos()))
+        for i, frequencies in enumerate(self.frequencies):
+            phase = coords[..., self.spatial_dim + i:self.spatial_dim + i + 1] * frequencies
+            features.extend((phase.sin(), phase.cos()))
+        return torch.cat(features, dim=-1)
+
+
 class Swish(nn.Module):
     """Element-wise Swish activation with fixed beta=1."""
 
@@ -71,7 +153,7 @@ class Swish(nn.Module):
 
 
 class MLPModel(nn.Module):
-    """Coordinate MLP with explicit multiresolution Fourier features."""
+    """Coordinate MLP with configurable input encoding."""
 
     def __init__(self, in_dim, out_dim, dim=256, n_layers=6,
                  encoding_config=None, activation='silu'):
@@ -83,6 +165,12 @@ class MLPModel(nn.Module):
         encoding_type = encoding_config.pop('type', 'fourier').lower()
         if encoding_type == 'fourier':
             self.encoding = FourierEncoding(in_dim, **encoding_config)
+            encoded_dim = self.encoding.out_dim
+        elif encoding_type == 'gaussian':
+            self.encoding = GaussianFourierEncoding(in_dim, **encoding_config)
+            encoded_dim = self.encoding.out_dim
+        elif encoding_type == 'positional_isotropic':
+            self.encoding = IsotropicPositionalEncoding(in_dim, **encoding_config)
             encoded_dim = self.encoding.out_dim
         elif encoding_type in ('identity', 'none'):
             if encoding_config:
@@ -248,12 +336,12 @@ class _BaseMESphericalModel:
         if self.vector_potential:
             a = params[..., 0:3]
             a_jac_matrix = jacobian(a, x)
-            dAy_dx = a_jac_matrix[:, 1, 1]
-            dAz_dx = a_jac_matrix[:, 2, 1]
-            dAx_dy = a_jac_matrix[:, 0, 2]
-            dAz_dy = a_jac_matrix[:, 2, 2]
-            dAx_dz = a_jac_matrix[:, 0, 3]
-            dAy_dz = a_jac_matrix[:, 1, 3]
+            dAy_dx = a_jac_matrix[:, 1, 0]
+            dAz_dx = a_jac_matrix[:, 2, 0]
+            dAx_dy = a_jac_matrix[:, 0, 1]
+            dAz_dy = a_jac_matrix[:, 2, 1]
+            dAx_dz = a_jac_matrix[:, 0, 2]
+            dAy_dz = a_jac_matrix[:, 1, 2]
             b_x = (dAz_dy - dAy_dz)[..., None]
             b_y = (dAx_dz - dAz_dx)[..., None]
             b_z = (dAy_dx - dAx_dy)[..., None]

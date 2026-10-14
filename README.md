@@ -1,5 +1,14 @@
 # pinn-me
+
 pin the inversion problem down with the Milne Eddington approximation
+
+Model coordinate components use `[x, y, z, t]` for spherical inversions and
+`[x, y, t]` for planar inversions. Time is the final normalized coordinate.
+Per-axis Fourier/Gaussian settings and SIREN input frequencies follow that order;
+isotropic encoding settings remain `[space, time]`. Image cube axes are independent
+of coordinate components. Saved inversions and checkpoints record `coordinate_order`.
+Older time-first artifacts require conversion or a fresh run; loading or resuming
+an unmarked artifact raises an error. Spherical data caches are rebuilt automatically.
 
 ## HMI transmission preprocessing
 
@@ -271,6 +280,41 @@ overhead during capture, so use it for attribution rather than absolute speed.
 Omitting `--profile` disables all diagnostics. All diagnostic code lives in
 `pme/train/diagnostics.py`; removal only requires deleting that module, its
 tests, and the small argument/Trainer wiring in `pme/inversion_spherical.py`.
+
+## Polarization-filtered training datasets
+
+An HMI `data.train_configs` entry can optionally set:
+
+```yaml
+polarization_filter: {smoothing_sigma: 5, fraction: 0.1, radius_limit: 0.95}
+```
+
+For each native-resolution acquisition, the filter computes
+`P = sqrt(mean_wavelength(Q² + U² + V²)) / quantile_wavelength(I, 0.9)`.
+Pixels outside `radius_limit * R_sun`, invalid profiles/geometry, and nonpositive
+continuum values are excluded before Gaussian smoothing. They contribute neither
+signal nor kernel weight, and the smoothed score remains NaN there. The filter
+keeps pixels strictly above the 90th percentile of the eligible smoothed scores
+when `fraction: 0.1`; ties can reduce the selected fraction. Empty selections
+raise an error. Filtering occurs before flattening and shuffling, and the cache
+contains only selected, original Stokes profiles and their original pixel IDs.
+Smoothing affects selection only; it does not modify training targets.
+
+The 90-second full-disk configuration declares two explicit training entries for
+the same observations: one unfiltered and one with this filter. With
+`data.balance_train_configs: true`, every batch contributes equally from each
+entry, with time-stratified acquisition sampling within each entry. The total
+`batch_size: 32768` stays fixed: 16,384 unfiltered and 16,384 filtered profiles.
+Smaller pools cycle with reshuffling; partial chunks wrap within their own
+dataset to keep batches full. The batch size must be divisible by
+`dataset_batch_size * len(train_configs)`.
+
+The first entry defines the epoch length. Splitting its previous full batch in
+half means roughly twice as many steps per epoch, so compare runs by optimizer
+steps or wall time. Validation remains unfiltered. Omitting the filter and
+`balance_train_configs` preserves the original loader behavior. Changing the
+configuration invalidates the data cache; existing model checkpoints can still
+be resumed.
 
 ## Stokes replay sampling
 

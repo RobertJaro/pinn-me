@@ -41,7 +41,7 @@ if __name__ == '__main__':
     frame_out = SkyCoord(
         ref_map.carrington_longitude,
         0 * u.deg,
-        frame=f"heliographic_carrington",
+        frame="heliographic_carrington",
         obstime=ref_map.date,
         observer=ref_map.observer_coordinate,
         rsun=getattr(ref_map.observer_coordinate, "rsun", None),
@@ -71,7 +71,7 @@ if __name__ == '__main__':
     #
     cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
-    coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
+    coords = np.concatenate([cartesian_coords, time_coords], axis=-1)
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
 
     parameter_cube = pinnme.load_parameters(coords=coords)

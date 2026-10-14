@@ -25,6 +25,8 @@ class PINNMEOutput:
 
         state = torch.load(model_path, map_location=self.device, weights_only=False)
 
+        if state.get('coordinate_order') not in ('xyzt', 'xyt'):
+            raise ValueError('Saved inversion coordinate order is incompatible with spatial coordinates followed by time.')
         self.parameter_model = state['parameter_model'].to(self.device)
         self.parameter_model = nn.DataParallel(self.parameter_model)
         self.parameter_model.eval()
@@ -179,24 +181,21 @@ class PINNMEOutput:
         }
 
     def load_cube(self, **kwargs):
-        coords = np.meshgrid(
-            np.linspace(self.data_range[0][0], self.data_range[0][1], self.cube_shape[0], dtype=np.float32),
-            np.linspace(self.data_range[1][0], self.data_range[1][1], self.cube_shape[1], dtype=np.float32),
-            np.linspace(self.data_range[2][0], self.data_range[2][1], self.cube_shape[2], dtype=np.float32),
+        # Image cube axes remain [t, x, y]; coordinate components are [x, y, t].
+        time, x, y = np.meshgrid(
+            np.linspace(*self.data_range[2], self.cube_shape[0], dtype=np.float32),
+            np.linspace(*self.data_range[0], self.cube_shape[1], dtype=np.float32),
+            np.linspace(*self.data_range[1], self.cube_shape[2], dtype=np.float32),
             indexing='ij')
-        coords = np.stack(coords, axis=-1)
-
-        return self.load(coords, **kwargs)
+        return self.load(np.stack([x, y, time], axis=-1), **kwargs)
 
     def load_time(self, time, **kwargs):
-        coords = np.meshgrid(
-            np.ones(1, dtype=np.float32) * self._normalize_time(time),
-            np.linspace(self.data_range[1][0], self.data_range[1][1], self.cube_shape[1], dtype=np.float32),
-            np.linspace(self.data_range[2][0], self.data_range[2][1], self.cube_shape[2], dtype=np.float32),
+        time, x, y = np.meshgrid(
+            np.array([self._normalize_time(time)], dtype=np.float32),
+            np.linspace(*self.data_range[0], self.cube_shape[1], dtype=np.float32),
+            np.linspace(*self.data_range[1], self.cube_shape[2], dtype=np.float32),
             indexing='ij')
-        coords = np.stack(coords, axis=-1)
-
-        return self.load(coords, **kwargs)
+        return self.load(np.stack([x, y, time], axis=-1), **kwargs)
 
     def _normalize_time(self, time):
         return (time - self.ref_time).total_seconds() / self.seconds_per_dt
@@ -254,7 +253,7 @@ class SPINNMEOutput(PINNMEOutput):
             )
         coords = torch.as_tensor(coords, dtype=torch.float32)
         if coords.shape[-1] != 4:
-            raise ValueError(f'coords must end in [time, x, y, z], got {tuple(coords.shape)}.')
+            raise ValueError(f'coords must end in [x, y, z, t], got {tuple(coords.shape)}.')
         output_shape = tuple(coords.shape[:-1])
         n_points = int(np.prod(output_shape))
         coords = coords.reshape(-1, 4)
@@ -354,7 +353,7 @@ class SPINNMEOutput(PINNMEOutput):
                 )
                 if instrument_id in self.velocity_correction_models:
                     forward_params['vdop'] = forward_params['vdop'] + self.velocity_correction_models[
-                        instrument_id](batch_coords[..., 0:1])
+                        instrument_id](batch_coords[..., 3:4])
                 limb_correction = None
                 if instrument_id in self.limb_correction_models:
                     limb_correction = self.limb_correction_models[instrument_id](mu[index].to(self.device))
@@ -456,7 +455,7 @@ class SPINNMEOutput(PINNMEOutput):
         spherical_coords[invalid] = np.nan
         cartesian = spherical_to_cartesian(spherical_coords) / self.Rs_per_ds
         time = np.full((*cartesian.shape[:-1], 1), self._normalize_time(map_data['time']), dtype=np.float32)
-        coords = np.concatenate([time, cartesian], axis=-1)
+        coords = np.concatenate([cartesian, time], axis=-1)
         c2s = cartesian_to_spherical_matrix(spherical_coords).astype(np.float32)
         latitude = np.pi / 2 - spherical_coords[..., 1]
         img_to_rtp = image_to_spherical_matrix(
@@ -500,7 +499,7 @@ class SPINNMEOutput(PINNMEOutput):
             normalized_time = np.asarray(normalized_time, dtype=np.float32)
             time_coords = normalized_time[..., None]
 
-        coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
+        coords = np.concatenate([cartesian_coords, time_coords], axis=-1)
         cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
 
         parameter_cube = self.load_parameters(coords=coords)

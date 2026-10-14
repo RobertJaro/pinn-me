@@ -76,12 +76,12 @@ class StokesReplayBuffer:
                 counts[instrument] = torch.zeros(n, dtype=torch.long, device=inputs['coords'].device)
                 continue
             retained, previous_counts = entry
-            new_idx = _time_balanced_indices(inputs['coords'][:, 0], n - n_replay)
+            new_idx = _time_balanced_indices(inputs['coords'][:, 3], n - n_replay)
             if n_replay == len(previous_counts):
                 # Normally the entire pool is reused: no grouping, sorting or copy.
                 replay_inputs, replay_counts = retained, previous_counts
             else:
-                old_idx = _time_balanced_indices(retained['coords'][:, 0], n_replay)
+                old_idx = _time_balanced_indices(retained['coords'][:, 3], n_replay)
                 replay_inputs = {key: value[old_idx] for key, value in retained.items()}
                 replay_counts = previous_counts[old_idx]
             mixed[instrument] = {
@@ -107,7 +107,7 @@ class StokesReplayBuffer:
             if capacity == 0:
                 continue
             selected = eligible[_time_balanced_indices(
-                inputs['coords'][eligible, 0], capacity, score[eligible],
+                inputs['coords'][eligible, 3], capacity, score[eligible],
             )]
             # Advanced indexing creates compact copies, without retaining the
             # full batch storage or its autograd graph.

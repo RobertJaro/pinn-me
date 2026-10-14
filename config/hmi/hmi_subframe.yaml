@@ -29,7 +29,7 @@ model:
   vector_potential: false
   scale: true
   activation: silu
-  encoding_config: { type: fourier, num_frequencies: [8, 64, 64, 64], max_frequencies: [2, 2048, 2048, 2048] }
+  encoding_config: { type: fourier, num_frequencies: [64, 64, 64, 8], max_frequencies: [2048, 2048, 2048, 2] }
 
 training:
   epochs: 5000

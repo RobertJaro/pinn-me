@@ -116,6 +116,7 @@ save_path = os.path.join(base_path, 'inversion.pme')
 @rank_zero_only
 def save(*args, **kwargs):
     torch.save({
+        'coordinate_order': 'xyzt',
         'parameter_model': me_module.parameter_model,
         'cube_shape': data_module.image_shape, 'wavelength_config': data_module.wavelength_config,
         'data_range': data_module.data_range,

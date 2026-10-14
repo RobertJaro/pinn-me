@@ -1,14 +1,25 @@
 ---
-base_path: "/glade/work/rjarolim/spinn_me/hmi/hmi_fd_20240323_2h_90s_v05"
-work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi_fd_20240323_2h_90s_v03"
+base_path: "/glade/work/rjarolim/spinn_me/hmi/hmi_fd_20240323_2h_90s_v09"
+work_directory: "/glade/derecho/scratch/rjarolim/spinn_me/hmi_fd_20240323_2h_90s_v09"
 data:
   train_configs:
-    - { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240323_0100_0300_90s", transmission_profile_directory: "/glade/work/rjarolim/data/hmi_calibration/20240323_0100_0300", stokes_normalization: 5.0e+4, instrument_id: 'HMI' }
+    - type: hmi
+      data_path: "/glade/work/rjarolim/data/hmi_stokes/20240323_0100_0300_90s"
+      transmission_profile_directory: "/glade/work/rjarolim/data/hmi_calibration/20240323_0100_0300"
+      stokes_normalization: 5.0e+4
+      instrument_id: HMI
+    - type: hmi
+      data_path: "/glade/work/rjarolim/data/hmi_stokes/20240323_0100_0300_90s"
+      transmission_profile_directory: "/glade/work/rjarolim/data/hmi_calibration/20240323_0100_0300"
+      stokes_normalization: 5.0e+4
+      instrument_id: HMI
+      polarization_filter: { smoothing_sigma: 5, fraction: 0.1, radius_limit: 0.95 }
   valid_config: { type: 'hmi', data_path: "/glade/work/rjarolim/data/hmi_stokes/20240323_0100_0300_90s", sample_idx: 40, transmission_profile_directory: "/glade/work/rjarolim/data/hmi_calibration/20240323_0100_0300", stokes_normalization: 5.0e+4, instrument_id: 'HMI', resolution: [256, 256] }
   ref_time: "2024-03-23T00:59:23" # UTC origin; archive interval is 01:00–03:00 TAI
   num_workers: 4
-  num_dataset_workers: 16
-  batch_size: 32768
+  num_dataset_workers: 8
+  balance_train_configs: true # equal contribution from each dataset entry
+  batch_size: 32768 # 16384 uniform + 16384 polarization-selected profiles
   dataset_batch_size: 512
   seconds_per_dt: 36000 # 10 hours
   gauss_per_dB: 1000
@@ -30,12 +41,13 @@ model:
   vector_potential: false
   source_function: ratio
   activation: swish
-  # Fixed bandwidth across cadences: sin(pi * frequency * coordinate).
-  # Maximum 400 resolves 90s sampling with dt=10 h; spatial maximum 2048.
   encoding_config:
-    type: fourier
-    num_frequencies: [16, 64, 64, 64]
-    max_frequencies: [400, 2048, 2048, 2048]
+    # Settings are [space, time]; bounds are base-2 exponents times pi.
+    type: positional_isotropic
+    num_frequencies: [256, 32]
+    min_frequencies: [0, 0]
+    max_frequencies: [10, 4]
+    include_input: false
   # Apply sinh independently to each B component (scale in G).
   b_sinh_scale: 10
   # Apply sinh independently to each velocity component (scale in km/s).

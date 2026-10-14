@@ -60,7 +60,7 @@ if __name__ == '__main__':
     #
     cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_time
-    coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
+    coords = np.concatenate([cartesian_coords, time_coords], axis=-1)
     cartesian_to_spherical_transform = cartesian_to_spherical_matrix(spherical_coords)
 
     latc, lonc = np.deg2rad(ref_map.meta['CRLT_OBS']), np.deg2rad(ref_map.meta['CRLN_OBS'])

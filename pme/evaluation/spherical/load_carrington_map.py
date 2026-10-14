@@ -12,7 +12,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sunpy.coordinates import frames
 
 from pme.data.util import spherical_to_cartesian, cartesian_to_spherical_matrix
-from pme.evaluation.loader import PINNMEOutput, SPINNMEOutput
+from pme.evaluation.loader import SPINNMEOutput
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a video from a PINN ME file')
@@ -48,7 +48,7 @@ if __name__ == '__main__':
 
     cartesian_coords = spherical_to_cartesian(spherical_coords) / pinnme.Rs_per_ds
     time_coords = np.ones((*cartesian_coords.shape[:-1], 1), dtype=np.float32) * normalized_times[None, :, None]
-    coords = np.concatenate([time_coords, cartesian_coords], axis=-1)
+    coords = np.concatenate([cartesian_coords, time_coords], axis=-1)
 
     parameter_cube = pinnme.load_parameters(coords=coords)
     b_xyz = np.concatenate([parameter_cube['b_x'], parameter_cube['b_y'], parameter_cube['b_z']], axis=-1) * pinnme.gauss_per_dB

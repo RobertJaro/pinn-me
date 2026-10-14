@@ -12,11 +12,11 @@ export MPLBACKEND=Agg
 
 # One central-time 720s reference; HPC_RANGE selects the field of view.
 RUN_PREFIX="/glade/work/rjarolim/spinn_me/hmi/hmi_fd_20240323_2h"
-RUN_VERSION_90S="v05"
+RUN_VERSION_90S="v09"
 RUN_VERSION_720S="v01"
 REFERENCE_PREFIX="/glade/work/rjarolim/data/hmi_stokes/20240323_0100_0300_reference_720s/hmi.b_720s.20240323_020000_TAI"
 EVALUATION_SUBDIR="evaluation/reference_720s/020000"
-HPC_RANGE=(-200 0 -200 0)
+HPC_RANGE=(-200 -100 -200 -100)
 
 python3 -m pme.evaluation.spherical.load_ref_map \
   --input "${RUN_PREFIX}_90s_${RUN_VERSION_90S}/inversion.pme" \

@@ -70,14 +70,32 @@ class CombinedDataset(Dataset):
 
 
 class TimeStratifiedBatchSampler(Sampler):
-    """Create newly shuffled, time-balanced chunk groups every epoch."""
+    """Time-balanced chunks, optionally equally split across config entries.
 
-    def __init__(self, sample_indices_by_dataset, chunks_per_batch):
+    The first pool defines epoch length; each additional pool cycles independently
+    and contributes ``chunks_per_batch`` chunks to every global batch.
+    """
+
+    def __init__(self, sample_indices_by_dataset, chunks_per_batch, additional_dataset_groups=None):
         self.sample_indices_by_dataset = [list(indices) for indices in sample_indices_by_dataset]
         self.chunks_per_batch = int(chunks_per_batch)
         if self.chunks_per_batch <= 0:
             raise ValueError('chunks_per_batch must be positive.')
         self.epoch = 0
+        self.additional_dataset_groups = additional_dataset_groups or []
+        if any(not any(group) for group in self.additional_dataset_groups):
+            raise ValueError('Additional sampling pool must contain at least one chunk.')
+
+    @staticmethod
+    def _additional_indices(groups, generator):
+        """Cycle each acquisition independently for equal time coverage."""
+        groups = [list(group) for group in groups if group]
+        queues = [[] for _ in groups]
+        while True:
+            for i in generator.permutation(len(groups)):
+                if not queues[i]:
+                    queues[i] = [groups[i][j] for j in generator.permutation(len(groups[i]))]
+                yield queues[i].pop()
 
     @staticmethod
     def _distributed_context():
@@ -120,6 +138,11 @@ class TimeStratifiedBatchSampler(Sampler):
             ordered[index * self.chunks_per_batch:(index + 1) * self.chunks_per_batch]
             for index in range(global_batch_count)
         ]
+        # Build globally before rank sharding, preserving equal DDP step counts.
+        for group in self.additional_dataset_groups:
+            extra = self._additional_indices(group, generator)
+            for batch in batches:
+                batch.extend(next(extra) for _ in range(self.chunks_per_batch))
         for batch_index in range(rank, global_batch_count, world_size):
             yield batches[batch_index]
 
@@ -171,8 +194,13 @@ class BatchesDataset(Dataset):
 
     def __getitem__(self, idx):
         # lazy load data
-        data = {k: torch.from_numpy(np.asarray(v[idx * self.batch_size: (idx + 1) * self.batch_size])) for k, v in
-                self.data.items()}
+        count = next(iter(self.data.values())).shape[0]
+        if getattr(self, 'pad_last_batch', False) and (idx + 1) * self.batch_size > count:
+            indices = np.arange(idx * self.batch_size, (idx + 1) * self.batch_size) % count
+            data = {k: torch.from_numpy(np.asarray(v.oindex[indices])) for k, v in self.data.items()}
+        else:
+            data = {k: torch.from_numpy(np.asarray(v[idx * self.batch_size: (idx + 1) * self.batch_size])) for k, v in
+                    self.data.items()}
         data['lin_idx'] = torch.tensor([idx], dtype=torch.long)
         return data
 
@@ -263,15 +291,15 @@ class GenericDataModule(LightningDataModule):
                 normalized_times,
                 np.mgrid[:stokes_vector.shape[1]].astype(np.float32) - (stokes_vector.shape[1] - 1) / 2,
                 np.mgrid[:stokes_vector.shape[2]].astype(np.float32) - (stokes_vector.shape[2] - 1) / 2,
-                indexing='ij'), -1, dtype=np.float32)
+                indexing='ij'), -1, dtype=np.float32)[..., [1, 2, 0]]
         else:
             print('Using provided coordinates', coordinates.shape, stokes_vector.shape)
             time_coord = np.ones((*coordinates.shape[:-1], 1), dtype=np.float32)
-            time_coord = np.einsum('...i,i->...i', time_coord, normalized_times)
-            coordinates = np.concatenate([time_coord, coordinates], -1)
+            time_coord *= normalized_times.reshape(-1, *([1] * (time_coord.ndim - 1)))
+            coordinates = np.concatenate([coordinates, time_coord], -1)
 
-        coordinates[..., 1] /= self.pixel_per_ds  # x
-        coordinates[..., 2] /= self.pixel_per_ds  # y
+        coordinates[..., 0] /= self.pixel_per_ds  # x
+        coordinates[..., 1] /= self.pixel_per_ds  # y
 
         self.cube_shape = coordinates.shape[:3]
         self.data_range = np.array(
@@ -297,22 +325,22 @@ class GenericDataModule(LightningDataModule):
         print(f'Stokes-V: {self.value_range[3, 0]:.3f} - {self.value_range[3, 1]:.3f}')
 
         print('Coordinate Range')
-        print(f'Time: {self.data_range[0, 0]:.2f} - {self.data_range[0, 1]:.2f} ({coordinates.shape[0]})')
-        print(f'X: {self.data_range[1, 0]:.2f} - {self.data_range[1, 1]:.2f} ({coordinates.shape[1]})')
-        print(f'Y: {self.data_range[2, 0]:.2f} - {self.data_range[2, 1]:.2f} ({coordinates.shape[2]})')
+        print(f'Time: {self.data_range[2, 0]:.2f} - {self.data_range[2, 1]:.2f} ({coordinates.shape[0]})')
+        print(f'X: {self.data_range[0, 0]:.2f} - {self.data_range[0, 1]:.2f} ({coordinates.shape[1]})')
+        print(f'Y: {self.data_range[1, 0]:.2f} - {self.data_range[1, 1]:.2f} ({coordinates.shape[2]})')
 
         # plot coordinates
         ref_time = stokes_vector.shape[0] // 2
         fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
         im = axs[0].imshow(coordinates[ref_time, :, :, 0], origin='lower')
         fig.colorbar(im)
-        axs[0].set_title('t')
+        axs[0].set_title('x')
         im = axs[1].imshow(coordinates[ref_time, :, :, 1], origin='lower')
         fig.colorbar(im)
-        axs[1].set_title('x')
+        axs[1].set_title('y')
         im = axs[2].imshow(coordinates[ref_time, :, :, 2], origin='lower')
         fig.colorbar(im)
-        axs[2].set_title('y')
+        axs[2].set_title('t')
         fig.tight_layout()
         wandb.log({'Coordinates': fig})
         plt.close('all')
@@ -600,7 +628,7 @@ class SHARPDataModule(LightningDataModule):
         coordinates = np.stack([coordinates.Tx.value / 1e3, coordinates.Ty.value / 1e3, times], -1)
         coordinates = coordinates[:, :, None]  # add time dimension
 
-        self.cube_shape = coordinates.shape[:3]
+        self.cube_shape = (coordinates.shape[2], *coordinates.shape[:2])
         self.data_range = [[coordinates[..., 0].min(), coordinates[..., 0].max()],
                            [coordinates[..., 1].min(), coordinates[..., 1].max()],
                            [coordinates[..., 2].min(), coordinates[..., 2].max()]]
@@ -616,13 +644,13 @@ class SHARPDataModule(LightningDataModule):
         fig, axs = plt.subplots(1, 3, figsize=(16, 8), dpi=100)
         im = axs[0].imshow(coordinates[:, :, ref_time, 0].T, origin='lower')
         fig.colorbar(im)
-        axs[0].set_title('t')
+        axs[0].set_title('x')
         im = axs[1].imshow(coordinates[:, :, ref_time, 1].T, origin='lower')
         fig.colorbar(im)
-        axs[1].set_title('x')
+        axs[1].set_title('y')
         im = axs[2].imshow(coordinates[:, :, ref_time, 2].T, origin='lower')
         fig.colorbar(im)
-        axs[2].set_title('y')
+        axs[2].set_title('t')
         fig.tight_layout()
         wandb.log({'Coordinates': fig})
         plt.close('all')

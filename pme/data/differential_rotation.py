@@ -138,9 +138,9 @@ def carrington_rotation_rate(f=torch):
 
 
 def to_differential_rotation_frame(coords, seconds_per_dt):
-    time = coords[..., 0:1]  # reference time at 0
+    time = coords[..., 3:4]  # reference time at 0
 
-    spherical = cartesian_to_spherical(coords[..., 1:], torch)  # [r, theta, phi]
+    spherical = cartesian_to_spherical(coords[..., :3], torch)  # [r, theta, phi]
     lat = torch.pi / 2 - spherical[..., 1:2]
     lon = spherical[..., 2:3]
 
@@ -158,4 +158,4 @@ def to_differential_rotation_frame(coords, seconds_per_dt):
 
     spherical_shift = torch.cat([spherical[..., 0:1], spherical[..., 1:2], lon_new], dim=-1)
     xyz_shift = spherical_to_cartesian(spherical_shift, torch)
-    return torch.cat([time, xyz_shift], dim=-1)
+    return torch.cat([xyz_shift, time], dim=-1)

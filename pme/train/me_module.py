@@ -50,13 +50,13 @@ class MEModule(LightningModule):
                         np.linspace(-(psf_shape[0] // 2), psf_shape[0] // 2, psf_shape[0], dtype=np.float32),
                         np.linspace(-(psf_shape[1] // 2), psf_shape[1] // 2, psf_shape[1], dtype=np.float32),
                         indexing='ij'), -1)
-        coords_psf = coords_psf[0, :, :]  # remove time axis
+        coords_psf = coords_psf[0, :, :][..., [1, 2, 0]]  # [x, y, t] offsets
         coords_psf /= pixel_per_ds
 
         print(f'PSF: {psf_shape}')
-        print(f't: {coords_psf[..., 0].min()} - {coords_psf[..., 0].max()}')
-        print(f'X: {coords_psf[..., 1].min()} - {coords_psf[..., 1].max()}')
-        print(f'Y: {coords_psf[..., 2].min()} - {coords_psf[..., 2].max()}')
+        print(f't: {coords_psf[..., 2].min()} - {coords_psf[..., 2].max()}')
+        print(f'X: {coords_psf[..., 0].min()} - {coords_psf[..., 0].max()}')
+        print(f'Y: {coords_psf[..., 1].min()} - {coords_psf[..., 1].max()}')
 
         coords_psf = torch.tensor(coords_psf, dtype=torch.float32).reshape((1, *psf_shape, 3))
         self.coords_psf = nn.Parameter(coords_psf, requires_grad=False)
@@ -372,3 +372,10 @@ class MEModule(LightningModule):
         plt.tight_layout()
         wandb.log({"B": fig})
         plt.close('all')
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['coordinate_order'] = 'xyt'
+
+    def on_load_checkpoint(self, checkpoint):
+        if checkpoint.get('coordinate_order') != 'xyt':
+            raise ValueError('Checkpoint coordinate order is incompatible with [x, y, t]. Use a fresh base_path.')

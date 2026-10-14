@@ -25,7 +25,7 @@ def transform_spherical_parameters(output, coords, cartesian_to_spherical_transf
     inc = acos_safe(cos_inc)
     azi = atan2_safe(-b_img[..., 0:1], b_img[..., 1:2])
 
-    spherical_coords = cartesian_to_spherical(coords[..., 1:], torch)
+    spherical_coords = cartesian_to_spherical(coords[..., :3], torch)
     latitude = torch.pi / 2 - spherical_coords[..., 1]
     radius = spherical_coords[..., 0] * meters_per_ds
     v_rot = carrington_rotation_velocity(latitude, radius)

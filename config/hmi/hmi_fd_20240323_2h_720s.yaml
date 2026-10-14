@@ -28,12 +28,12 @@ model:
   n_layers: 8
   vector_potential: false
   activation: swish
-  # Fixed bandwidth across cadences: sin(pi * frequency * coordinate).
+  # Coordinate-wise encoding: sin(pi * frequency * coordinate).
   # Maximum 400 resolves 90s sampling with dt=10 h; spatial maximum 2048.
   encoding_config:
     type: fourier
-    num_frequencies: [16, 64, 64, 64]
-    max_frequencies: [400, 2048, 2048, 2048]
+    num_frequencies: [64, 64, 64, 16]
+    max_frequencies: [2048, 2048, 2048, 400]
   # Apply sinh independently to each B component (scale in G).
   b_sinh_scale: 10
   # Apply sinh independently to each velocity component (scale in km/s).
@@ -41,7 +41,7 @@ model:
 
 training:
   epochs: -1
-  max_steps: 200000 # equal optimizer budget across all cadences
+  max_steps: 200000 # optimizer budget for this run
   check_val_every_n_epoch: null
   val_check_interval: 2000
   lr_params: { start: 1.0e-3, end: 1.0e-4, iterations: 2.0e+5 }
