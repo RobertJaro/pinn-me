@@ -1,4 +1,4 @@
-"""Global tensor shuffling at startup, followed only by contiguous batch slices."""
+"""Persistent tensors supporting coverage passes and random sample batches."""
 
 import hashlib
 import json
@@ -23,8 +23,8 @@ class PersistentTensorLoader(BulkBatchLoader):
 
     Native stores are read sequentially in bounded blocks exactly once. Every
     field is scattered with the same permutation into disk-backed arrays.
-    Training permutes only batch IDs, without replacement on each pool pass;
-    it never gathers individual pixels. AIA pools preserve channel coverage.
+    Coverage passes permute batch IDs without replacement. Fixed-length training
+    epochs gather fresh random pixels with replacement. AIA pools preserve channel coverage.
     Pixel layout and batch ordering use private deterministic generators, making
     direct resume independent of model RNG, read budgets, and prefetch depth.
     """
@@ -153,6 +153,29 @@ class PersistentTensorLoader(BulkBatchLoader):
         producer = _Producer(self._indexed_batches(indices), self.prefetch_batches)
         self._active.append(producer)
         return producer
+
+    def iter_random(self, indices):
+        """Draw full batches from all samples, keyed by global rank/update slot."""
+        from .bulk import _Producer
+
+        self.close()
+        producer = _Producer(self._random_batches(indices), self.prefetch_batches)
+        self._active.append(producer)
+        return producer
+
+    def _random_batches(self, indices):
+        self.prepare()
+        quotas = self._quotas()
+        if sum(n * store.sample_bytes for n, store in zip(quotas, self._stores)) > self.max_batch_bytes:
+            raise ValueError("Batch exceeds max_batch_bytes; increase the loader budget")
+        for number in indices:
+            batch = self._stores[0].allocate(self.batch_size, pin_memory=self.pin_memory)
+            offset = 0
+            for pool, (count, quota, store) in enumerate(zip(self._counts, quotas, self._stores, strict=True)):
+                selected = torch.randint(count, (quota,), generator=self._generator("samples", pool, number))
+                store.read_indices_into(selected, batch, offset=offset)
+                offset += quota
+            yield batch
 
     def _batches(self, start, count):
         yield from self._indexed_batches(range(start, start + count))

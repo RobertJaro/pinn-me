@@ -66,7 +66,12 @@ class SolarPlasmaTable(ContinuumOpacity):
     @staticmethod
     def _smootherstep(fraction: torch.Tensor) -> torch.Tensor:
         fraction = fraction.clamp(0.0, 1.0)
-        return fraction.pow(3) * (10.0 + fraction * (-15.0 + 6.0 * fraction))
+        complement = 1.0 - fraction
+        # Positive Bernstein form of 6x^5 - 15x^4 + 10x^3. Expanded
+        # evaluation can overshoot one in float32 near the hot endpoint.
+        return (fraction.pow(3) * (
+            fraction.square() + 5.0 * fraction * complement + 10.0 * complement.square()
+        )).clamp(0.0, 1.0)
 
     def _photospheric_weight(self, temperature: torch.Tensor) -> torch.Tensor:
         lower, upper = self.eos.transition_temperature_bounds_k
@@ -75,7 +80,9 @@ class SolarPlasmaTable(ContinuumOpacity):
             temperature.new_tensor(upper).log10()
             - temperature.new_tensor(lower).log10()
         )
-        return 1.0 - self._smootherstep(fraction)
+        # S(1-x) = 1-S(x), but the former avoids subtracting nearly equal
+        # values when the remaining photospheric population is very small.
+        return self._smootherstep(1.0 - fraction)
 
     def prepare_plasma_state(
         self,
@@ -86,8 +93,9 @@ class SolarPlasmaTable(ContinuumOpacity):
 
         temperature, gas_pressure = self.eos._validate_state(temperature, gas_pressure)
         stic_lookup = super().prepare_stic_lookup(temperature, gas_pressure)
-        mass_density = self.eos.mass_density(temperature, gas_pressure)
-        electron_density = self.eos.electron_density(temperature, gas_pressure)
+        # The EOS computes both quantities from one composition lookup. Keep
+        # that graph shared instead of evaluating the complete closure twice.
+        mass_density, electron_density = self.eos._states(temperature, gas_pressure)
 
         # Only pressure excursions scale the edge radiative reservoirs here.
         # Temperature behavior is handled by the endpoint-tangent continuation
@@ -158,10 +166,8 @@ class SolarPlasmaTable(ContinuumOpacity):
         fade_top = state.temperature.new_tensor(
             self.eos.transition_temperature_bounds_k[1]
         ).log10()
-        excursion = (log_temperature - top_log_temperature).clamp(
-            0.0,
-            fade_top - top_log_temperature,
-        )
+        excursion = (log_temperature - top_log_temperature).clamp_min(0.0).minimum(
+            fade_top - top_log_temperature)
         return base + slope * self._expand_like(excursion, base)
 
     def _stic_radiative_component(
@@ -171,20 +177,43 @@ class SolarPlasmaTable(ContinuumOpacity):
         state: SolarPlasmaState,
         *,
         spectral_state: STICSpectralState | None = None,
+        paired_wavelengths: bool = False,
+        grid_wavelengths: bool = False,
+        radiative_logs: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        wavelength = self._wavelength_tensor(
-            wavelength_vacuum_angstrom, state.temperature
-        )
+        wavelength = (torch.as_tensor(wavelength_vacuum_angstrom,
+            device=state.temperature.device, dtype=state.temperature.dtype)
+            if grid_wavelengths else self._wavelength_tensor(wavelength_vacuum_angstrom, state.temperature))
         if spectral_state is None:
             self._validate_stic_wavelengths(wavelength)
             spectral_state = self._stic_wavelength_coordinates(
                 wavelength, state.temperature
             )
-        logs = self._hot_continued_stic_logs(table, state)
+        logs = (self._hot_continued_stic_logs(table, state)
+                if radiative_logs is None else radiative_logs)
         lower = spectral_state.lower_indices.to(device=state.temperature.device)
         upper = spectral_state.upper_indices.to(device=state.temperature.device)
         weight = spectral_state.weight.to(state.temperature)
-        interpolated = logs[..., lower] + weight * (logs[..., upper] - logs[..., lower])
+        if grid_wavelengths:
+            # Gather requested wavelengths from each point's compact table.
+            # The index view expands; the full table never acquires a W axis.
+            shape = torch.broadcast_shapes((*state.temperature.shape, 1), wavelength.shape)
+            lower = lower.expand(shape).unsqueeze(-2).expand(*shape[:-1], logs.shape[-2], shape[-1])
+            upper = upper.expand(shape).unsqueeze(-2).expand_as(lower)
+            low, high = torch.gather(logs, -1, lower), torch.gather(logs, -1, upper)
+            interpolated = low + weight.unsqueeze(-2) * (high - low)
+        elif paired_wavelengths:
+            if wavelength.shape != state.temperature.shape:
+                raise ValueError("Paired wavelengths must match the plasma point shape")
+            # The table has a component axis before its wavelength axis. Gather
+            # one spectral interval per point, without a point-by-point product.
+            lower = lower[..., None, None].expand(*logs.shape[:-1], 1)
+            upper = upper[..., None, None].expand(*logs.shape[:-1], 1)
+            low = torch.gather(logs, -1, lower)[..., 0]
+            high = torch.gather(logs, -1, upper)[..., 0]
+            interpolated = low + weight[..., None] * (high - low)
+        else:
+            interpolated = logs[..., lower] + weight * (logs[..., upper] - logs[..., lower])
         return torch.pow(state.temperature.new_tensor(10.0), interpolated)
 
     def continuum_components(
@@ -193,6 +222,9 @@ class SolarPlasmaTable(ContinuumOpacity):
         state: SolarPlasmaState,
         *,
         spectral_state: STICSpectralState | None = None,
+        paired_wavelengths: bool = False,
+        grid_wavelengths: bool = False,
+        radiative_logs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return true absorption and scattering over the complete domain."""
 
@@ -201,7 +233,14 @@ class SolarPlasmaTable(ContinuumOpacity):
             wavelength_vacuum_angstrom,
             state,
             spectral_state=spectral_state,
+            paired_wavelengths=paired_wavelengths,
+            grid_wavelengths=grid_wavelengths,
+            radiative_logs=radiative_logs,
         )
+        if paired_wavelengths:
+            # Keep the shared continuation below in [..., component, wavelength]
+            # form, with a singleton wavelength dimension for every point.
+            components = components[..., None]
         photospheric_weight = self._expand_like(
             state.photospheric_weight, components[..., 0, :]
         )
@@ -221,6 +260,8 @@ class SolarPlasmaTable(ContinuumOpacity):
             photospheric_weight * stic_scattering
             + (1.0 - photospheric_weight) * thomson
         )
+        if paired_wavelengths:
+            return absorption[..., 0], scattering[..., 0]
         return absorption, scattering
 
     def forward(

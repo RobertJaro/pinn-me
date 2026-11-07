@@ -16,6 +16,10 @@ from .data_terms import (
     SharedTermResult,
 )
 
+_STOKES_RESIDUAL_METRICS = tuple(
+    f"stokes_{component}_raw_residual_rms" for component in ("I", "Q", "U", "V")
+)
+
 
 @dataclass(frozen=True, slots=True)
 class JointEvaluation:
@@ -44,13 +48,13 @@ class JointEvaluation:
             }
         )
         for name, result in self.streams.items():
+            for component in ("I", "Q", "U", "V"):
+                if component in result.component_losses:
+                    values[f"streams.{name}.component_mse.{component}"] = result.component_losses[component]
             for metric in (
+                *_STOKES_RESIDUAL_METRICS,
                 "qu_weight_factor",
                 "line_of_sight_velocity_correction_m_per_s",
-                "phase_rotation_active",
-                "phase_binary_weight",
-                "phase_binary_mean_sin2",
-                "phase_binary_loss",
             ):
                 if metric in result.metrics:
                     values[f"streams.{name}.{metric}"] = result.metrics[metric]
@@ -70,16 +74,17 @@ class JointEvaluation:
         return values
 
     def validation_metrics(self) -> dict[str, torch.Tensor]:
-        """One data loss and one fit-error measure per observation stream."""
+        """Unweighted likelihoods, component errors and validation health checks."""
         values = {}
         for name, result in self.streams.items():
             values[f"streams.{name}.data_loss"] = result.likelihood_loss
+            for component in ("I", "Q", "U", "V"):
+                if component in result.component_losses:
+                    values[f"streams.{name}.component_mse.{component}"] = result.component_losses[component]
             for metric in (
-                "residual_rms",
+                *_STOKES_RESIDUAL_METRICS,
+                "stokes_outgoing_admissibility_max",
                 "asinh_rmse",
-                "line_of_sight_velocity_correction_m_per_s",
-                "phase_rotation_active",
-                "phase_binary_mean_sin2",
             ):
                 if metric in result.metrics:
                     values[f"streams.{name}.{metric}"] = result.metrics[metric]
@@ -125,6 +130,7 @@ class JointForwardModel(nn.Module):
         shared_terms: Mapping[str, SharedObjectiveTerm] | None = None,
         *,
         weight_schedules: Mapping[str, Mapping[str, object]] | None = None,
+        synthesis_windows: Mapping[str, nn.Module] | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(atmosphere_model, nn.Module):
@@ -169,6 +175,7 @@ class JointForwardModel(nn.Module):
         ):
             raise ValueError("Joint stream weights must be finite and non-negative.")
         self.atmosphere_model = atmosphere_model
+        self.synthesis_windows = nn.ModuleDict(dict(synthesis_windows or {}))
         self.terms = nn.ModuleDict(dict(terms))
         self.shared_objectives = nn.ModuleDict(shared_terms)
         self.weights = normalized_weights
@@ -280,6 +287,7 @@ class JointForwardModel(nn.Module):
     def evaluate_batches(
         self,
         batches: Mapping[str, Mapping[str, Any]],
+        *, diagnostics: bool = True,
     ) -> JointEvaluation:
         """Evaluate each supplied stream and assemble its ready-to-enable loss."""
 
@@ -297,10 +305,15 @@ class JointForwardModel(nn.Module):
         for stream_id, term in self.terms.items():
             stream_weight = self.effective_stream_weight(stream_id)
             active = stream_weight > 0.0
+            # Diagnostic-only streams must not synthesize expensive rays on
+            # every optimizer step. Evaluation still renders every stream.
+            if self.training and not active:
+                continue
             # A zero-weight stream remains available for forward diagnostics,
             # but neither its likelihood nor its calibration priors may fit.
             with torch.set_grad_enabled(torch.is_grad_enabled() and active):
-                result = term.evaluate_batch(batches[stream_id])
+                evaluate = term.evaluate_batch if diagnostics else term.evaluate_training_batch
+                result = evaluate(batches[stream_id])
             likelihood = result.likelihood_loss
             if not getattr(term, "distributed_channel_reduction", False):
                 from prom3theus.core.distributed import distributed_mean
@@ -320,6 +333,16 @@ class JointForwardModel(nn.Module):
             total = contribution if total is None else total + contribution
             if not active:
                 continue
+            if result.constraint_losses:
+                from prom3theus.core.distributed import distributed_mean
+                # Physical penalties retain their own weights, independently
+                # of the observation likelihood weight and adaptive multiplier.
+                constraints = {name: distributed_mean(value, result.sample_count)
+                               for name, value in result.constraint_losses.items()}
+                constraint_total = sum(constraints.values())
+                shared[f"observation_{stream_id}"] = SharedTermResult(
+                    loss=constraint_total, component_losses=constraints, metrics={})
+                total = total + constraint_total
             for name, value in term.nuisance_losses().items():
                 if not isinstance(name, str) or not name:
                     raise ValueError("Nuisance-loss names must be non-empty strings.")

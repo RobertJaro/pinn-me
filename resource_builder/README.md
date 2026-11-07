@@ -40,7 +40,7 @@ log10(T) = 4.00, falls to 0.03 by 4.08 and turns negative by 4.10: a hotter
 table makes the hybrid EoS unconstructible, and the runtime raises "The
 STiC/CHIANTI charge bridge is not monotone for this state." The pressure
 ceiling carries no such coupling, since raising it only extends the cool,
-dense corner; it reaches 10 MPa so a shell floor near -2 Mm stays inside the
+dense corner; it reaches 10 MPa so a shell floor near -2 megameter stays inside the
 tabulated domain instead of relying on the bounded pressure continuation.
 3. reduces the default CHIANTI 11.0.2 zero-density coronal equilibrium to the
    single required free-electrons-per-H mapping using the same STiC abundance
@@ -68,9 +68,9 @@ including its C1 tangent-decay shoulder.
 same pinned STiC FALC_82 atmosphere. The 25-point line-formation view on
 `-5 <= log10(tau500) <= 1` is unchanged, so the existing optical-depth-to-height
 ray mapping is stable. The physical-height view restores all 37 native samples
-with `log10(tau500) < -5`; its true top is 2.073502459 Mm at 100 kK and
+with `log10(tau500) < -5`; its true top is 2.073502459 megameter at 100 kK and
 0.0319344213 Pa. Runtime begins the coronal continuation only at this native
-top: a quintic smootherstep in `log(T)` reaches the configured 1 MK at 2.5 Mm
+top: a quintic smootherstep in `log(T)` reaches the configured 1 MK at 2.5 megameter
 and is isothermal above it, while pressure is integrated hydrostatically with
 inverse-square gravity and `HybridSolarEOS`. The builder stores the pinned FALC
 values and their provenance; the runtime constructs the configurable coronal
@@ -79,7 +79,7 @@ continuation rather than embedding it in the resource.
 The interior continuation below the table follows the same split. FALC_82 stops
 at -68815.4366781354 m, so any shell whose floor lies deeper needs a downward
 continuation; extrapolating the tabulated gradient instead reaches roughly
-48 kK by -0.5 Mm, about four times the real solar value. Runtime therefore
+48 kK by -0.5 megameter, about four times the real solar value. Runtime therefore
 integrates a hydrostatic adiabat from the native bottom, again with
 inverse-square gravity and `HybridSolarEOS`, using the Kippenhahn & Weigert
 `dlnT/dlnP` for a partly ionized hydrogen gas. Its ionization degree is LTE
@@ -131,10 +131,15 @@ individual files: the runtime intentionally rejects stale or mixed bundles.
 
 # Coronal energy cooling table
 
-The optional coronal energy constraint uses an independently prepared CHIANTI
-radiative-loss table. Run `conda run --no-capture-output -n sunerf python -m
+The optional coronal energy constraint uses an independently sealed
+`plasma_v1` resource set (`src/prom3theus/resources/sets/plasma/plasma_v1/`),
+verified through `prom3theus.resources.registry` exactly like `aia_euv_v1`.
+Run `conda run --no-capture-output -n sunerf python -m
 resource_builder.coronal_cooling --database-root /path/to/chianti/11.0.2` with
-fiasco 0.8.2 and the existing CHIANTI ASCII/HDF5 database. See
+fiasco 0.8.2 and the existing CHIANTI ASCII/HDF5 database; this writes the
+table plus its `manifest.json`/`sources.json` together, so the set stays
+self-consistent after every regeneration. See
 [the energy constraint documentation](../docs/coronal-energy.md) for units,
 abundance assumptions, and activation. This is separate from the sealed LTE
-bundle and the instrument-specific AIA response.
+bundle and the instrument-specific AIA response, but uses the same
+independently-versioned resource-set mechanism as the latter.

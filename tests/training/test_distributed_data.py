@@ -9,6 +9,125 @@ import torch
 from prom3theus.training.streams import StreamBatchScheduler
 
 
+@pytest.mark.parametrize("device,visible,expected", [
+    ("cuda", 4, 4), ("cuda", 1, 1), ("cuda:2", 4, 1), ("cpu", 4, 1),
+])
+def test_auto_devices_uses_visible_gpus_and_native_ddp(monkeypatch, device, visible, expected):
+    import lightning_fabric
+    from prom3theus.core.distributed import initialize_distributed
+
+    calls = []
+    active = [False]
+
+    class Launcher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def launch(self):
+            active[0] = True
+
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible)
+    monkeypatch.setattr(lightning_fabric, "Fabric", Launcher)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: active[0])
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: expected)
+    assert initialize_distributed(torch.device(device)) == (0, expected)
+    assert calls == ([dict(accelerator='cuda', devices=expected, strategy='ddp')]
+                     if expected > 1 else [])
+
+
+@pytest.mark.skipif(not torch.distributed.is_gloo_available(), reason="Requires Gloo")
+def test_native_ddp_launches_before_sampling_and_synchronizes_gradients(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    worker = tmp_path / "native_ddp.py"
+    worker.write_text(textwrap.dedent('''
+        from pathlib import Path
+        import torch
+        from prom3theus.core.distributed import initialize_distributed
+        from prom3theus.observations.persistence import JointDataModule, restore_or_create_data_module
+        from prom3theus.training.streams import StreamBatchScheduler
+
+        if __name__ == '__main__':
+            torch.set_num_threads(1)
+            rank, world = initialize_distributed(torch.device('cpu'), devices=2)
+            assert world == 2
+            calls = torch.zeros(2, dtype=torch.long)
+            def build():
+                assert rank == 0, 'worker must never construct the data module'
+                calls[0] += 1
+                return JointDataModule({'values': torch.arange(8)}, None)
+            def finalize(module):
+                assert rank == 0, 'worker must never prepare training pools'
+                calls[1] += 1
+                return False
+            path = Path(__file__).parent / 'data_module.pt'
+            module = restore_or_create_data_module(path, build, finalize=finalize)
+            first_generation = module.generation
+            module = restore_or_create_data_module(path, build, finalize=finalize)
+            assert module.generation == first_generation
+            assert calls.tolist() == ([1, 2] if rank == 0 else [0, 0])
+            torch.distributed.barrier()
+            module = restore_or_create_data_module(path, build, finalize=finalize, rebuild=True)
+            assert module.generation != first_generation
+            assert calls.tolist() == ([2, 3] if rank == 0 else [0, 0])
+            generations = [None] * world
+            torch.distributed.all_gather_object(generations, module.generation)
+            assert len(set(generations)) == 1
+            torch.testing.assert_close(module.streams['values'][:], torch.arange(8))
+            batches = StreamBatchScheduler({'x': [1., 3., 5., 7.]}, 'x', rank=rank, world_size=world)
+            local = [batch['x'] for batch in batches]
+            assert local == ([1., 5.] if rank == 0 else [3., 7.])
+            model = torch.nn.parallel.DistributedDataParallel(torch.nn.Linear(1, 1, bias=False))
+            loss = model(torch.tensor([[local[0]]])).sum()
+            loss.backward()
+            torch.testing.assert_close(model.module.weight.grad, torch.tensor([[2.]]))
+            optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+            optimizer.step()
+            copies = [torch.empty_like(model.module.weight) for _ in range(world)]
+            torch.distributed.all_gather(copies, model.module.weight.detach())
+            torch.testing.assert_close(copies[0], copies[1], rtol=0, atol=0)
+            torch.distributed.barrier()
+            if rank == 0:
+                print('NATIVE_DDP_OK', flush=True)
+            torch.distributed.destroy_process_group()
+    '''))
+    environment = dict(os.environ, MASTER_ADDR="127.0.0.1", OMP_NUM_THREADS="1")
+    for key in ('RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'LOCAL_WORLD_SIZE', 'MASTER_PORT',
+                'NODE_RANK', 'GROUP_RANK', 'TORCHELASTIC_RUN_ID'):
+        environment.pop(key, None)
+    root = Path(__file__).resolve().parents[2]
+    environment['PYTHONPATH'] = str(root / 'src') + os.pathsep + environment.get('PYTHONPATH', '')
+    result = subprocess.run([sys.executable, str(worker)], env=environment,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'NATIVE_DDP_OK' in result.stdout
+
+
+@pytest.mark.parametrize("old_world,new_world", [(1, 4), (4, 2), (2, 1)])
+def test_changed_world_size_restarts_coverage_without_changing_data_contract(old_world, new_world):
+    loaders = {"a": list(range(8))}
+    old = StreamBatchScheduler(loaders, "a", world_size=old_world)
+    list(old)
+    saved = old.state_dict()
+    observed = []
+    for rank in range(new_world):
+        current = StreamBatchScheduler(loaders, "a", rank=rank, world_size=new_world)
+        current.load_state_dict(saved)
+        assert current.completed == 0
+        assert current.order_migrated
+        observed.extend(batch['a'] for batch in current if batch.get('_data_valid', True))
+    assert sorted(observed) == list(range(8))
+    changed = StreamBatchScheduler({"a": list(range(9))}, "a", world_size=new_world)
+    with pytest.raises(ValueError, match="Checkpoint stream schedule differs"):
+        changed.load_state_dict(saved)
+
+
 @pytest.mark.parametrize("world_size", [1, 2, 4])
 @pytest.mark.parametrize("length", [1, 5, 8])
 def test_rank_partition_and_resume_cover_each_reference_once(world_size, length):

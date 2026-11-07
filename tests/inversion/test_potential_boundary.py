@@ -223,7 +223,7 @@ def test_source_geometry_does_not_depend_on_exterior_query_height_or_count():
     from dataclasses import replace
     taller = ProgressivePotentialBoundary(
         options | {'top_grid_size': 3, 'side_horizontal_points': 4},
-        replace(domain, height_bounds_Mm=(-.1, 80.)), domain, torch.eye(3), observation_times_hours=[0., 1., 2.])
+        replace(domain, height_bounds_megameter=(-.1, 80.)), domain, torch.eye(3), observation_times_hours=[0., 1., 2.])
     torch.testing.assert_close(source.source_positions, taller.source_positions)
     torch.testing.assert_close(source.source_cells, taller.source_cells)
 

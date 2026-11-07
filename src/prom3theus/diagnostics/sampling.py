@@ -66,18 +66,18 @@ def map_coordinates(
     rows: np.ndarray,
     columns: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return two-dimensional Carrington-chart center grids in Mm."""
+    """Return two-dimensional Carrington-chart center grids in megameter."""
 
     coords = read_native_grid(raster.coordinates, rows, columns).detach().float().cpu().numpy()
     if coords.shape[-1] != 3:
         raise ValueError(
-            "Observation coordinates must end in [x_mm, y_mm, time_hours]."
+            "Observation coordinates must end in [x_megameter, y_megameter, time_hours]."
         )
-    x_mm = coords[..., 0]
-    y_mm = coords[..., 1]
-    if not np.isfinite(x_mm).all() or not np.isfinite(y_mm).all():
+    x_megameter = coords[..., 0]
+    y_megameter = coords[..., 1]
+    if not np.isfinite(x_megameter).all() or not np.isfinite(y_megameter).all():
         raise ValueError("Observation map coordinates must be finite.")
-    return x_mm, y_mm
+    return x_megameter, y_megameter
 
 
 def integrated_stokes(
@@ -108,7 +108,9 @@ def integrated_stokes(
             "Stokes, wavelength_angstrom, and wavelength_weights must share at least "
             "two spectral samples."
         )
-    wavelength = wavelength_angstrom.to(stokes)
+    # Subtract absolute optical wavelengths before casting to profile precision;
+    # float32 can otherwise merge distinct sub-milliangstrom samples.
+    wavelength = wavelength_angstrom.to(device=stokes.device)
     spectral_weights = wavelength_weights.to(stokes)
     if (
         not torch.isfinite(wavelength).all()
@@ -119,7 +121,7 @@ def integrated_stokes(
         raise ValueError("wavelength_angstrom must be strictly increasing.")
     if torch.any(spectral_weights < 0):
         raise ValueError("wavelength_weights must be non-negative.")
-    weighted_delta_wavelength = (wavelength[1:] - wavelength[:-1]) * torch.minimum(
+    weighted_delta_wavelength = (wavelength[1:] - wavelength[:-1]).to(stokes) * torch.minimum(
         spectral_weights[1:], spectral_weights[:-1]
     )
     return (
@@ -154,6 +156,9 @@ class ValidationSampleCollector:
         pixel_index: torch.Tensor,
         wavelength_angstrom: torch.Tensor,
         wavelength_weights: torch.Tensor,
+        *,
+        raw_prediction: torch.Tensor | None = None,
+        raw_reference: torch.Tensor | None = None,
     ) -> None:
         """Add one validation batch without retaining every full profile."""
 
@@ -174,6 +179,13 @@ class ValidationSampleCollector:
         candidate = {
             "stokes_pred": prediction.detach().float().cpu(),
             "stokes_reference": reference.detach().float().cpu(),
+            "raw_stokes_pred": (
+                prediction if raw_prediction is None else raw_prediction
+            ).detach().float().cpu(),
+            "raw_stokes_reference": (
+                reference if raw_reference is None else raw_reference
+            ).detach().float().cpu(),
+            "profile_pixel_index": cpu_pixel_index,
             "priority": (
                 (cpu_pixel_index[:, 0] * 73_856_093)
                 ^ (cpu_pixel_index[:, 1] * 19_349_663)
@@ -225,6 +237,9 @@ class ValidationSampleCollector:
                 "pixel_index",
                 "stokes_pred",
                 "stokes_reference",
+                "raw_stokes_pred",
+                "raw_stokes_reference",
+                "profile_pixel_index",
                 "priority",
             )
         }
@@ -235,7 +250,10 @@ class ValidationSampleCollector:
                 largest=False,
                 sorted=False,
             ).indices
-            for key in ("stokes_pred", "stokes_reference", "priority"):
+            for key in (
+                "stokes_pred", "stokes_reference", "raw_stokes_pred",
+                "raw_stokes_reference", "profile_pixel_index", "priority",
+            ):
                 merged[key] = merged[key].index_select(0, selected)
         return merged
 

@@ -1,14 +1,19 @@
 import numpy as np
 import torch
 
-from prom3theus.diagnostics.physics_equations import evaluate_equation_slice, equation_figure
+from prom3theus.diagnostics.physics_equations import (
+    evaluate_equation_slice,
+    evaluate_upper_equation_slice,
+    equation_figure,
+)
 from prom3theus.inversion.constraints.magnetofluid import MagnetofluidConstraints
 from prom3theus.inversion.sampling import SphericalShellDomain
+from prom3theus.resources import CORONAL_COOLING_RESOURCE
 from prom3theus.rt import StratifiedAtmosphereModel
 
 
 def test_slice_preserves_height_groups_and_reconstructs_loss_across_batches():
-    model = StratifiedAtmosphereModel(shell_height_bounds_Mm=(1.5, -.1),
+    model = StratifiedAtmosphereModel(shell_height_bounds_megameter=(1.5, -.1),
         scene_geometry_config={'solar_radius_m': 696e6, 'scene_basis': torch.eye(3)},
         model_config={'type': 'mlp', 'dim': 8, 'n_layers': 2, 'activation': 'silu', 'encoding_config': {'type': 'identity'}})
     domain = SphericalShellDomain(0., (-.04, .04), (-.04, .04), (0., 2.), (-.1, 1.5), 696e6)
@@ -21,6 +26,71 @@ def test_slice_preserves_height_groups_and_reconstructs_loss_across_batches():
         np.testing.assert_allclose(height[[0,-1]], [-.1, 1.5])
         assert all(p.grad is None for p in model.parameters())
     np.testing.assert_allclose(outputs[0][2]['magnetic_divergence']['normalized_residual'], outputs[1][2]['magnetic_divergence']['normalized_residual'], rtol=1e-5, atol=1e-7)
+
+
+def test_upper_slice_clamps_below_minimum_height_and_reconstructs_loss():
+    model = StratifiedAtmosphereModel(
+        shell_height_bounds_megameter=(10.0, -0.1),
+        line_formation_height_bounds_megameter=(1.5, -0.1),
+        time_dependent=True,
+        upper_atmosphere_config={
+            "type": "hydrostatic_corona",
+            "transition_region_top_megameter": 2.5,
+            "coronal_temperature_k": 1.0e6,
+            "reference_grid_points": 128,
+        },
+        scene_geometry_config={"solar_radius_m": 696e6, "scene_basis": torch.eye(3)},
+        model_config={
+            "type": "mlp", "dim": 8, "n_layers": 2, "activation": "silu",
+            "encoding_config": {"type": "identity"},
+        },
+    )
+    constraints = MagnetofluidConstraints(
+        {
+            "coronal_energy": {
+                "enabled": True,
+                "weight": 1.0,
+                "cooling_resource": CORONAL_COOLING_RESOURCE,
+                "minimum_height_megameter": 3.0,
+            },
+        },
+        vector_basis_matches_spatial_coordinates=True,
+    )
+    # The upper shell itself starts at the line-formation top (1.5 megameter), below
+    # coronal_energy's own minimum_height_megameter (3.0 megameter): the slice must
+    # clamp to the latter (plus a small safety margin -- see
+    # _UPPER_SLICE_HEIGHT_MARGIN_MEGAMETER) so every sampled point stays inside the
+    # equation's valid domain (upper_domain rejects a partial mask under
+    # diagnostics). Without the margin, the domain -> position -> height
+    # round trip can land the lowest row a hair below the boundary on some
+    # backends (observed on GPU in production, not reproduced on CPU here),
+    # tripping that rejection.
+    # latitude_points is even (not 5, as the volume-equation test above uses)
+    # to avoid an exact on-axis sample -- StratifiedAtmosphereModel currently
+    # returns NaN there once upper_atmosphere_config is set, a pre-existing
+    # issue unrelated to this slice function; see the session notes.
+    domain = SphericalShellDomain(0.0, (-.04, .04), (-.04, .04), (0.0, 2.0), (1.5, 10.0), 696e6)
+    outputs = [
+        evaluate_upper_equation_slice(
+            model, constraints, domain, longitude_deg=0.0, latitude_points=4,
+            height_points=4, batch_size=batch, minimum_height_megameter=3.0,
+        )
+        for batch in (4, 16)
+    ]
+    for lat, height, data, losses, time in outputs:
+        d = data["coronal_energy"]
+        np.testing.assert_allclose(
+            np.mean(d["normalized_residual"] ** 2), losses["coronal_energy"], rtol=1e-5
+        )
+        assert len(lat) == 4 and len(height) == 4 and time == 1.0
+        assert height[0] > 3.0, "lowest row must clear minimum_height_megameter, not just equal it"
+        np.testing.assert_allclose(height[[0, -1]], [3.01, 10.0])
+        assert all(p.grad is None for p in model.parameters())
+    np.testing.assert_allclose(
+        outputs[0][2]["coronal_energy"]["normalized_residual"],
+        outputs[1][2]["coronal_energy"]["normalized_residual"],
+        rtol=1e-5, atol=1e-7,
+    )
 
 
 def test_equation_plot_has_total_first_and_two_rows_including_zero_terms():

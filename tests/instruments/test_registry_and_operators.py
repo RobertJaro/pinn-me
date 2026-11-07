@@ -16,8 +16,7 @@ from prom3theus.instruments import (
     get_instrument_registration,
     resolve_instrument_config,
 )
-from prom3theus.inversion.assembly import build_forward_assembly
-from prom3theus.inversion.configuration import DepthSamplingSettings
+from prom3theus.rt import LTELocalCoefficients, air_to_vacuum_angstrom
 from prom3theus.observations import get_observation_adapter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -140,32 +139,30 @@ def test_hmi_production_quadrature_has_distinct_float32_continuum_endpoints():
     )
 
 
-def test_hmi_production_grid_prepares_the_assembled_float32_lte_forward_model():
+def test_hmi_production_grid_prepares_float32_local_radiation_coefficients():
     half_width = 0.65
     reference = 6173.3433
     nodes, _ = np.polynomial.legendre.leggauss(81)
     quadrature = reference + half_width * nodes
 
-    assembly = build_forward_assembly(
-        atmosphere_model=torch.nn.Identity(),
-        synthesizer_config={"line_ids": ["FeI_6173.3352"]},
-        instrument_config={
+    instrument = build_instrument(
+        {
             "type": "hmi_filter_profiles",
             "quadrature_wavelength_angstrom": quadrature,
             "inner_half_width_angstrom": half_width,
             "magnetic_azimuth_offset_deg": 90.0,
-        },
-        velocity_synthesis_mode="carrington_observer_relative",
-        depth_sampling=DepthSamplingSettings(3, False, 1, 0.0),
-        wavelength_angstrom=torch.linspace(
-            6173.1713, 6173.5153, 6, dtype=torch.float32
-        ),
+        }
     )
-    assembly.synthesizer.float()
-    assembly.instrument.float()
-    synthesis = assembly.synthesis_wavelength_angstrom.float()
+    synthesis = instrument.synthesis_grid(
+        torch.linspace(6173.1713, 6173.5153, 6, dtype=torch.float64)
+    )
+    coefficients = LTELocalCoefficients(line_ids=["FeI_6173.3352"])
+    coefficients.prepare_wavelength_grid(air_to_vacuum_angstrom(synthesis))
+    coefficients.float()
+    instrument.float()
+    synthesis = synthesis.float()
 
-    assert assembly.synthesizer.wavelength_grid_prepared
+    assert coefficients.wavelength_grid_prepared
     assert synthesis.numel() == 83
     assert torch.all(synthesis[1:] > synthesis[:-1])
 
@@ -191,10 +188,10 @@ def test_public_factory_requires_an_exact_discriminator():
 @pytest.mark.parametrize(
     ("filename", "data_module_name"),
     [
-        ("hinode_lte_mhs.yaml", "HinodeDataModule"),
-        ("hinode_lte_mhs_extrapolation.yaml", "HinodeDataModule"),
-        ("hmi_lte_mhs.yaml", "HMIDataModule"),
-        ("hmi_lte_dynamic.yaml", "HMIDataModule"),
+        ("hinode/mhs.yaml", "HinodeDataModule"),
+        ("hinode/mhs_extrapolation.yaml", "HinodeDataModule"),
+        ("sdo/hmi_aia_potential.yaml", "HMIDataModule"),
+        ("sdo/hmi_dynamic.yaml", "HMIDataModule"),
     ],
 )
 def test_shipped_observation_sections_construct_their_exact_adapter(

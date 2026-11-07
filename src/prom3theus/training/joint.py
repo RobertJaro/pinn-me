@@ -9,6 +9,8 @@ from pytorch_lightning import LightningModule
 
 from prom3theus.config.joint_schema import JointTrainingConfig, LossBalanceConfig
 from prom3theus.inversion.joint import JointForwardModel
+from prom3theus.training.optimizers import build_optimizer
+from prom3theus.training.metrics import reduce_training_metrics
 
 
 def _restore_cuda_rng_state(states):
@@ -31,14 +33,35 @@ def _scientific_contract(contract):
     if not isinstance(contract, dict):
         return contract
     contract = deepcopy(contract)
+
     config = contract.get("configuration", {})
     for key in ("training", "solver", "dry_run", "diagnostics", "logging"):
         config.pop(key, None)
+    # Chunking, training jitter and arithmetic precision are fitting controls.
+    # Retain the physical model and depth grid in the compatibility contract.
+    for window in config.get("synthesis", {}).get("windows", []):
+        window.pop("wavelength_chunk_size", None)
+        window.pop("jitter_fraction", None)
+        window.pop("transfer_precision", None)
+        if not (window.get("coarse_to_fine") or {}).get("enabled", False):
+            window.pop("coarse_to_fine", None)
+    for window in contract.get("synthesis_windows", {}).values():
+        window.pop("wavelength_chunk_size", None)
+        window.pop("jitter_fraction", None)
+        window.pop("transfer_precision", None)
+        if not (window.get("coarse_to_fine") or {}).get("enabled", False):
+            window.pop("coarse_to_fine", None)
     magnetic = config.get("atmosphere", {}).get("parameters", {}).get("magnetic_field", {})
     # None preserves the original height-dependent readout. Old configurations
     # omit this field; numerical reference heights change the physical model.
     if magnetic.get("reference_height_megameter") is None:
         magnetic.pop("reference_height_megameter", None)
+    # The default decoder multiplier preserves checkpoints predating this option.
+    if magnetic.get("scale_vector_potential", 1.0) == 1.0:
+        magnetic.pop("scale_vector_potential", None)
+    atmosphere = contract.get("atmosphere", {})
+    if atmosphere.get("scale_vector_potential", 1.0) == 1.0:
+        atmosphere.pop("scale_vector_potential", None)
     physics = config.get("physics", {})
     for key in (
         "magnetic_current_free_steps",
@@ -62,11 +85,6 @@ def _scientific_contract(contract):
     for key in list(physics.get("collocation", {})):
         if key.endswith("_per_step") or key in {
             "height_sampling_power",
-            "residual_adaptive_enabled",
-            "residual_adaptive_candidate_multiplier",
-            "residual_adaptive_fraction",
-            "residual_adaptive_start_step",
-            "residual_adaptive_update_every_n_steps",
         }:
             physics["collocation"].pop(key)
     potential = physics.get("potential_boundary", {})
@@ -113,11 +131,9 @@ def _scientific_contract(contract):
         term.pop("weight", None)
         term.pop("weight_schedule", None)
         term.pop("objective", None)
-        disambiguation = term.get("disambiguation")
-        if not disambiguation or not disambiguation.get("enabled", False):
-            # A disabled phase continuation has no scientific state and is
-            # equivalent to its absence in older checkpoint contracts.
-            term.pop("disambiguation", None)
+        # Fitting a global instrumental offset is an optimization control.
+        # Fixed calibration values remain part of the scientific contract.
+        term.get("instrument", {}).pop("optimize_line_of_sight_velocity_correction", None)
     terms = contract.get("terms", {})
     if not isinstance(terms, Mapping):
         return contract
@@ -129,9 +145,7 @@ def _scientific_contract(contract):
         options = term_contract.get("options", {})
         if not isinstance(options, dict):
             continue
-        disambiguation = options.get("disambiguation_config")
-        if not disambiguation or not disambiguation.get("enabled", False):
-            options.pop("disambiguation_config", None)
+        options.pop("optimize_instrument_line_of_sight_velocity_correction", None)
     return contract
 
 
@@ -180,26 +194,26 @@ class GradientLossBalancer:
         model: JointForwardModel,
         evaluation,
         *,
-        excluded_objectives=(),
+        included_objectives=(),
     ):
-        excluded = set(excluded_objectives)
+        included = set(included_objectives)
         sources: dict[str, torch.Tensor] = {}
         for stream_id, value in evaluation.weighted_likelihoods.items():
             key = f"streams.{stream_id}"
-            if key not in excluded:
-                sources[key] = value
+            # Keep streams available for reference selection even when fixed.
+            sources[key] = value
         for term_id, result in evaluation.shared_terms.items():
             if result.component_losses:
                 sources.update(
                     {
                         f"shared.{term_id}.{name}": value
                         for name, value in result.component_losses.items()
-                        if f"shared.{term_id}.{name}" not in excluded
+                        if f"shared.{term_id}.{name}" in included
                     }
                 )
             elif result.active:
                 key = f"shared.{term_id}.loss"
-                if key not in excluded:
+                if key in included:
                     sources[key] = result.loss
         return sources
 
@@ -246,7 +260,7 @@ class GradientLossBalancer:
         sources = self._objective_sources(
             model,
             evaluation,
-            excluded_objectives=settings.excluded_objectives,
+            included_objectives=settings.included_objectives,
         )
         if not parameters or len(sources) < 2:
             return {}
@@ -264,6 +278,12 @@ class GradientLossBalancer:
                 next(iter(sources)),
             )
         )
+        sources = {
+            key: value for key, value in sources.items()
+            if key == reference_key or key in settings.included_objectives
+        }
+        if len(sources) < 2:
+            return {}
         world_size = (
             torch.distributed.get_world_size()
             if torch.distributed.is_initialized()
@@ -321,7 +341,9 @@ class GradientLossBalancer:
         self._ema_ratios = {
             str(key): float(value)
             for key, value in ratios.items()
-            if math.isfinite(float(value)) and float(value) > 0.0
+            if key in self.settings.included_objectives
+            and key != f"streams.{self.reference_stream}"
+            and math.isfinite(float(value)) and float(value) > 0.0
         }
 
 
@@ -373,46 +395,33 @@ class JointInversionModule(LightningModule):
         valid = batch.get("_data_valid", True)
         if "_data_valid" in batch:
             batch = {key: value for key, value in batch.items() if key != "_data_valid"}
+        cadence = getattr(self.settings, "log_every_n_steps", 10)
+        collect_metrics = self.global_step == 0 or (self.global_step + 1) % cadence == 0
         with distributed_batch(valid):
-            evaluation = self.model.evaluate_batches(batch)
+            evaluation = self.model.evaluate_batches(batch, diagnostics=collect_metrics)
         if self._first_batch:
             print("First training forward pass complete: starting backward", flush=True)
         if not evaluation.loss.requires_grad:
             raise ValueError(
                 "Joint training requires at least one active differentiable objective."
             )
-        metrics = evaluation.training_metrics()
-        if self.loss_balancer is not None:
-            for term_id, result in evaluation.shared_terms.items():
-                metrics.update(
-                    {
-                        f"shared.{term_id}.metrics.{name}": value
-                        for name, value in result.metrics.items()
-                    }
+        # Adaptive weights still update on their own cadence. Display metrics
+        # and their DDP collectives run only when the logger consumes them.
+        balance_metrics = (self.loss_balancer.update(self.model, evaluation, int(self.global_step))
+                           if self.loss_balancer is not None else {})
+        if collect_metrics:
+            metrics = evaluation.training_metrics()
+            if self.loss_balancer is not None:
+                for term_id, result in evaluation.shared_terms.items():
+                    metrics.update({f"shared.{term_id}.metrics.{name}": value
+                                    for name, value in result.metrics.items()})
+                metrics.update(balance_metrics)
+            metrics = reduce_training_metrics(metrics, evaluation, data_valid=valid)
+            for name, value in metrics.items():
+                self.log(
+                    f"train.{name}", value.detach(), on_step=True, on_epoch=False,
+                    prog_bar=name == "loss", batch_size=1,
                 )
-        if self.loss_balancer is not None:
-            metrics.update(
-                self.loss_balancer.update(
-                    self.model,
-                    evaluation,
-                    int(self.global_step),
-                )
-            )
-        if torch.distributed.is_initialized():
-            values = torch.stack([value.detach().to(evaluation.loss).reshape(())
-                                  for value in metrics.values()])
-            torch.distributed.all_reduce(values)
-            values /= torch.distributed.get_world_size()
-            metrics = dict(zip(metrics, values.unbind(), strict=True))
-        for name, value in metrics.items():
-            self.log(
-                f"train.{name}",
-                value.detach(),
-                on_step=True,
-                on_epoch=False,
-                prog_bar=name == "loss",
-                batch_size=1,
-            )
         return evaluation.loss
 
     def on_after_backward(self):
@@ -433,21 +442,37 @@ class JointInversionModule(LightningModule):
                 if not valid:
                     raise FloatingPointError(f"Non-finite joint gradient: {name}")
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.settings.learning_rate)
+    def on_before_optimizer_step(self, optimizer):
+        """Log the learning rate shared by every optimizer parameter group."""
+        cadence = getattr(self.settings, "log_every_n_steps", 10)
+        if self.global_step != 0 and (self.global_step + 1) % cadence:
+            return
+        self.log(
+            "train.optimizer.learning_rate", optimizer.param_groups[0]["lr"],
+            on_step=True, on_epoch=False, batch_size=1,
+        )
+
+    def learning_rate_factor(self, step):
+        """One exponential decay shared by every trainable parameter group."""
         ratio = self.settings.final_learning_rate / self.settings.learning_rate
-        steps = self.trainer.estimated_stepping_batches
+        steps = self.settings.learning_rate_decay_steps
+        if steps is None:
+            steps = self.trainer.estimated_stepping_batches
+            # An unbounded run still needs a finite learning-rate horizon.
+            # Reaching the final rate does not stop optimization.
+            if not math.isfinite(steps):
+                steps = 10000
+        steps = max(steps, 1)
+        progress = min(max(step / steps, 0.0), 1.0)
+        return ratio ** progress
 
-        def learning_rate_factor(step: int) -> float:
-            warmup = getattr(self.settings, "warmup_steps", 0)
-            if warmup > 0 and step < warmup:
-                return max((step + 1) / warmup, 1.0e-3)
-            decay_steps = max(steps - warmup, 1)
-            progress = min(max((step - warmup) / decay_steps, 0.0), 1.0)
-            return ratio**progress
-
+    def configure_optimizers(self):
+        optimizer = build_optimizer(
+            self, kind=getattr(self.settings, "optimizer", "adam"),
+            lr=self.settings.learning_rate, parameter_blocks=None,
+        )
         scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, learning_rate_factor
+            optimizer, self.learning_rate_factor
         )
         return {
             "optimizer": optimizer,
@@ -455,6 +480,8 @@ class JointInversionModule(LightningModule):
         }
 
     def on_save_checkpoint(self, checkpoint):
+        checkpoint["formal_transfer_format_version"] = 1
+        checkpoint["optimizer_kind"] = getattr(self.settings, "optimizer", "adam")
         checkpoint["prom3theus_joint"] = self.context
         if hasattr(self, "stream_scheduler"):
             checkpoint["stream_scheduler"] = self.stream_scheduler.state_dict()
@@ -471,30 +498,16 @@ class JointInversionModule(LightningModule):
 
     def on_train_start(self):
         print("Training ready: waiting for the first batch", flush=True)
-        if getattr(self, "_resume_optimizer_changed", False):
-            # Lightning restores old optimizer/scheduler learning rates after
-            # on_load_checkpoint. Reapply the requested schedule at its saved step.
-            steps = max(self.trainer.estimated_stepping_batches, 1)
-            warmup = getattr(self.settings, "warmup_steps", 0)
-            if warmup > 0 and self.global_step < warmup:
-                factor = max((self.global_step + 1) / warmup, 1.0e-3)
-            else:
-                ratio = self.settings.final_learning_rate / self.settings.learning_rate
-                progress = min(
-                    max((self.global_step - warmup) / max(steps - warmup, 1), 0.0),
-                    1.0,
-                )
-                factor = ratio**progress
-            rate = self.settings.learning_rate * factor
-            for optimizer in self.trainer.optimizers:
-                for group in optimizer.param_groups:
-                    group["initial_lr"] = self.settings.learning_rate
-                    group["lr"] = rate
-            for config in self.trainer.lr_scheduler_configs:
-                config.scheduler.base_lrs = [self.settings.learning_rate] * len(
-                    config.scheduler.base_lrs
-                )
-                config.scheduler._last_lr = [rate] * len(config.scheduler.base_lrs)
+        # Optimizer loading restores saved group rates. Reapply the shared
+        # schedule unconditionally so old block multipliers cannot survive resume.
+        factor = self.learning_rate_factor(self.global_step)
+        for optimizer in self.trainer.optimizers:
+            for group in optimizer.param_groups:
+                group["initial_lr"] = self.settings.learning_rate
+                group["lr"] = self.settings.learning_rate * factor
+        for config in self.trainer.lr_scheduler_configs:
+            config.scheduler.base_lrs = [group["initial_lr"] for group in config.scheduler.optimizer.param_groups]
+            config.scheduler._last_lr = [group["lr"] for group in config.scheduler.optimizer.param_groups]
         if hasattr(self, "_resume_rng"):
             from prom3theus.inversion.data_terms.potential_boundary import (
                 ProgressivePotentialBoundary,
@@ -548,6 +561,8 @@ class JointInversionModule(LightningModule):
             )
 
     def on_load_checkpoint(self, checkpoint):
+        if checkpoint.get("formal_transfer_format_version") != 1:
+            raise ValueError("This run requires a formal LTE checkpoint; start a new run for the changed forward model")
         previous = checkpoint.get("prom3theus_joint")
         old = _scientific_contract(previous.get("contract")) if previous else None
         new = _scientific_contract(self.context["contract"])
@@ -558,20 +573,15 @@ class JointInversionModule(LightningModule):
             )
         self._restore_potential_sampling(checkpoint)
         saved_training = previous.get("configuration", {}).get("training", {})
-        self._resume_optimizer_changed = any(
-            saved_training.get(key) != getattr(self.settings, key, None)
-            for key in (
-                "learning_rate",
-                "final_learning_rate",
-                "warmup_steps",
-                "max_steps",
-                "max_epochs",
-            )
+        saved_optimizer = checkpoint.get(
+            "optimizer_kind", saved_training.get("optimizer", "adam")
         )
+        if saved_optimizer != getattr(self.settings, "optimizer", "adam"):
+            raise ValueError(
+                "Checkpoint optimizer differs from training.optimizer; start a new "
+                "run instead of restoring incompatible optimizer state."
+            )
         # Loss weights/scales are configuration, not learned checkpoint state.
-        for name in list(checkpoint.get("state_dict", {})):
-            if name.endswith(".objective.stokes_sigmas"):
-                del checkpoint["state_dict"][name]
         for name, value in self.state_dict().items():
             if (
                 ".objective." in name
@@ -613,10 +623,14 @@ class JointInversionModule(LightningModule):
                 if isinstance(saved_balance, Mapping)
                 else None
             )
-            for key in self.settings.loss_balance.excluded_objectives:
-                # A resumed checkpoint may predate an exclusion policy and
-                # contain an amplified multiplier for this objective.
-                self.model.set_adaptive_multiplier(key, 1.0)
+            for key in self.model.adaptive_multiplier_state():
+                # Old checkpoints may contain multipliers for objectives that
+                # are now fixed. The reference stream must also stay fixed.
+                if (
+                    key not in self.settings.loss_balance.included_objectives
+                    or key == f"streams.{self.loss_balancer.reference_stream}"
+                ):
+                    self.model.set_adaptive_multiplier(key, 1.0)
             self.loss_balancer.load_state_dict(saved_balance)
 
 

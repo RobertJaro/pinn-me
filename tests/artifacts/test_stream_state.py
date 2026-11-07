@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _runtime(tmp_path):
-    config = load_config(ROOT / "configs/hmi_aia_dynamic.yaml")
+    config = load_config(ROOT / "configs/sdo/hmi_aia_dynamic.yaml")
     stream = config.streams[1]
     sampling = replace(
         stream.data_term.synthesis,
@@ -36,6 +36,7 @@ def _runtime(tmp_path):
         config,
         scene=replace(config.scene, reference_stream=stream.id),
         streams=(stream,),
+        synthesis=replace(config.synthesis, windows=()),
         physics=replace(
             config.physics,
             equations=replace(
@@ -89,7 +90,7 @@ def _runtime(tmp_path):
         ),
     )
     term = _default_term_builder(stream, loaded, atmosphere, scene)
-    model = EvaluationModel(atmosphere, {stream.id: term}).eval()
+    model = EvaluationModel(atmosphere, {stream.id: term}, synthesis_windows={}).eval()
     runtime = SimpleNamespace(
         config=config,
         scene=scene,
@@ -115,7 +116,10 @@ def test_fixed_magnetic_reference_survives_p3s_reconstruction(tmp_path):
     atmosphere = runtime.config.atmosphere
     runtime.config = replace(runtime.config, atmosphere=replace(atmosphere,
         parameters=replace(atmosphere.parameters, magnetic_field=replace(
-            atmosphere.parameters.magnetic_field, reference_height_megameter=.15))))
+            atmosphere.parameters.magnetic_field, representation="direct", reference_height_megameter=.15))),
+        physics=replace(runtime.config.physics, equations=replace(
+            runtime.config.physics.equations, vector_potential_gauge=replace(
+                runtime.config.physics.equations.vector_potential_gauge, enabled=False, weight=0.0))))
     fixed = _default_atmosphere_builder(runtime.config, runtime.scene, runtime.resources)
     fixed.load_state_dict(runtime.model.atmosphere_model.state_dict(), strict=True)
     runtime.model.atmosphere_model = fixed
@@ -135,22 +139,15 @@ def test_fixed_magnetic_reference_survives_p3s_reconstruction(tmp_path):
                                atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("legacy_objective", [False, True])
-def test_public_p3s_roundtrip_without_observations_or_trainer(tmp_path, legacy_objective):
+def test_public_p3s_roundtrip_without_observations_or_trainer(tmp_path):
     runtime, batch = _runtime(tmp_path)
     path = tmp_path / "state.p3s"
     context = snapshot_context(runtime)
-    if legacy_objective:
-        objective = context["configuration"]["streams"][0]["data_term"]["objective"]
-        objective.update(type="asinh_huber", huber_delta=1.0)
-        context["terms"]["coronal_euv"]["options"]["huber_delta"] = 1.0
     with torch.no_grad():
         expected = runtime.model.terms["coronal_euv"].predict(batch)
     save_state(path, runtime.model, context, epoch=2, global_step=17)
     loader = P3SLoader(path, device="cpu")
     assert loader.config.streams[0].data_term.objective.type == "asinh_mse"
-    if legacy_objective:
-        assert context["configuration"]["streams"][0]["data_term"]["objective"]["type"] == "asinh_huber"
     assert loader.stream_ids == ("coronal_euv",)
     assert loader.global_step == 17
     torch.testing.assert_close(
@@ -175,6 +172,8 @@ def test_snapshot_rejects_old_format(tmp_path):
     torch.save({"format": "prom3theus.joint_save_state", "version": 1}, path)
     with pytest.raises(ArtifactExportError, match="Unsupported"):
         load_validated_save_state(path)
+
+
 
 
 def test_nonfinite_save_keeps_previous_snapshot(tmp_path):
@@ -218,6 +217,7 @@ def test_third_observation_type_registers_without_runner_changes(tmp_path, monke
     class TemperatureTermConfig(ConfigNode):
         type: Literal["temperature_sample"]
         weight: float
+        weight_schedule: None = None
 
     class TemperatureTerm(ObservationDataTerm):
         observation_kind = "point"
@@ -239,7 +239,7 @@ def test_third_observation_type_registers_without_runner_changes(tmp_path, monke
             loss = (self.predict(batch) - batch["target"]).square().mean()
             return DataTermBatchResult(loss, {}, {}, len(batch["target"]))
 
-    def build(stream, loaded, atmosphere, scene):
+    def build(stream, loaded, atmosphere, scene, synthesis_windows=None):
         term = TemperatureTerm(atmosphere, 1.0)
         term.construction = {"type": "temperature_sample", "options": {"scale": 1.0}}
         return term
@@ -249,7 +249,7 @@ def test_third_observation_type_registers_without_runner_changes(tmp_path, monke
         "temperature_sample",
         forward.ForwardProvider(
             build,
-            lambda options, atmosphere, scene: TemperatureTerm(atmosphere, **options),
+            lambda options, atmosphere, scene, synthesis_windows: TemperatureTerm(atmosphere, **options),
         ),
     )
     monkeypatch.setitem(
@@ -391,7 +391,7 @@ def test_third_observation_type_registers_without_runner_changes(tmp_path, monke
 
 def test_stokes_snapshot_restores_prediction_and_export_facade(tmp_path):
     runtime, _ = _runtime(tmp_path)
-    config = load_config(ROOT / "configs/hinode_lte_mhs.yaml")
+    config = load_config(ROOT / "configs/hinode/mhs.yaml")
     config = replace(
         config,
         atmosphere=replace(
@@ -402,26 +402,16 @@ def test_stokes_snapshot_restores_prediction_and_export_facade(tmp_path):
         ),
     )
     stream = config.streams[0]
-    config = replace(
-        config,
-        streams=(
-            replace(
-                stream,
-                data_term=replace(
-                    stream.data_term,
-                    depth_sampling=replace(
-                        stream.data_term.depth_sampling,
-                        sample_count=8,
-                        coarse_to_fine=replace(
-                            stream.data_term.depth_sampling.coarse_to_fine,
-                            fine_sample_count=4,
-                        ),
-                    ),
-                ),
-            ),
-        ),
-    )
+    config = replace(config, synthesis=replace(config.synthesis, windows=(
+        replace(config.synthesis.windows[0], depth_count=32, coarse_to_fine=replace(
+            config.synthesis.windows[0].coarse_to_fine, enabled=True,
+            fine_sample_count=32, uniform_weight_floor=.05)),
+    )))
     stream = config.streams[0]
+    stream = replace(stream, data_term=replace(stream.data_term, instrument=replace(
+        stream.data_term.instrument, line_of_sight_velocity_correction_m_per_s=1250.,
+    )))
+    config = replace(config, streams=(stream,))
     scene = replace(
         runtime.scene,
         height_bounds_m=(
@@ -440,12 +430,18 @@ def test_stokes_snapshot_restores_prediction_and_export_facade(tmp_path):
         velocity_synthesis_mode=SimpleNamespace(value="carrington_observer_relative"),
         metadata=lambda: {"observation_id": "hinode"},
     )
-    term = _default_term_builder(stream, loaded, atmosphere, scene)
+    from prom3theus.inversion.lte import LTEWindow
+    field_config = config.synthesis.windows[0]
+    field = LTEWindow(atmosphere, configuration=field_config.to_dict())
+    synthesis_windows = {field_config.id: field}
+    term = _default_term_builder(stream, loaded, atmosphere, scene, synthesis_windows)
+    assert term.objective.configuration()["continuum_quantile"] == .9
+    assert "continuum_floor" not in term.objective.configuration()
     runtime = SimpleNamespace(
         config=config,
         scene=scene,
         resources=runtime.resources,
-        model=EvaluationModel(atmosphere, {stream.id: term}).eval(),
+        model=EvaluationModel(atmosphere, {stream.id: term}, synthesis_windows).eval(),
         streams={stream.id: loaded},
     )
     batch = {
@@ -464,24 +460,100 @@ def test_stokes_snapshot_restores_prediction_and_export_facade(tmp_path):
         loader.predict(stream.id, batch), expected, rtol=0, atol=0
     )
     with torch.no_grad():
-        exported = loader.module.synthesize(
-            batch["coordinates"],
-            ray_direction=batch["ray_direction"],
-            stokes_basis=batch["stokes_basis"],
-            observer_los_velocity_m_per_s=batch["observer_los_velocity_m_per_s"],
-        )["stokes"]
+        exported = loader.module.predict(batch)
     torch.testing.assert_close(exported, expected, rtol=0, atol=0)
-    assert loader.module.sample_depth_grid().numel() == 8
+    # Earlier formal-LTE saves used float64 fixed synthesis buffers. Reload
+    # those into the float32 runtime without accepting parameter dtype changes.
+    payload = torch.load(path, weights_only=False)
+    buffers = dict(runtime.model.named_buffers(remove_duplicate=False))
+    promoted = [name for name, value in payload["state_dict"].items()
+                if name.startswith("synthesis_windows.") and name in buffers
+                and value.dtype == torch.float32]
+    assert promoted
+    for name in promoted:
+        payload["state_dict"][name] = payload["state_dict"][name].double()
+    legacy_path = tmp_path / "formal_double_buffers.p3s"
+    torch.save(payload, legacy_path)
+    legacy = P3SLoader(legacy_path, device="cpu")
+    torch.testing.assert_close(legacy.predict(stream.id, batch), expected, rtol=0, atol=0)
+    assert all(legacy.state.module.state_dict()[name].dtype == torch.float32 for name in promoted)
+    parameter_name = next(iter(dict(runtime.model.named_parameters())))
+    payload["state_dict"][parameter_name] = payload["state_dict"][parameter_name].double()
+    invalid_path = tmp_path / "changed_parameter_dtype.p3s"
+    torch.save(payload, invalid_path)
+    with pytest.raises(ArtifactExportError, match="tensor contract"):
+        P3SLoader(invalid_path, device="cpu")
+    payload["state_dict"][parameter_name] = payload["state_dict"][parameter_name].float()
+    buffer_name = promoted[0]
+    payload["state_dict"][buffer_name] = torch.zeros_like(
+        payload["state_dict"][buffer_name], dtype=torch.float16,
+    )
+    torch.save(payload, invalid_path)
+    with pytest.raises(ArtifactExportError, match="tensor contract"):
+        P3SLoader(invalid_path, device="cpu")
+    payload["state_dict"][buffer_name] = torch.full_like(
+        payload["state_dict"][buffer_name], 1e100, dtype=torch.float64,
+    )
+    torch.save(payload, invalid_path)
+    with pytest.raises(ArtifactExportError, match="float32 range"):
+        P3SLoader(invalid_path, device="cpu")
+    assert loader.module.synthesis_window is loader.state.module.synthesis_windows[field_config.id]
+    restored_term = loader.state.module.terms[stream.id]
+    assert restored_term.objective.configuration() == term.objective.configuration()
+    observed = torch.zeros_like(expected)
+    observed[..., 0, :] = 1.  # A valid observed continuum for per-profile normalization.
+    restored_loss = restored_term.objective(expected, observed)
+    assert torch.isfinite(restored_loss).all()
+    torch.testing.assert_close(restored_loss, term.objective(expected, observed))
+    assert not hasattr(loader.module, "sample_depth_grid")
+    from prom3theus.artifacts.evaluation import photospheric_height_grid
+    heights = photospheric_height_grid(loader.module, 8)
+    assert heights.numel() == 8
+    torch.testing.assert_close(heights[[0, -1]].double(), field.height_bounds_m.flip(0).double())
+    # The export keeps material velocities physical and exposes the exact
+    # detector wavelength adapter independently, including its calibration.
+    from prom3theus.artifacts.evaluation import evaluate_atmosphere
+    detector_offsets = torch.tensor([[2500., -1500.]])
+    raster = SimpleNamespace(
+        coordinates=batch["coordinates"].reshape(1, 2, 3),
+        ray_direction=batch["ray_direction"].reshape(1, 2, 3),
+        stokes_basis=batch["stokes_basis"].reshape(1, 2, 3, 3),
+        valid_mask=torch.ones(1, 2, dtype=torch.bool),
+        spatial_shape=(1, 2),
+        auxiliary={"observer_los_velocity_m_per_s": detector_offsets},
+        metadata={"ray_geometry": {"scene_basis_rows": torch.eye(3).tolist()}},
+    )
+    exported_atmosphere = evaluate_atmosphere(
+        loader.module, raster, height_grid_m=heights, batch_size=2,
+        storage_dtype="float64",
+    )
+    term = loader.module.term
+    queries = term.spectral_queries({**batch,
+        "observer_los_velocity_m_per_s": detector_offsets.reshape(-1)})
+    factors = torch.from_numpy(exported_atmosphere["detector_to_inertial_wavelength_factor"])
+    torch.testing.assert_close(
+        factors.reshape(-1),
+        (queries.origin_angstrom + queries.offset_angstrom[:, 0].double())
+        / term.synthesis_wavelength_vacuum_angstrom[0],
+        rtol=3e-11, atol=0,
+    )
+    inertial_observer = torch.from_numpy(exported_atmosphere["velocity_field_inertial_observer_m_per_s"])
+    solar_los = torch.from_numpy(exported_atmosphere["v_los_solar_inertial_m_per_s"])
+    torch.testing.assert_close(solar_los, -inertial_observer[..., 2])
+    assert "velocity_field_synthesis_observer_m_per_s" not in exported_atmosphere
+    assert "v_los_m_per_s" not in exported_atmosphere
+    assert not any(key.startswith("terms.photospheric_stokes.synthesis_window.")
+                   for key in runtime.model.state_dict())
 
 
-def test_old_potential_sampling_does_not_prevent_p3s_queries(monkeypatch, tmp_path):
+def test_old_potential_sampling_is_rejected_without_migration(monkeypatch, tmp_path):
     from copy import deepcopy
     from types import SimpleNamespace
 
     from prom3theus.artifacts import loader as implementation
     from prom3theus.config import load_config
 
-    configuration = load_config('configs/hmi_aia_dynamic.yaml').to_dict()
+    configuration = load_config('configs/sdo/hmi_aia_dynamic.yaml').to_dict()
     potential = configuration['physics']['potential_boundary']
     for key in ('photosphere', 'top_grid_size', 'side_horizontal_points', 'side_height_points', 'seed'):
         potential.pop(key)
@@ -492,6 +564,7 @@ def test_old_potential_sampling_does_not_prevent_p3s_queries(monkeypatch, tmp_pa
                             module=SimpleNamespace(terms={'photospheric_stokes': None}))
     monkeypatch.setattr(implementation, 'load_validated_save_state', lambda path: state)
     monkeypatch.setattr(implementation, 'StreamEvaluationView', lambda *args: SimpleNamespace(eval=lambda: None))
-    loaded = implementation.P3SLoader(state.path)
-    assert loaded.config.atmosphere.to_dict() == configuration['atmosphere']
-    assert loaded.state.context['configuration'] == original
+    from prom3theus.config import ConfigError
+    with pytest.raises(ConfigError, match="interior|top_points|side_points"):
+        implementation.P3SLoader(state.path)
+    assert state.context["configuration"] == original

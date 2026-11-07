@@ -2,6 +2,82 @@ from prom3theus.training.streams import StreamBatchScheduler
 import pytest
 
 
+class RandomSlots:
+    def __len__(self):
+        return 2
+
+    def iter_random(self, indices):
+        return iter(indices)
+
+
+def test_fixed_epochs_rank_streams_and_exact_resume():
+    def create(rank=0):
+        return StreamBatchScheduler({"a": RandomSlots()}, "a", rank=rank,
+                                    world_size=4, steps_per_epoch=1000)
+
+    first = create()
+    assert len(first) == 1000
+    batches = list(first)
+    assert len(batches) == 1000
+    assert all(b["_data_valid"] for b in batches)
+    assert [b["a"] for b in batches] == list(range(0, 4000, 4))
+    assert [b["a"] for b in list(create(3))] == list(range(3, 4000, 4))
+    iterator = iter(first)
+    assert next(iterator)["a"] == 4000
+    state = first.state_dict()
+    iterator.close()
+    restored = create()
+    restored.load_state_dict(state)
+    remaining = list(restored)
+    assert len(remaining) == 999
+    assert remaining[0]["a"] == 4004
+    assert list(restored)[0]["a"] == 8000
+
+
+@pytest.mark.parametrize("length", [0, -1, True, 1.5])
+def test_invalid_fixed_epoch_length(length):
+    with pytest.raises(ValueError, match="positive integer"):
+        StreamBatchScheduler({"a": RandomSlots()}, "a", steps_per_epoch=length)
+
+
+def test_lightning_fixed_epochs_validate_every_1000_updates():
+    import torch
+    from types import SimpleNamespace
+    from pytorch_lightning import LightningModule, Trainer
+    from prom3theus.application.joint_training import CommitStreamBatch, JointTrainingDiagnostics
+
+    class Module(LightningModule):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+            self.settings = SimpleNamespace(steps_per_epoch=1000, validation_every_n_steps=10)
+            self.stream_scheduler = StreamBatchScheduler(
+                {"a": RandomSlots()}, "a", explicit_commit=True, steps_per_epoch=1000)
+
+        def training_step(self, batch, batch_idx):
+            return self.weight.square()
+
+        def configure_optimizers(self):
+            return torch.optim.SGD(self.parameters(), lr=0.001)
+
+    class Diagnostics(JointTrainingDiagnostics):
+        def __init__(self):
+            super().__init__(None)
+            self.steps = []
+
+        def _evaluate(self, trainer, module):
+            if not self.steps or self.steps[-1] != trainer.global_step:
+                self.steps.append(trainer.global_step)
+
+    module, diagnostics = Module(), Diagnostics()
+    trainer = Trainer(accelerator="cpu", devices=1, max_epochs=2, logger=False,
+                      enable_checkpointing=False, enable_progress_bar=False,
+                      enable_model_summary=False, callbacks=[CommitStreamBatch(), diagnostics])
+    trainer.fit(module, train_dataloaders=module.stream_scheduler)
+    assert trainer.global_step == module.stream_scheduler.completed == 2000
+    assert diagnostics.steps == [1000, 2000]
+
+
 def test_reference_defines_epoch_and_other_stream_continues():
     scheduler = StreamBatchScheduler(
         {"hmi": [1, 2], "aia": [10, 11, 12, 13, 14]}, "hmi"

@@ -18,18 +18,89 @@ from prom3theus.config import (
     load_config,
     parse_config,
 )
+from prom3theus.muram import config as _register_muram_schema
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIRECTORY = PROJECT_ROOT / "configs"
 
 
+@pytest.mark.parametrize("devices", [0, -1, True, 1.5, "all"])
+def test_training_devices_requires_positive_integer(devices):
+    from prom3theus.config.joint_schema import JointTrainingConfig
+
+    with pytest.raises((ValueError, TypeError), match="devices"):
+        JointTrainingConfig(max_steps=2, learning_rate=1e-4,
+                            final_learning_rate=1e-5, devices=devices)
+
+
+def test_training_uses_all_visible_devices_by_default():
+    from prom3theus.config.joint_schema import JointTrainingConfig
+
+    assert JointTrainingConfig(max_steps=2, learning_rate=1e-4,
+                               final_learning_rate=1e-5).devices == "auto"
+
+
+@pytest.mark.parametrize("max_steps,max_epochs", [(-1, -1), (100, -1), (-1, 3)])
+def test_training_accepts_disabled_stopping_limits(max_steps, max_epochs):
+    from prom3theus.config.joint_schema import JointTrainingConfig
+
+    settings = JointTrainingConfig(
+        max_steps=max_steps, max_epochs=max_epochs,
+        learning_rate=1e-4, final_learning_rate=1e-5,
+    )
+    assert settings.max_steps == max_steps
+    assert settings.max_epochs == max_epochs
+
+
+@pytest.mark.parametrize("steps", [0, -1, True, 1.5])
+def test_learning_rate_decay_requires_positive_integer_steps(steps):
+    from prom3theus.config.joint_schema import JointTrainingConfig
+
+    with pytest.raises((ValueError, TypeError), match="learning_rate_decay_steps"):
+        JointTrainingConfig(max_steps=-1, learning_rate=1e-4,
+                            final_learning_rate=1e-5,
+                            learning_rate_decay_steps=steps)
+
+
+def test_muram_induction_accepts_known_fixed_velocity_calibration():
+    config = load_config(CONFIG_DIRECTORY / "muram/sdo/joint.yaml")
+    assert config.physics.equations.induction.enabled
+    instrument = config.streams[0].data_term.instrument
+    assert not instrument.optimize_line_of_sight_velocity_correction
+    assert instrument.line_of_sight_velocity_correction_m_per_s == 0.0
+
+
+@pytest.mark.parametrize("names", [[""], ["shared.physics.momentum"] * 2])
+def test_loss_balance_rejects_invalid_inclusions(joint_document, names):
+    joint_document["training"] = {
+        "max_steps": 1, "learning_rate": 0.01, "final_learning_rate": 0.001,
+        "loss_balance": {"included_objectives": names},
+    }
+    with pytest.raises(ConfigError, match="included_objectives"):
+        parse_config(joint_document, base_directory=CONFIG_DIRECTORY)
+
+
+
+
+@pytest.mark.parametrize("path", sorted(path for path in CONFIG_DIRECTORY.rglob("*.yaml")
+                                      if path.name != "synthesis.yaml"),
+                         ids=lambda p: p.relative_to(CONFIG_DIRECTORY).as_posix())
+def test_presets_explicitly_include_only_nonboundary_objectives(path):
+    config = load_config(path, environ={})
+    if config.training is None or not config.training.loss_balance.enabled:
+        return
+    included = config.training.loss_balance.included_objectives
+    assert included
+    assert all("boundary" not in key for key in included)
+
+
 
 
 def test_coronal_energy_requires_coronal_domain_and_dynamic_model():
-    document = yaml.safe_load((CONFIG_DIRECTORY / "hmi_aia_dynamic.yaml").read_text())
+    document = load_config(CONFIG_DIRECTORY / "sdo/hmi_aia_dynamic.yaml").to_dict()
     energy = document["physics"]["equations"]["coronal_energy"]
-    energy.update(enabled=True, weight=0.1, cooling_table="cooling.json")
+    energy.update(enabled=True, weight=0.1)
     config = parse_config(document, base_directory=CONFIG_DIRECTORY)
     assert config.physics.equations.coronal_energy.enabled
     energy["minimum_height_megameter"] = 2.0
@@ -39,11 +110,9 @@ def test_coronal_energy_requires_coronal_domain_and_dynamic_model():
 
 @pytest.fixture()
 def joint_document() -> dict:
-    legacy = yaml.safe_load(
-        (CONFIG_DIRECTORY / "hmi_lte_dynamic.yaml").read_text(encoding="utf-8")
-    )
+    legacy = load_config(CONFIG_DIRECTORY / "sdo/hmi_dynamic.yaml").to_dict()
     return {
-        "schema_version": 3,
+        "schema_version": 5,
         "solver": {
             "kind": "joint",
             "output_directory": "../runs/hmi-aia-dry-run",
@@ -52,6 +121,7 @@ def joint_document() -> dict:
         "scene": {"reference_stream": "photospheric_stokes"},
         "atmosphere": deepcopy(legacy["atmosphere"]),
         "physics": deepcopy(legacy["physics"]),
+        "synthesis": deepcopy(legacy["synthesis"]),
         "atmosphere_regularization": [
             {
                 "id": "lte_support",
@@ -69,10 +139,10 @@ def joint_document() -> dict:
                 "data_term": {
                     "type": "lte_stokes",
                     "weight": 1.0,
-                    "synthesis": deepcopy(legacy["streams"][0]["data_term"]["synthesis"]),
+                    "synthesis_window": legacy["streams"][0]["data_term"]["synthesis_window"],
                     "instrument": deepcopy(legacy["streams"][0]["data_term"]["instrument"]),
                     "objective": deepcopy(legacy["streams"][0]["data_term"]["objective"]),
-                    "depth_sampling": deepcopy(legacy["streams"][0]["data_term"]["depth_sampling"]),
+
                 },
             },
             {
@@ -160,7 +230,7 @@ def test_complete_joint_contract_is_typed_and_json_serializable(joint_document):
     )
 
     assert isinstance(config, JointInversionConfig)
-    assert config.schema_version == 3
+    assert config.schema_version == 5
     assert config.solver.kind == "joint"
     assert config.solver.output_directory == PROJECT_ROOT / "runs/hmi-aia-dry-run"
     assert config.scene.reference_stream == "photospheric_stokes"
@@ -173,7 +243,7 @@ def test_complete_joint_contract_is_typed_and_json_serializable(joint_document):
     json.dumps(config.to_dict())
 
 
-def test_load_config_dispatches_schema_three(tmp_path, joint_document):
+def test_load_config_dispatches_schema_four(tmp_path, joint_document):
     path = tmp_path / "joint.yaml"
     path.write_text(yaml.safe_dump(joint_document), encoding="utf-8")
 
@@ -259,13 +329,6 @@ def test_joint_schema_rejects_mismatched_stokes_instrument(joint_document):
         parse_config(joint_document, base_directory=CONFIG_DIRECTORY, environ={})
 
 
-def test_dry_run_quadrature_includes_the_operational_ray_grid(joint_document):
-    joint_document["dry_run"]["quadrature_samples"] = [96, 384]
-
-    with pytest.raises(ConfigError, match="include every configured AIA ray_samples"):
-        parse_config(joint_document, base_directory=CONFIG_DIRECTORY, environ={})
-
-
 @pytest.mark.parametrize(
     "filename", ["reports/dry_run.json", "dry_run.txt", "../x.json"]
 )
@@ -277,9 +340,9 @@ def test_dry_run_report_is_a_local_json_basename(joint_document, filename):
 
 
 def test_unknown_schema_versions_are_rejected_before_dataclass_decoding(joint_document):
-    joint_document["schema_version"] = 4
+    joint_document["schema_version"] = 3
 
-    with pytest.raises(ConfigError, match=r"schema_version.*3"):
+    with pytest.raises(ConfigError, match=r"schema_version.*5"):
         parse_config(joint_document, base_directory=CONFIG_DIRECTORY, environ={})
 
 
@@ -294,10 +357,10 @@ def test_schema_version_must_be_present_and_an_integer(joint_document):
 
 
 def test_single_stream_uses_the_joint_contract():
-    config = load_config(CONFIG_DIRECTORY / "hinode_lte_mhs.yaml", environ={})
+    config = load_config(CONFIG_DIRECTORY / "hinode/mhs.yaml", environ={})
 
     assert type(config).__name__ == "JointInversionConfig"
-    assert config.schema_version == 3
+    assert config.schema_version == 5
     assert len(config.streams) == 1
 
 

@@ -9,13 +9,41 @@ import torch
 from torch import nn
 
 
-def polyval(value: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
-    """Evaluate a polynomial whose coefficients are ordered highest degree first."""
-
+def _horner(value: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
     result = torch.zeros_like(value)
     for coefficient in coefficients:
         result = result * value + coefficient
     return result
+
+
+class _FixedPolynomial(torch.autograd.Function):
+    """Keep the polynomial derivative instead of every Horner activation."""
+
+    @staticmethod
+    def forward(ctx, value, coefficients):
+        derivative_coefficients = coefficients[:-1] * torch.arange(
+            len(coefficients) - 1, 0, -1, device=coefficients.device)
+        result = _horner(value, coefficients)
+        derivative = _horner(value, derivative_coefficients)
+        ctx.save_for_backward(value, derivative_coefficients, derivative)
+        return result
+
+    @staticmethod
+    def backward(ctx, gradient):
+        value, coefficients, derivative = ctx.saved_tensors
+        # Preserve double backward when requested. Ordinary training reuses the
+        # saved derivative, including the complex autograd conjugation rule.
+        if torch.is_grad_enabled():
+            derivative = _horner(value, coefficients)
+        return gradient * derivative.conj(), None
+
+
+def polyval(value: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
+    """Evaluate coefficients ordered highest degree first, with exact derivatives."""
+    if (torch.is_grad_enabled() and value.requires_grad
+            and not coefficients.requires_grad and coefficients.numel() >= 2):
+        return _FixedPolynomial.apply(value, coefficients)
+    return _horner(value, coefficients)
 
 
 class Faddeeva(nn.Module):

@@ -12,7 +12,7 @@ from dateutil.parser import parse as parse_datetime
 
 from prom3theus.observations import ObservationRaster
 from prom3theus.observations.io import ordered_parallel_fits_map
-from prom3theus.rt.geometry import direction_to_chart_mm
+from prom3theus.rt.geometry import direction_to_chart_megameter
 from prom3theus.rt.radiometry import load_solar_reference
 
 from .calibration import (
@@ -187,18 +187,18 @@ def load_raster(
     surface_direction = surface_position_m / np.linalg.norm(
         surface_position_m, axis=-1, keepdims=True
     )
-    chart_xy_mm = direction_to_chart_mm(
+    chart_xy_megameter = direction_to_chart_megameter(
         torch.from_numpy(surface_direction),
         torch.tensor(spherical_geometry["scene_basis_rows"]),
         spherical_geometry["solar_radius_m"],
     ).numpy()
-    x_mm, y_mm = chart_xy_mm[..., 0], chart_xy_mm[..., 1]
+    x_megameter, y_megameter = chart_xy_megameter[..., 0], chart_xy_megameter[..., 1]
     coords = np.stack(
-        (x_mm, y_mm, np.broadcast_to(time_hours[None, :], x_mm.shape)), axis=-1
+        (x_megameter, y_megameter, np.broadcast_to(time_hours[None, :], x_megameter.shape)), axis=-1
     ).astype(np.float32)
     coordinate_affine = coordinate_affine_metadata(
-        x_mm,
-        y_mm,
+        x_megameter,
+        y_megameter,
         valid,
         headers=headers,
         observer_distances_m=distances_m,
@@ -253,11 +253,11 @@ def load_raster(
         "ref_time": ref_time.isoformat(),
         "coordinates": {
             "order": [
-                "carrington_chart_x_mm",
-                "carrington_chart_y_mm",
+                "carrington_chart_x_megameter",
+                "carrington_chart_y_megameter",
                 "time_hours",
             ],
-            "units": ["Mm", "Mm", "hour"],
+            "units": ["megameter", "megameter", "hour"],
             "time_origin": ref_time.isoformat(),
             "time_formula": "time_hours=(DATE_OBS-time_origin)/3600 s",
             "spatial_frame": "observer-independent Carrington gnomonic scene chart",
@@ -265,15 +265,15 @@ def load_raster(
                 "gnomonic chart tangent to the raster-centre solar direction"
             ),
             "spatial_formula": (
-                "xy_mm=R_sun*(u dot chart_xy)/(u dot chart_normal)/1e6"
+                "xy_megameter=R_sun*(u dot chart_xy)/(u dot chart_normal)/1e6"
             ),
             "observer": (
                 "Astropy geocentric solar ephemeris proxy; Level-1 headers do not "
                 "provide the Hinode spacecraft distance"
             ),
             "observer_distance_m": distances_m.tolist(),
-            "chart_x_range_mm": [float(x_mm[valid].min()), float(x_mm[valid].max())],
-            "chart_y_range_mm": [float(y_mm[valid].min()), float(y_mm[valid].max())],
+            "chart_x_range_megameter": [float(x_megameter[valid].min()), float(x_megameter[valid].max())],
+            "chart_y_range_megameter": [float(y_megameter[valid].min()), float(y_megameter[valid].max())],
             "surface_deprojection_applied": True,
             "network_affine": coordinate_affine,
             "source_keywords": [
@@ -340,7 +340,7 @@ def load_raster(
     )
     return ObservationRaster(
         stokes=torch.from_numpy(np.asarray(stokes, dtype=np.float32)),
-        wavelength_angstrom=torch.from_numpy(np.asarray(wavelength, dtype=np.float32)),
+        wavelength_angstrom=torch.from_numpy(np.asarray(wavelength, dtype=np.float64)),
         coordinates=torch.from_numpy(coords),
         ray_direction=torch.from_numpy(ray_direction.astype(np.float32)),
         surface_position_m=torch.from_numpy(surface_position_m.astype(np.float32)),

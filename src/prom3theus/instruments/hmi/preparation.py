@@ -368,7 +368,7 @@ def build_hmi_transmission_profiles(
         "continuum_weights": continuum_weights.astype(np.float32),
         "transmission": transmission.astype(np.float32),
         "quadrature_weights": quadrature.astype(np.float32),
-        "wavelength_grid": nominal.astype(np.float32),
+        "wavelength_grid": nominal.astype(np.float64),
         "phases_deg": phases_deg.astype(np.float32),
         "target_phase_deg": target_phase_deg.astype(np.float32),
         "fsr": fsr.astype(np.float32),

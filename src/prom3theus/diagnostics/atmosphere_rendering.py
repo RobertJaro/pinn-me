@@ -93,9 +93,9 @@ class AtmospherePlotter(DiagnosticPlotter):
                 column_images[column] = image
                 axis.set_aspect("equal", adjustable="box")
                 if column == 0:
-                    height_Mm = depth_value / 1.0e6
+                    height_megameter = depth_value / 1.0e6
                     axis.annotate(
-                        rf"$h=r-R_\odot={height_Mm:g}\,\mathrm{{Mm}}$",
+                        rf"$h=r-R_\odot={height_megameter:g}\,\mathrm{{megameter}}$",
                         xy=(0.01, 0.98),
                         xycoords="axes fraction",
                         ha="left",
@@ -140,7 +140,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         tiny = np.finfo(tau.dtype).tiny
         log_tau = np.log10(np.clip(tau, tiny, None))
         log_continuum = np.log10(np.clip(continuum_tau, tiny, None))
-        height_Mm = evaluated["shell_height_levels_m"] / 1.0e6
+        height_megameter = evaluated["shell_height_levels_m"] / 1.0e6
         # The outer boundary is defined to have tau=0 and therefore has no
         # finite logarithm. Exclude only that endpoint from the profile panel.
         profile_slice = slice(1, None)
@@ -153,7 +153,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         FigureCanvasAgg(figure)
         profile_axis, map_axis = figure.subplots(1, 2)
         profile_axis.fill_betweenx(
-            height_Mm[profile_slice],
+            height_megameter[profile_slice],
             lower,
             upper,
             color="tab:blue",
@@ -162,14 +162,14 @@ class AtmospherePlotter(DiagnosticPlotter):
         )
         profile_axis.plot(
             median,
-            height_Mm[profile_slice],
+            height_megameter[profile_slice],
             color="tab:blue",
             linewidth=1.6,
             label="line core: validation-ray median",
         )
         profile_axis.plot(
             continuum_median,
-            height_Mm[profile_slice],
+            height_megameter[profile_slice],
             color="tab:orange",
             linewidth=1.2,
             linestyle="--",
@@ -177,7 +177,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         )
         profile_axis.axvline(0.0, color="0.45", linewidth=0.8, linestyle=":")
         profile_axis.set_xlabel(r"$\log_{10}\tau$")
-        profile_axis.set_ylabel(r"height $h=r-R_\odot$ [Mm]")
+        profile_axis.set_ylabel(r"height $h=r-R_\odot$ [megameter]")
         profile_axis.set_title(r"derived $\tau=\int\eta_I\,ds$ at the line core")
         profile_axis.grid(alpha=0.2)
         profile_axis.legend(loc="best", fontsize=8)
@@ -208,10 +208,10 @@ class AtmospherePlotter(DiagnosticPlotter):
         map_axis.set_aspect("equal", adjustable="box")
         map_axis.set_xlabel("Carrington longitude [deg]")
         map_axis.set_ylabel("Carrington latitude [deg]")
-        bottom_height_Mm = height_Mm[bottom_index]
+        bottom_height_megameter = height_megameter[bottom_index]
         map_axis.set_title(
             rf"bottom layer: line-core $\log_{{10}}\tau$ at "
-            rf"$h=r-R_\odot={bottom_height_Mm:g}\,\mathrm{{Mm}}$"
+            rf"$h=r-R_\odot={bottom_height_megameter:g}\,\mathrm{{megameter}}$"
         )
         colorbar = figure.colorbar(image, ax=map_axis, location="right", shrink=0.86)
         colorbar.set_label(r"line-core $\log_{10}\tau$")
@@ -242,7 +242,7 @@ class AtmospherePlotter(DiagnosticPlotter):
         map_latitude = evaluated["map_latitude_deg"][:, 0]
         latitude_deg = map_latitude if map_latitude.ndim == 2 else map_latitude[:, None]
         vertical = evaluated["map_fields"]["geometric_height"][:, 0, :]
-        vertical_label = r"height $h=r-R_\odot$ [Mm]"
+        vertical_label = r"height $h=r-R_\odot$ [megameter]"
         depth_plane = "physical Carrington latitude-height"
         latitude_grid_deg = (
             latitude_deg

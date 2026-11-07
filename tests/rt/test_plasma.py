@@ -77,6 +77,21 @@ def test_fade_endpoints_have_zero_weight_derivative():
     )
 
 
+def test_float32_photospheric_fade_stays_bounded_near_hot_endpoint():
+    plasma = SolarPlasmaTable()
+    temperature = torch.linspace(10000., 31623., 100001, requires_grad=True)
+    weight = plasma._photospheric_weight(temperature)
+    assert torch.isfinite(weight).all()
+    assert torch.all((weight >= 0) & (weight <= 1))
+    # Check against higher precision over the whole transition, including
+    # the narrow region where 1-S(x) used to become negative in float32.
+    reference = plasma._photospheric_weight(temperature.detach().double())
+    torch.testing.assert_close(weight.double(), reference, atol=2e-6, rtol=2e-4)
+    gradient = torch.autograd.grad(weight.sum(), temperature)[0]
+    assert torch.isfinite(gradient).all()
+    assert gradient.max() <= 1e-9
+
+
 def test_hot_thermodynamics_reach_exact_fully_ionized_ideal_limit():
     plasma = SolarPlasmaTable().to(dtype=torch.float64)
     lower, upper = plasma.eos.ideal_transition_temperature_bounds_k

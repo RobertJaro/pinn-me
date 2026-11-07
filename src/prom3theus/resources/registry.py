@@ -21,10 +21,17 @@ from .manifest import validate_resource_bundle
 
 LEGACY_LTE_RESOURCE_SET_ID = "legacy_lte_v2"
 AIA_RESOURCE_SET_ID = "aia_euv_v1"
+PLASMA_RESOURCE_SET_ID = "plasma_v1"
 AIA_TEMPERATURE_RESPONSE_RESOURCE = f"{AIA_RESOURCE_SET_ID}:aia_temperature_response"
-RESOURCE_SET_IDS = (LEGACY_LTE_RESOURCE_SET_ID, AIA_RESOURCE_SET_ID)
+CORONAL_COOLING_RESOURCE = f"{PLASMA_RESOURCE_SET_ID}:coronal_cooling"
+RESOURCE_SET_IDS = (
+    LEGACY_LTE_RESOURCE_SET_ID,
+    AIA_RESOURCE_SET_ID,
+    PLASMA_RESOURCE_SET_ID,
+)
 _RESOURCE_SET_ROOTS = {
     AIA_RESOURCE_SET_ID: PurePosixPath("euv/aia_euv_v1"),
+    PLASMA_RESOURCE_SET_ID: PurePosixPath("plasma/plasma_v1"),
 }
 _RESOURCE_REFERENCE = re.compile(r"^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -228,6 +235,64 @@ def _validate_aia_table(table: Mapping, instrument: Mapping, sources: Mapping) -
     }
 
 
+def _validate_plasma_table(table: Mapping, sources: Mapping) -> dict:
+    try:
+        axis = [float(value) for value in table["log10_temperature_k"]]
+        values = [float(value) for value in table["log10_lambda_w_m3"]]
+        components = table["components_w_m3"]
+        component_rows = {
+            name: [float(value) for value in row] for name, row in components.items()
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Invalid coronal cooling table arrays.") from error
+    if (
+        table.get("schema_version") != 1
+        or table.get("unit") != "W m^3"
+        or table.get("density_convention") != "n_e * n_H"
+        or len(axis) < 2
+        or len(values) != len(axis)
+        or not all(math.isfinite(value) for value in axis)
+        or not all(math.isfinite(value) for value in values)
+        or any(later <= earlier for earlier, later in zip(axis, axis[1:]))
+        or set(component_rows) != {"lines", "free_free", "free_bound", "two_photon"}
+        or any(len(row) != len(axis) for row in component_rows.values())
+        or any(
+            not math.isfinite(value) or value < 0.0
+            for row in component_rows.values()
+            for value in row
+        )
+    ):
+        raise RuntimeError("Invalid coronal cooling table scientific contract.")
+
+    provenance = table.get("provenance")
+    chianti = (sources or {}).get("scientific_sources", {})
+    database = chianti.get("chianti_atomic_database", {})
+    abundance = chianti.get("chianti_abundance", {})
+    ioneq = chianti.get("chianti_ionization_equilibrium", {})
+    if (
+        not isinstance(provenance, Mapping)
+        or provenance.get("database") != "CHIANTI"
+        or provenance.get("database_version") != database.get("version")
+        or provenance.get("database_sha256") != database.get("sha256")
+        or provenance.get("abundance") != abundance.get("name")
+        or provenance.get("abundance_sha256") != abundance.get("sha256")
+        or provenance.get("ioneq_sha256") != ioneq.get("sha256")
+        or not isinstance(provenance.get("fiasco_version"), str)
+    ):
+        raise RuntimeError(
+            "Coronal cooling table provenance is incomplete or inconsistent with "
+            "its pinned CHIANTI sources."
+        )
+    return {
+        "unit": table["unit"],
+        "density_convention": table["density_convention"],
+        "temperature_log10_k": [axis[0], axis[-1]],
+        "components": sorted(component_rows),
+        "fiasco_version": provenance["fiasco_version"],
+        "database_sha256": provenance["database_sha256"],
+    }
+
+
 def validate_resource_set(set_id: str) -> dict:
     """Validate one registered resource set and return its runtime metadata."""
 
@@ -281,21 +346,32 @@ def validate_resource_set(set_id: str) -> dict:
             )
 
     sources = _load_json(sources_resource, "resource-set sources")
-    table = _load_json(
-        resource_set_path(set_id, logical_resources["aia_temperature_response"]),
-        "AIA temperature response",
-    )
-    instrument = _load_json(
-        resource_set_path(set_id, logical_resources["instrument_aia_euv"]),
-        "AIA instrument contract",
-    )
-    scientific = _validate_aia_table(table, instrument, sources)
     compatibility = manifest.get("compatibility")
-    if compatibility != {
-        "chianti_database_release": "11.0.2",
-        "emission_measure_convention": "electron_density_squared",
-    }:
-        raise RuntimeError("AIA resource-set compatibility metadata is invalid.")
+    if set_id == AIA_RESOURCE_SET_ID:
+        table = _load_json(
+            resource_set_path(set_id, logical_resources["aia_temperature_response"]),
+            "AIA temperature response",
+        )
+        instrument = _load_json(
+            resource_set_path(set_id, logical_resources["instrument_aia_euv"]),
+            "AIA instrument contract",
+        )
+        scientific = _validate_aia_table(table, instrument, sources)
+        if compatibility != {
+            "chianti_database_release": "11.0.2",
+            "emission_measure_convention": "electron_density_squared",
+        }:
+            raise RuntimeError("AIA resource-set compatibility metadata is invalid.")
+    elif set_id == PLASMA_RESOURCE_SET_ID:
+        table = _load_json(
+            resource_set_path(set_id, logical_resources["coronal_cooling"]),
+            "coronal cooling table",
+        )
+        scientific = _validate_plasma_table(table, sources)
+        if compatibility != {"chianti_database_release": "11.0.2"}:
+            raise RuntimeError("Plasma resource-set compatibility metadata is invalid.")
+    else:  # pragma: no cover - unreachable, resource_set_path already rejects this
+        raise ValueError(f"Unknown resource set {set_id!r}.")
     return {
         "resource_set_id": set_id,
         "resource_set_schema_version": 1,
@@ -320,17 +396,20 @@ def validate_resource_sets(set_ids: Iterable[str]) -> dict[str, dict]:
     if unknown:
         raise ValueError(f"Unknown resource sets: {unknown}")
     validated = {set_id: validate_resource_set(set_id) for set_id in requested}
-    if AIA_RESOURCE_SET_ID in validated and LEGACY_LTE_RESOURCE_SET_ID in validated:
-        legacy_release = validated[LEGACY_LTE_RESOURCE_SET_ID]["thermodynamic_eos"][
-            "reference_ionization_equilibrium"
-        ]["database_release"]
-        aia_release = validated[AIA_RESOURCE_SET_ID]["compatibility"][
-            "chianti_database_release"
-        ]
-        if legacy_release != aia_release:
-            raise RuntimeError(
-                "LTE thermodynamics and AIA emissivity use different CHIANTI releases."
-            )
+    releases = {}
+    if LEGACY_LTE_RESOURCE_SET_ID in validated:
+        releases[LEGACY_LTE_RESOURCE_SET_ID] = validated[LEGACY_LTE_RESOURCE_SET_ID][
+            "thermodynamic_eos"
+        ]["reference_ionization_equilibrium"]["database_release"]
+    for chianti_set_id in (AIA_RESOURCE_SET_ID, PLASMA_RESOURCE_SET_ID):
+        if chianti_set_id in validated:
+            releases[chianti_set_id] = validated[chianti_set_id]["compatibility"][
+                "chianti_database_release"
+            ]
+    if len(set(releases.values())) > 1:
+        raise RuntimeError(
+            f"Requested resource sets use different CHIANTI releases: {releases}."
+        )
     return validated
 
 
@@ -359,7 +438,9 @@ def resolve_resource_reference(reference: str):
 __all__ = [
     "AIA_RESOURCE_SET_ID",
     "AIA_TEMPERATURE_RESPONSE_RESOURCE",
+    "CORONAL_COOLING_RESOURCE",
     "LEGACY_LTE_RESOURCE_SET_ID",
+    "PLASMA_RESOURCE_SET_ID",
     "RESOURCE_SET_IDS",
     "resolve_resource_reference",
     "resource_set_path",

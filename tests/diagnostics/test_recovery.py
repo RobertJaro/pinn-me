@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from prom3theus.diagnostics.recovery import run_recovery
+from prom3theus.validation.recovery import run_recovery
 
 
 def test_recovery_remains_finite_across_optimizer_steps():

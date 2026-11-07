@@ -7,7 +7,6 @@ import torch
 
 from prom3theus.inversion.assembly import build_physics_assembly
 from prom3theus.inversion.configuration import (
-    resolve_depth_sampling,
     resolve_objective_weighting,
 )
 
@@ -26,6 +25,7 @@ def test_physics_collocation_counts_are_strict_integers():
                 "induction",
                 "continuity",
                 "adiabatic_pressure",
+                "vector_potential_gauge",
                 "coronal_energy",
                 "upper_boundary_current_free",
                 "side_boundary_current_free",

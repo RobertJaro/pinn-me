@@ -346,7 +346,7 @@ class HMIResponseArchive:
             )
         if not torch.all(reference[1:] > reference[:-1]):
             raise ValueError("HMI response quadrature wavelengths must increase.")
-        return reference.to(torch.float32)
+        return reference
 
     def sample(self, detector_xy) -> dict[str, torch.Tensor]:
         coordinates = torch.as_tensor(detector_xy, dtype=torch.float32, device="cpu")

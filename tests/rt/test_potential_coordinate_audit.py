@@ -141,7 +141,7 @@ def test_source_radial_projection_and_full_pipeline_longitude_rotation_and_units
         replace(
             domain,
             solar_radius_m=2 * domain.solar_radius_m,
-            height_bounds_Mm=(0.0, 60.0),
+            height_bounds_megameter=(0.0, 60.0),
         ),
         torch.eye(3),
     )

@@ -126,8 +126,8 @@ def _write_json(path, value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/hmi_local_constant.yaml",
-                        help="configuration for this same local HMI crop")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="user-supplied configuration for this local HMI crop")
     parser.add_argument("--initialize-from-state", type=Path,
                         help="copy compatible P3S network weights into a new run with a fresh optimizer")
     parser.add_argument("--prepare-only", action="store_true")
@@ -168,7 +168,7 @@ def main(argv=None):
         "coronal_model": "spherical Neumann potential field, alpha=0",
         "coronal_top_megameter": 20.0,
         "limitations": [
-            "The potential corona is a separate derived magnetic model; the LTE network ends at 1.5 Mm.",
+            "The potential corona is a separate derived magnetic model; the LTE network ends at 1.5 megameter.",
             "Only inferred photospheric Br constrains the potential corona; tangential fields can differ at the interface.",
             "Source cells span the observation's angular bounding rectangle; the network fills unobserved corners.",
             "Br outside that rectangle is assumed zero; this is not a measured global solar map.",

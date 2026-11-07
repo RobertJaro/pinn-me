@@ -23,7 +23,7 @@ from prom3theus.instruments.hmi.acquisition import (
 )
 from prom3theus.instruments.hmi.geometry import build_geometry
 from prom3theus.observations import ObservationRaster
-from prom3theus.rt.geometry import direction_to_chart_mm
+from prom3theus.rt.geometry import direction_to_chart_megameter
 
 
 _REQUIRED_SEGMENTS = ("field", "inclination", "azimuth", "disambig")
@@ -269,7 +269,7 @@ def _reference_evaluation_grid(loader: P3SLoader, header, target_time):
         loader.state.scene.scene_basis,
         dtype=torch.float64,
     )
-    chart = direction_to_chart_mm(
+    chart = direction_to_chart_megameter(
         torch.from_numpy(surface), scene, float(bounds["solar_radius_m"])
     ).numpy()
     origin = Time(

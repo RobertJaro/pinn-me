@@ -50,6 +50,40 @@ def assert_aligned(batch):
     torch.testing.assert_close(batch["pixel_index"][:, 1], ids.long() % 10000)
 
 
+def test_random_epochs_full_batches_all_samples_and_resume():
+    source = ConcatDataset([dataset(time, 19) for time in range(3)])
+    loader = PersistentTensorLoader(source, 64, seed=31, stream_id="stokes")
+    try:
+        first, second = list(loader.iter_random([0, 1]))
+        for batch in (first, second):
+            assert_aligned(batch)
+            assert len(batch["coordinates"]) == 64  # Includes repeats, never a short tail.
+            assert set(batch["coordinates"][:, 2].tolist()) == {0, 1, 2}
+        assert not torch.equal(first["coordinates"], second["coordinates"])
+        torch.testing.assert_close(list(loader.iter_random([1]))[0], second)
+        all_ids = torch.cat([b["coordinates"][:, 0] for b in loader.iter_random(range(10))])
+        assert len(all_ids.unique()) == 57
+        # Restoring a published snapshot reuses the same prepared tensors and RNG.
+        restored = loader.snapshot().bind()
+        try:
+            torch.testing.assert_close(list(restored.iter_random([1]))[0], second)
+        finally:
+            restored.close()
+    finally:
+        loader.close()
+
+
+def test_random_channel_batches_preserve_quotas():
+    pools = [dataset(time, 19) for time in range(3)]
+    loader = PersistentTensorLoader(ConcatDataset(pools), 8, channels=pools)
+    try:
+        batch = list(loader.iter_random([0]))[0]
+        assert_aligned(batch)
+        assert torch.bincount(batch["coordinates"][:, 2].long()).tolist() == [3, 3, 2]
+    finally:
+        loader.close()
+
+
 def test_first_batches_mix_all_times_and_positions_without_pixel_fetch(monkeypatch):
     sources = [dataset(time) for time in range(3)]
     for source in sources:

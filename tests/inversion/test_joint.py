@@ -47,6 +47,36 @@ class _Shared(SharedObjectiveTerm):
         return SharedTermResult(value, {"weight": value}, {})
 
 
+def test_training_skips_zero_weight_forward_and_resumes_when_schedule_activates():
+    from unittest.mock import Mock
+
+    left, right = _Term(2.0, 3.0), _Term(5.0, 7.0)
+    right.evaluate_batch = Mock(wraps=right.evaluate_batch)
+    model = JointForwardModel(
+        torch.nn.Linear(1, 1),
+        {"left": left, "right": right},
+        {"left": 1.0, "right": 1.0},
+        weight_schedules={
+            "right": {"initial_weight": 0.0, "initial_steps": 2, "ramp_steps": 0}
+        },
+    )
+    batches = {name: {"scale": torch.tensor(1.0)} for name in ("left", "right")}
+    result = model.evaluate_batches(batches)
+    right.evaluate_batch.assert_not_called()
+    assert right.nuisance_calls == 0
+    assert set(result.streams) == {"left"}
+    torch.testing.assert_close(result.loss, torch.tensor(11.0))
+    result.loss.backward()
+    assert right.value.grad is None
+
+    model.set_step(2)
+    result = model.evaluate_batches(batches)
+    right.evaluate_batch.assert_called_once()
+    assert right.nuisance_calls == 1
+    assert set(result.streams) == {"left", "right"}
+    torch.testing.assert_close(result.loss, torch.tensor(65.0))
+
+
 def test_zero_weight_stream_renders_without_likelihood_or_prior_gradients():
     atmosphere = torch.nn.Linear(1, 1)
     left = _Term(2.0, 3.0)
@@ -58,6 +88,7 @@ def test_zero_weight_stream_renders_without_likelihood_or_prior_gradients():
         {"left": 0.25, "right": 0.0},
         {"regularizer": shared},
     )
+    model.eval()
 
     result = model.evaluate_batches(
         {"left": {"scale": torch.tensor(2.0)}, "right": {"scale": torch.tensor(1.0)}}

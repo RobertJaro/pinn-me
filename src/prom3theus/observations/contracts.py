@@ -75,19 +75,23 @@ def velocity_synthesis_contract(value: str | VelocitySynthesisMode) -> dict[str,
             "learned_velocity": "co-rotating Carrington Cartesian velocity",
             "carrington_rotation": "add rigid sidereal Omega_Carrington cross r",
             "observer_velocity": "not applied; Level-1 registration already removed it",
-            "spectral_registration": "subtract the recovered solar LOS velocity removed during line registration",
+            "spectral_registration": "divide detector vacuum wavelengths by D(removed_solar_los_velocity_m_per_s)",
+            "instrument_calibration": "divide wavelengths by D(instrument_line_of_sight_velocity_correction_m_per_s)",
+            "longitudinal_doppler_factor": "D(v)=sqrt((1+v/c)/(1-v/c)); physical material velocities remain unchanged",
         }
     return {
         "mode": mode.value,
         "learned_velocity": "co-rotating Carrington Cartesian residual",
         "carrington_rotation": "add rigid sidereal Omega_Carrington cross r",
-        "observer_velocity": "subtract the per-pixel observer toward-LOS velocity before the radiative-transfer redshift sign",
+        "observer_velocity": "divide detector vacuum wavelengths by D(observer_los_velocity_m_per_s)",
+        "instrument_calibration": "divide wavelengths by D(instrument_line_of_sight_velocity_correction_m_per_s)",
+        "longitudinal_doppler_factor": "D(v)=sqrt((1+v/c)/(1-v/c)); physical material velocities remain unchanged",
     }
 
 
 @dataclass(frozen=True, slots=True)
 class ObservationSpec:
-    """Scientific boundary between an observation and an LTE synthesizer."""
+    """Scientific contract for a calibrated observation and its instrument."""
 
     observation_id: str
     observation_type: str
@@ -109,7 +113,9 @@ class ObservationSpec:
             raise ValueError(
                 "Observation and instrument identifiers must be non-empty."
             )
-        wavelength = torch.as_tensor(self.wavelength_angstrom, dtype=torch.float32)
+        # Optical wavelength metadata must survive until small Doppler offsets
+        # and instrument interpolation weights have been prepared.
+        wavelength = torch.as_tensor(self.wavelength_angstrom, dtype=torch.float64)
         if wavelength.ndim != 1 or wavelength.numel() < 2:
             raise ValueError("Observation wavelengths must be a one-dimensional grid.")
         if not torch.isfinite(wavelength).all() or not torch.all(

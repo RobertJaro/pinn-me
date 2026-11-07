@@ -13,12 +13,15 @@ and optional magnetofluid constraints.
 
 ## Guides
 
+- [Parallel formal LTE transfer](parallel-formal-transfer.md): production synthesis,
+  numerical controls, gradient validation and benchmarking.
+
 - [Project README](../README.md): installation, run configurations, data preparation,
   training, and evaluation.
 - [Architecture](architecture.md): component boundaries, observation contracts,
   shared atmosphere, training, and persistence.
-- [Local HMI baseline](local-hmi-baseline.md): a small LTE inversion and spherical
-  current-free extrapolation to 20 Mm, with explicit acceptance checks.
+- [Historical local HMI baseline](local-hmi-baseline.md): a small LTE inversion and spherical
+  current-free extrapolation to 20 megameter, with explicit acceptance checks.
 - [Progressive potential boundaries](progressive-potential-boundaries.md): source Br,
   FFT geometry, update schedule, and checkpoint behavior.
 - [Coronal energy constraint](coronal-energy.md): the optional energy equation

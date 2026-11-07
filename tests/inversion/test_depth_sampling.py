@@ -29,6 +29,16 @@ def test_jitter_uses_local_spacing_for_nonuniform_grids(monkeypatch):
     torch.testing.assert_close(sampled, torch.tensor([-5.0, -0.96, -0.94, 1.0]))
 
 
+def test_stokes_fine_sampling_uses_no_rng_after_coarse_jitter():
+    distance = jitter_depth_grid(torch.linspace(0.0, 10.0, 64), randomize=True)
+    opacity = torch.exp(-((distance - 4.0) / 2.0).square())[None]
+    rng = torch.random.get_rng_state().clone()
+    first = importance_fine_distances(opacity, distance[None], 32, 0.05)
+    assert torch.equal(torch.random.get_rng_state(), rng)
+    second = importance_fine_distances(opacity, distance[None], 32, 0.05)
+    torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+
+
 def test_importance_refinement_orders_a_folded_detached_proposal():
     opacity = torch.tensor([[1.0, 3.0, 2.0]])
     fine = importance_fine_distances(
@@ -62,6 +72,21 @@ def test_importance_refinement_is_finite_for_an_opaque_interval():
     assert torch.isfinite(refined).all()
     assert torch.all(refined > distance[..., :1])
     assert torch.all(refined < distance[..., -1:])
+
+
+def test_optically_thin_refinement_keeps_float32_opacity_weights():
+    # Both interval attenuations round to 1 in float32. Their physical masses
+    # are in a 1:9 ratio, so half the opacity-weighted samples must not fall in
+    # the first interval as they would under a uniform-interval fallback.
+    distance = torch.tensor([[0.0, 1.0, 10.0]])
+    opacity = torch.full_like(distance, 1.0e-10)
+    actual = importance_fine_distances(opacity, distance, 4, 0.0)
+    reference = importance_fine_distances(
+        opacity.double(), distance.double(), 4, 0.0
+    )
+
+    torch.testing.assert_close(actual.double(), reference, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(actual, torch.tensor([[1.25, 3.75, 6.25, 8.75]]))
 
 
 def test_importance_refinement_never_duplicates_float32_coarse_edges():
@@ -117,7 +142,7 @@ def test_stokes_reference_sampling_preserves_physical_distribution(randomize):
     model = SimpleNamespace(
         solar_radius_m=torch.tensor(695700000.0),
         reference_atmosphere=reference,
-        line_formation_height_bounds_Mm=(1.5, -0.1),
+        line_formation_height_bounds_megameter=(1.5, -0.1),
     )
     q = jitter_depth_grid(torch.linspace(-5, 1, 51), randomize=randomize)
     height = reference_height_grid(model, q)
@@ -221,3 +246,22 @@ def test_line_extinction_is_validated_against_the_reference_extinction():
         importance_fine_distances(
             alpha500, distance, 4, 0.05, line_extinction=-line
         )
+
+
+def test_stokes_proposal_includes_line_and_continuum_extinction():
+    from prom3theus.inversion.depth_sampling import stokes_interval_proposal
+    # Continuum forms deeper; the line is optically thick near the observer.
+    extinction = torch.tensor([[[.01, 2.], [.01, 2.], [1., 2.], [3., 2.]]], requires_grad=True)
+    propagation = extinction[..., None, None] * torch.eye(4)
+    widths = torch.tensor([[1., 2., 1.]])
+    actual = stokes_interval_proposal(propagation, widths)
+    tau = .5 * (extinction[:, 1:].double() + extinction[:, :-1].double()) * widths[..., None]
+    cumulative = torch.cat((torch.zeros_like(tau[:, :1]), tau[:, :-1].cumsum(1)), dim=1)
+    masses = cumulative.neg().exp() * (-torch.expm1(-tau))
+    expected = (masses / masses.sum(dim=1, keepdim=True)).sum(-1)
+    torch.testing.assert_close(actual.double(), expected, rtol=2e-6, atol=1e-7)
+    assert not actual.requires_grad
+    continuum = stokes_interval_proposal(propagation[..., :1, :, :], widths)
+    line = stokes_interval_proposal(propagation[..., 1:, :, :], widths)
+    assert line[0, 0] > continuum[0, 0]
+    assert continuum[0, -1] > line[0, -1]

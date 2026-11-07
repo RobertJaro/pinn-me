@@ -103,10 +103,17 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_resources = resource_commands.add_parser(
         "validate", help="validate the packaged production-bundle checksums"
     )
-    validate_resources.add_argument(
+    validate_resources_target = validate_resources.add_mutually_exclusive_group()
+    validate_resources_target.add_argument(
         "--instrument",
         choices=("hinode_sp", "hmi_stokes"),
         help="display the complete atomic and instrument contract for one instrument",
+    )
+    validate_resources_target.add_argument(
+        "--set",
+        dest="resource_set",
+        choices=("aia_euv_v1", "plasma_v1"),
+        help="validate one independently-versioned resource set instead of the legacy bundle",
     )
 
     download = commands.add_parser("download", help="download observation inputs")
@@ -259,7 +266,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         required=True,
         help=(
-            "full Carrington surface-longitude extent [deg], not pixels, arcsec, or Mm"
+            "full Carrington surface-longitude extent [deg], not pixels, arcsec, or megameter"
         ),
     )
     aia.add_argument(
@@ -267,7 +274,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         required=True,
         help=(
-            "full Carrington surface-latitude extent [deg], not pixels, arcsec, or Mm"
+            "full Carrington surface-latitude extent [deg], not pixels, arcsec, or megameter"
         ),
     )
     aia.add_argument(
@@ -385,16 +392,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "resources":
-        from prom3theus.resources import (
-            validate_instrument_resource_bundle,
-            validate_resource_bundle,
-        )
+        if args.resource_set is not None:
+            from prom3theus.resources import validate_resource_set
 
-        metadata = (
-            validate_resource_bundle()
-            if args.instrument is None
-            else validate_instrument_resource_bundle(args.instrument)
-        )
+            metadata = validate_resource_set(args.resource_set)
+        else:
+            from prom3theus.resources import (
+                validate_instrument_resource_bundle,
+                validate_resource_bundle,
+            )
+
+            metadata = (
+                validate_resource_bundle()
+                if args.instrument is None
+                else validate_instrument_resource_bundle(args.instrument)
+            )
         print(json.dumps(metadata, indent=2, sort_keys=True))
         return
 
@@ -531,7 +543,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "recovery":
-        from prom3theus.diagnostics.recovery import run_recovery
+        from prom3theus.validation.recovery import run_recovery
 
         result = run_recovery(steps=args.steps, device=args.device)
         print(json.dumps(result, indent=2))

@@ -60,7 +60,7 @@ narrower scientific scope than the later target design in this document:
   to the outer shell. The objective coordinator itself is modality-neutral.
   Runtime construction still uses a closed typed HMI/AIA dispatch, so external
   plugin registration for a third imager remains architectural follow-up.
-- `prom3theus invert configs/hmi_aia_dynamic.yaml` trains the shared atmosphere
+- `prom3theus invert configs/sdo/hmi_aia_dynamic.yaml` trains the shared atmosphere
   with the single-device Lightning runtime, periodic AIA diagnostics, and
   resumable checkpoints. The maintained YAML sets AIA weight to zero: HMI and
   physics train while AIA renders. Positive AIA weight enables image fitting
@@ -653,7 +653,7 @@ The scene/model seam is exact:
 
 ```text
 SceneContract.transform(position_m, absolute_tai_seconds)
-    -> chart_time = [chart_x_mm, chart_y_mm, time_hours], geometric_height_m
+    -> chart_time = [chart_x_megameter, chart_y_megameter, time_hours], geometric_height_m
 
 atmosphere.evaluate_chart_height_points(chart_time, geometric_height_m)
     -> decoded physical atmosphere
@@ -723,7 +723,7 @@ using unrestricted temperature and the electron density returned by the same
 and no magnetic-field input. The composition:
 
 1. traces each near-side ray from its photospheric intersection to the shared
-   atmosphere's outer shell, not the 1.5-Mm LTE line-formation top;
+   atmosphere's outer shell, not the 1.5-megameter LTE line-formation top;
 2. makes the stored observer-to-Sun ray convention explicit and reverses it for
    surface-to-observer integration;
 3. uses a configurable, nonuniform physical-height grid dense near the lower
@@ -1063,7 +1063,7 @@ Joint P3S export remains future work.
 Run:
 
 ```text
-prom3theus invert configs/hmi_aia_dynamic.yaml [--rebuild-observations]
+prom3theus invert configs/sdo/hmi_aia_dynamic.yaml [--rebuild-observations]
 ```
 
 CLI dispatch is explicit: `validate-config` and `invert` accept schemas 2 and 3.

@@ -7,6 +7,8 @@ import json
 import math
 
 import torch
+
+from prom3theus.core.validation import require_tensor
 from torch import nn
 
 from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN
@@ -305,15 +307,10 @@ class HybridSolarEOS(nn.Module):
         if temperature.dtype not in (torch.float32, torch.float64):
             raise TypeError("Thermodynamic EoS supports float32 and float64 only.")
         temperature, pressure = torch.broadcast_tensors(temperature, pressure)
-        if (
-            not torch.isfinite(temperature).all()
-            or not torch.isfinite(pressure).all()
-            or torch.any(temperature <= 0.0)
-            or torch.any(pressure <= 0.0)
-        ):
-            raise ValueError(
-                "temperature and gas_pressure must be finite and strictly positive"
-            )
+        require_tensor(
+            (torch.isfinite(temperature) & torch.isfinite(pressure)
+             & (temperature > 0.0) & (pressure > 0.0)).all(),
+            'temperature and gas_pressure must be finite and strictly positive')
         return temperature, pressure
 
     def _coordinates(
@@ -755,16 +752,12 @@ class HybridSolarEOS(nn.Module):
         stic_electrons = torch.pow(ten, stic_endpoint_log_electrons)
         stic_non_electron_particles = stic_particles - stic_electrons
         chianti_endpoint_electrons = torch.pow(ten, chianti_endpoint_log_electrons)
-        if (
-            torch.any(stic_electrons <= 0.0)
-            or torch.any(stic_electrons >= fully_ionized_electrons)
-            or torch.any(stic_non_electron_particles <= 0.0)
-            or torch.any(chianti_endpoint_electrons <= 0.0)
-            or torch.any(chianti_endpoint_electrons >= fully_ionized_electrons)
-        ):
-            raise RuntimeError(
-                "The STiC/CHIANTI join is outside its physical composition bounds."
-            )
+        require_tensor(
+            ((stic_electrons > 0.0) & (stic_electrons < fully_ionized_electrons)
+             & (stic_non_electron_particles > 0.0)
+             & (chianti_endpoint_electrons > 0.0)
+             & (chianti_endpoint_electrons < fully_ionized_electrons)).all(),
+            'The STiC/CHIANTI join is outside its physical composition bounds.', error=RuntimeError)
 
         # z = logit(e / E_inf) keeps the bridged charge strictly between zero
         # and the fully ionized composition without clipping its derivatives.
@@ -819,14 +812,10 @@ class HybridSolarEOS(nn.Module):
             - lower_charge_change
             - upper_charge_change
         )
-        if (
-            torch.any(stic_charge_slope < 0.0)
-            or torch.any(chianti_charge_slope < 0.0)
-            or torch.any(middle_charge_change < 0.0)
-        ):
-            raise RuntimeError(
-                "The STiC/CHIANTI charge bridge is not monotone for this state."
-            )
+        require_tensor(
+            ((stic_charge_slope >= 0.0) & (chianti_charge_slope >= 0.0)
+             & (middle_charge_change >= 0.0)).all(),
+            'The STiC/CHIANTI charge bridge is not monotone for this state.', error=RuntimeError)
         charge_coordinate = (
             stic_charge_coordinate
             + lower_charge_change * lower_ramp

@@ -35,7 +35,7 @@ class _Atmosphere(nn.Module):
         self.log_pressure = nn.Parameter(torch.tensor(math.log(pressure)))
         self.register_buffer("solar_radius_m", torch.tensor(SOLAR_RADIUS_M))
         self.solar_radius_value_m = SOLAR_RADIUS_M
-        self.shell_height_bounds_Mm = (OUTER_HEIGHT_M / 1.0e6, -0.1)
+        self.shell_height_bounds_megameter = (OUTER_HEIGHT_M / 1.0e6, -0.1)
         self.thermodynamic_eos = _AnalyticEOS()
         self.last_coordinates = None
         self.last_height = None
@@ -89,8 +89,8 @@ def _scene(**changes):
         "scene_basis": torch.eye(3, dtype=torch.float64),
         "solar_radius_m": SOLAR_RADIUS_M,
         "reference_time_tai_seconds": 1_700_000_000.0,
-        "spatial_coordinate_center_mm": (0.0, 0.0),
-        "spatial_coordinate_scale_mm": (100.0, 100.0),
+        "spatial_coordinate_center_megameter": (0.0, 0.0),
+        "spatial_coordinate_scale_megameter": (100.0, 100.0),
         "time_coordinate_center_hours": 0.0,
         "time_coordinate_scale_hours": 1.0,
         "height_bounds_m": (-1.0e5, OUTER_HEIGHT_M),
@@ -283,7 +283,7 @@ def test_ray_integral_rejects_bad_ray_channel_and_scene_contract():
     with pytest.raises(IndexError, match="outside"):
         composition(bad_channel)
 
-    atmosphere.shell_height_bounds_Mm = (2.0, -0.1)
+    atmosphere.shell_height_bounds_megameter = (2.0, -0.1)
     with pytest.raises(ValueError, match="share the atmosphere outer shell"):
         composition(_batch())
 

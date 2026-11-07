@@ -12,6 +12,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from prom3theus.core.nn import temporary_eval_mode as _temporary_eval_mode
+
 
 def _move_value(value: Any, device: torch.device) -> Any:
     if isinstance(value, torch.Tensor):
@@ -64,17 +66,6 @@ def state_dict_sha256(module: nn.Module) -> str:
         )
         digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
-
-
-@contextmanager
-def _temporary_eval_mode(module: nn.Module):
-    states = [(child, child.training) for child in module.modules()]
-    module.eval()
-    try:
-        yield
-    finally:
-        for child, training in states:
-            child.training = training
 
 
 def _json_value(value: Any) -> Any:

@@ -1,4 +1,4 @@
-"""LTE radiative-transfer primitives and differentiable synthesis."""
+"""Local LTE physics and differentiable formal transfer."""
 
 from .atmosphere import (
     RadialReferenceAtmosphere,
@@ -6,12 +6,14 @@ from .atmosphere import (
     StratifiedAtmosphereModel,
 )
 from .atomic import AtomicDatabase, ElementData, SpectralLine
+from .formal_transfer import formal_stokes
 from .eos import HybridSolarEOS
+from .local_coefficients import LTELocalCoefficients, LocalRadiationCoefficients
 from .geometry import (
     RayTraceResult,
     chart_height_to_position_m,
     chart_to_direction,
-    direction_to_chart_mm,
+    direction_to_chart_megameter,
     intersect_sphere_near_side,
     intersect_sphere_near_side_from_local_point,
     position_to_chart_height,
@@ -44,15 +46,6 @@ from .radiometry import (
     neckel_continuum_limb_darkening,
     reference_summary,
 )
-from .synthesis import LTESynthesizer, SynthesisDiagnostics
-from .transfer import (
-    GeometricHeightPath,
-    OpticalDepthPath,
-    PolarizedFormalSolver,
-    RayDistancePath,
-    TransferPath,
-    scalar_formal_solution,
-)
 from .wavelength import air_to_vacuum_angstrom
 from .zeeman import (
     ZeemanComponent,
@@ -66,15 +59,12 @@ __all__ = [
     "AtomicDatabase",
     "ContinuumOpacity",
     "ElementData",
-    "GeometricHeightPath",
     "HybridSolarEOS",
-    "LTESynthesizer",
-    "OpticalDepthPath",
-    "PolarizedFormalSolver",
+    "LTELocalCoefficients",
+    "LocalRadiationCoefficients",
     "PolarizedLineOpacity",
     "PropagationDiagnostics",
     "RadialReferenceAtmosphere",
-    "RayDistancePath",
     "RayTraceResult",
     "HINODE_SOLAR_REFERENCE_RESOURCE",
     "STICLookupState",
@@ -84,9 +74,7 @@ __all__ = [
     "SpectralLine",
     "StratifiedAtmosphere",
     "StratifiedAtmosphereModel",
-    "SynthesisDiagnostics",
     "SI_EMISSION_MEASURE_TO_CGS",
-    "TransferPath",
     "THOMSON_CROSS_SECTION_M2",
     "VoigtFaraday",
     "ZeemanComponent",
@@ -95,11 +83,12 @@ __all__ = [
     "chart_height_to_position_m",
     "chart_to_direction",
     "damping_rate",
-    "direction_to_chart_mm",
+    "direction_to_chart_megameter",
     "disk_center_continuum_radiance",
     "disk_center_intensity_radiance",
     "doppler_velocity",
     "doppler_width_frequency",
+    "formal_stokes",
     "integrated_line_opacity",
     "integrate_ne2_response",
     "integrate_optically_thin",
@@ -111,7 +100,6 @@ __all__ = [
     "position_to_chart_height",
     "project_vectors_to_stokes",
     "reference_summary",
-    "scalar_formal_solution",
     "validate_scene_basis",
     "voigt_faraday",
     "wigner_3j",

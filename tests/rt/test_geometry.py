@@ -6,7 +6,7 @@ import torch
 from prom3theus.rt.geometry import (
     chart_height_to_position_m,
     chart_to_direction,
-    direction_to_chart_mm,
+    direction_to_chart_megameter,
     intersect_sphere_near_side,
     intersect_sphere_near_side_from_local_point,
     project_vectors_to_stokes,
@@ -19,7 +19,7 @@ def test_gnomonic_chart_round_trip_preserves_direction():
     chart = torch.tensor(((0.0, 0.0), (50.0, -20.0)))
     direction = chart_to_direction(chart, basis, 695_700_000.0)
     torch.testing.assert_close(
-        direction_to_chart_mm(direction, basis, 695_700_000.0),
+        direction_to_chart_megameter(direction, basis, 695_700_000.0),
         chart,
         rtol=2e-6,
         atol=2e-5,

@@ -46,6 +46,15 @@ from prom3theus.observations import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def isolate_runner_protocol_from_lte_physics(monkeypatch):
+    class ProtocolWindow(torch.nn.Module):
+        def __init__(self, atmosphere, *, configuration):
+            super().__init__()
+            self.construction = configuration
+    monkeypatch.setattr("prom3theus.inversion.lte.LTEWindow", ProtocolWindow)
+
+
 class _DiagnosticPixelDataset(torch.utils.data.Dataset):
     pixel_indices = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]])
 
@@ -53,10 +62,11 @@ class _DiagnosticPixelDataset(torch.utils.data.Dataset):
         return 4
 
     def __getitem__(self, index):
-        return {"pixel_index": self.pixel_indices[index], "stokes": torch.ones(4, 6)}
+        return {"pixel_index": self.pixel_indices[index], "stokes": torch.full((4, 6), .2)}
 
 
-def test_joint_stokes_diagnostics_reuse_lte_renderers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("normalize", [False, True])
+def test_joint_stokes_diagnostics_render_shared_radiation_and_atmosphere(tmp_path, monkeypatch, normalize):
     from unittest.mock import Mock
     from prom3theus.config import load_config
     from prom3theus.diagnostics.rendering import AtmosphereRenderer
@@ -67,13 +77,17 @@ def test_joint_stokes_diagnostics_reuse_lte_renderers(tmp_path, monkeypatch):
     term.wavelength_angstrom = torch.arange(6, dtype=torch.float32) + 6173
     term.wavelength_weights = torch.ones(6)
     from prom3theus.inversion.objective import StokesObjective
-    term.objective = StokesObjective(type="asinh_mse", asinh_scale=1e-3)
-    term.synthesizer = SimpleNamespace(lines=[])
-    term.coarse_depth_grid = torch.linspace(1, 0, 4)
-    term._composition = SimpleNamespace(sample_depth_grid=lambda grid, randomize: grid)
+    term.objective = StokesObjective(type="asinh_mse", asinh_scale=1e-3,
+                                    continuum_normalization=normalize, continuum_indices=[0, 5])
+    window = nn.Sequential(nn.Identity())
+    window[0].eval()
+    window.coefficients = SimpleNamespace(lines=[])
+    object.__setattr__(term, "synthesis_window", window)
 
     def evaluate(batch):
         assert not term.training
+        assert not window.training
+        assert not atmosphere.training
         return SimpleNamespace(
             diagnostics={
                 "prediction": batch["stokes"] * 0.9,
@@ -92,7 +106,7 @@ def test_joint_stokes_diagnostics_reuse_lte_renderers(tmp_path, monkeypatch):
     )
     atmosphere = nn.Linear(1, 1)
     runtime = SimpleNamespace(
-        config=load_config(PROJECT_ROOT / "configs/hmi_aia_dynamic.yaml"),
+        config=load_config(PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml"),
         device=torch.device("cpu"),
         model=SimpleNamespace(
             terms={"photospheric_stokes": term}, atmosphere_model=atmosphere
@@ -100,14 +114,17 @@ def test_joint_stokes_diagnostics_reuse_lte_renderers(tmp_path, monkeypatch):
         streams={"photospheric_stokes": SimpleNamespace(data_module=data)},
     )
     stokes = Mock(return_value=tmp_path / "stokes.png")
+    profiles = Mock(return_value=tmp_path / "profiles.png")
     fields = Mock(return_value=[tmp_path / "fields.png"])
     monkeypatch.setattr(AtmosphereRenderer, "render_stokes_validation", stokes)
+    monkeypatch.setattr(AtmosphereRenderer, "render_stokes_profiles", profiles)
     monkeypatch.setattr(AtmosphereRenderer, "render_atmosphere", fields)
     paths = joint_rendering._render_stokes_diagnostics(
         runtime, SimpleNamespace(global_step=12), tmp_path
     )
-    assert len(paths.paths) == 2
+    assert len(paths.paths) == 3
     stokes.assert_called_once()
+    profiles.assert_called_once()
     fields.assert_called_once()
     assert stokes.call_args.args[0].logger is None
     assert stokes.call_args.args[4] == "photospheric_stokes"
@@ -115,16 +132,21 @@ def test_joint_stokes_diagnostics_reuse_lte_renderers(tmp_path, monkeypatch):
     assert stokes.call_args.args[1]["stokes_pred"].shape == (4, 4, 6)
     from prom3theus.diagnostics.sampling import integrated_stokes
     payload = stokes.call_args.args[1]
-    compared = term.objective.transform(torch.full((4, 4, 6), .9))
+    torch.testing.assert_close(payload["raw_stokes_pred"], torch.full((4, 4, 6), .18))
+    torch.testing.assert_close(payload["raw_stokes_reference"], torch.full((4, 4, 6), .2))
+    compared = term.objective.transform(torch.full((4, 4, 6), .9 if normalize else .18))
     torch.testing.assert_close(payload["stokes_pred"], compared)
     torch.testing.assert_close(payload["integrated_prediction"], integrated_stokes(
         compared, term.wavelength_angstrom, term.wavelength_weights))
     assert stokes.call_args.kwargs["objective_config"] == term.objective.configuration()
     view = fields.call_args.args[1]
     assert view.atmosphere_model is atmosphere
-    assert view.forward_composition is term._composition
-    torch.testing.assert_close(view.sample_depth_grid(), term.coarse_depth_grid)
+    assert view.synthesis_window is term.synthesis_window
+    assert not hasattr(view, "forward_composition")
     assert term.training
+    assert window.training
+    assert not window[0].training
+    assert atmosphere.training
 
 
 def test_joint_online_wandb_logger_and_validation_uploads(tmp_path, monkeypatch):
@@ -133,7 +155,7 @@ def test_joint_online_wandb_logger_and_validation_uploads(tmp_path, monkeypatch)
     from prom3theus.config import load_config
     import pytorch_lightning.loggers
 
-    config = load_config(PROJECT_ROOT / "configs/hmi_aia_dynamic.yaml")
+    config = load_config(PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml")
     logger = Mock()
     constructor = Mock(return_value=logger)
     monkeypatch.setenv("WANDB_MODE", "offline")
@@ -171,7 +193,7 @@ def test_default_stokes_builder_converts_yaml_component_keys(monkeypatch):
     from prom3theus.inversion.configuration import resolve_objective_weighting
     from prom3theus.inversion.objective import StokesObjective
 
-    config = load_config(PROJECT_ROOT / "configs/hmi_aia_dynamic.yaml")
+    config = load_config(PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml")
     stream = config.streams[0]
     original = stream.data_term.objective.to_dict()
     specification = SimpleNamespace(
@@ -182,7 +204,7 @@ def test_default_stokes_builder_converts_yaml_component_keys(monkeypatch):
         velocity_synthesis_mode=SimpleNamespace(value="local"),
     )
     monkeypatch.setattr(
-        forward_components, "_stokes_instrument_options", lambda *args: ({}, 0.0, False)
+        forward_components, "_stokes_instrument_options", lambda *args: ({}, 0.0, False, 10000.0)
     )
 
     def build_term(**options):
@@ -196,7 +218,7 @@ def test_default_stokes_builder_converts_yaml_component_keys(monkeypatch):
         )
         objective_options = dict(options["objective_config"])
         objective_options.pop("qu_warmup_steps", None)  # Owned by StokesObservationTerm.
-        objective = StokesObjective(**objective_options)
+        objective = StokesObjective(**objective_options, continuum_indices=options["continuum_indices"])
         expected = torch.tensor(list(original["stokes_weights"].values()))
         torch.testing.assert_close(weighting.stokes_weights, expected)
         assert objective.loss_type == original["type"]
@@ -205,7 +227,8 @@ def test_default_stokes_builder_converts_yaml_component_keys(monkeypatch):
 
     monkeypatch.setattr(forward_components, "StokesObservationTerm", build_term)
     joint_assembly._default_term_builder(
-        stream, SimpleNamespace(specification=specification), nn.Identity(), None
+        stream, SimpleNamespace(specification=specification), nn.Identity(), None,
+        synthesis_windows={stream.data_term.synthesis_window: nn.Identity()},
     )
     assert stream.data_term.objective.to_dict() == original
 
@@ -214,10 +237,10 @@ def _config(
     tmp_path: Path, *, gradients: bool = True, render_streams: bool = False
 ) -> JointInversionConfig:
     legacy = yaml.safe_load(
-        (PROJECT_ROOT / "configs/hmi_lte_dynamic.yaml").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/sdo/hmi_dynamic.yaml").read_text(encoding="utf-8")
     )
     document = {
-        "schema_version": 3,
+        "schema_version": 5,
         "solver": {
             "kind": "joint",
             "output_directory": "output",
@@ -226,6 +249,7 @@ def _config(
         "scene": {"reference_stream": "photospheric_stokes"},
         "atmosphere": deepcopy(legacy["atmosphere"]),
         "physics": deepcopy(legacy["physics"]),
+        "synthesis": deepcopy(legacy["synthesis"]),
         "atmosphere_regularization": [],
         "streams": [
             {
@@ -234,17 +258,12 @@ def _config(
                 "data_term": {
                     "type": "lte_stokes",
                     "weight": 1.0,
-                    "synthesis": deepcopy(
-                        legacy["streams"][0]["data_term"]["synthesis"]
-                    ),
+                    "synthesis_window": legacy["streams"][0]["data_term"]["synthesis_window"],
                     "instrument": deepcopy(
                         legacy["streams"][0]["data_term"]["instrument"]
                     ),
                     "objective": deepcopy(
                         legacy["streams"][0]["data_term"]["objective"]
-                    ),
-                    "depth_sampling": deepcopy(
-                        legacy["streams"][0]["data_term"]["depth_sampling"]
                     ),
                 },
             },
@@ -291,6 +310,7 @@ def _config(
             "visualization": {
                 "enabled": render_streams,
                 "render_streams": render_streams,
+
             }
         },
         "dry_run": {
@@ -312,6 +332,8 @@ class _StokesData:
         self.setup_calls = []
         self.batch = {
             "x": torch.arange(1.0, 13.0),
+            "coordinates": torch.zeros(12, 3),
+            "ray_direction": torch.tensor([[0.0, 0.0, -1.0]]).expand(12, 3),
             "target": torch.zeros(12),
             "instrument_response": {"profile": torch.arange(24.0).reshape(12, 2)},
         }
@@ -365,6 +387,8 @@ class _Term(ObservationDataTerm):
         super().__init__()
         self.bias = nn.Parameter(torch.tensor(0.1))
         self.stream_id = stream_id
+        if stream_id == "photospheric_stokes":
+            self.synthesis_window_id = "fe_i_6173"
         self._composition = SimpleNamespace(atmosphere_model=atmosphere)
 
     def _prediction(self, batch, ray_samples=None, refine=True):
@@ -373,13 +397,17 @@ class _Term(ObservationDataTerm):
             self._composition.atmosphere_model.field * batch["x"] * factor + self.bias
         )
 
+    def predict(self, batch):
+        return self._prediction(batch)[:, None, None].expand(-1, 4, 2)
+
     def evaluate_batch(self, batch):
         prediction = self._prediction(batch)
         residual = prediction - batch["target"]
         return DataTermBatchResult(
             likelihood_loss=residual.square().mean(),
             component_losses={"data": residual.abs().mean()},
-            metrics={"prediction_mean": prediction.mean()},
+            metrics={"prediction_mean": prediction.mean(),
+                     "stokes_outgoing_admissibility_max": prediction.new_zeros(())},
             sample_count=int(prediction.numel()),
             diagnostics={"prediction": prediction},
         )
@@ -497,8 +525,8 @@ def _factories(tmp_path: Path, *, shared_terms=None):
             scene_basis=torch.eye(3),
             solar_radius_m=6.957e8,
             reference_time_tai_seconds=1.7e9,
-            spatial_coordinate_center_mm=(0.0, 0.0),
-            spatial_coordinate_scale_mm=(10.0, 10.0),
+            spatial_coordinate_center_megameter=(0.0, 0.0),
+            spatial_coordinate_scale_megameter=(10.0, 10.0),
             time_coordinate_center_hours=0.0,
             time_coordinate_scale_hours=1.0,
             height_bounds_m=(
@@ -684,7 +712,7 @@ def test_joint_inversion_optimizes_both_streams_and_resumes(
         no_steps = run_joint_inversion(config, factories=factories)
         regenerated = torch.load(no_steps.save_state_path, weights_only=True)
         assert no_steps.trainer.global_step == regenerated["global_step"] == 5
-        assert regenerated["context"] == {"test_runtime_max_steps": 5}
+        assert regenerated["context"]["test_runtime_max_steps"] == 5
         assert set(regenerated["state_dict"]) == set(completed["state_dict"])
         for name, expected in completed["state_dict"].items():
             torch.testing.assert_close(regenerated["state_dict"][name], expected, rtol=0, atol=0)
@@ -1029,8 +1057,8 @@ def test_physics_bounds_conservatively_cover_complete_aia_ray_support():
         scene_basis=torch.eye(3, dtype=torch.float64),
         solar_radius_m=radius,
         reference_time_tai_seconds=1_700_000_000.0,
-        spatial_coordinate_center_mm=(0.0, 0.0),
-        spatial_coordinate_scale_mm=(10.0, 10.0),
+        spatial_coordinate_center_megameter=(0.0, 0.0),
+        spatial_coordinate_scale_megameter=(10.0, 10.0),
         time_coordinate_center_hours=0.0,
         time_coordinate_scale_hours=1.0,
         height_bounds_m=(-1.0e5, 50.0e6),

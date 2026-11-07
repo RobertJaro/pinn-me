@@ -11,31 +11,31 @@ from prom3theus.inversion.data_terms import AIAEUVObservationTerm, StokesObserva
 
 def _stokes_instrument_options(
     stream: ObservationStreamConfig, specification: Any
-) -> tuple[dict[str, Any], float, bool]:
+) -> tuple[dict[str, Any], float, bool, float]:
     instrument = stream.data_term.instrument.to_dict()
     velocity = float(instrument.pop("line_of_sight_velocity_correction_m_per_s"))
     optimize_velocity = bool(
         instrument.pop("optimize_line_of_sight_velocity_correction")
     )
+    maximum = float(instrument.pop("maximum_line_of_sight_velocity_correction_m_per_s"))
     for name, value in specification.instrument_options.items():
         if name in instrument and instrument[name] != value:
             raise ValueError(
                 f"Configured instrument option {name!r} conflicts with the observation."
             )
         instrument[name] = value
-    return resolve_instrument_config(instrument), velocity, optimize_velocity
+    return resolve_instrument_config(instrument), velocity, optimize_velocity, maximum
 
 
-def _build_stokes(stream, loaded, atmosphere_model, scene):
+def _build_stokes(stream, loaded, atmosphere_model, scene, synthesis_windows):
     data_term = stream.data_term
-    synthesis = data_term.synthesis.to_dict()
-    excluded = synthesis.pop("excluded_wavelength_windows_angstrom")
+    excluded = data_term.excluded_wavelength_windows_angstrom
     objective = data_term.objective.to_dict()
     stokes_weights = {
         component.upper(): value
         for component, value in objective.pop("stokes_weights").items()
     }
-    instrument, correction, optimize_correction = _stokes_instrument_options(
+    instrument, correction, optimize_correction, maximum_correction = _stokes_instrument_options(
         stream, loaded.specification
     )
     specification = loaded.specification
@@ -46,25 +46,25 @@ def _build_stokes(stream, loaded, atmosphere_model, scene):
         continuum_indices=specification.continuum_indices,
         atlas_continuum_radiance_w_m3_sr=(specification.radiance_scale_w_m3_sr),
         velocity_synthesis_mode=specification.velocity_synthesis_mode.value,
-        synthesizer_config=synthesis,
+        synthesis_window=synthesis_windows[data_term.synthesis_window],
+        synthesis_window_id=data_term.synthesis_window,
         instrument_config=instrument,
         objective_config=objective,
         weight_config=stokes_weights,
         wavelength_exclude_windows_angstrom=excluded,
-        depth_sampling_config=data_term.depth_sampling.to_dict(),
         instrument_line_of_sight_velocity_correction_m_per_s=correction,
         optimize_instrument_line_of_sight_velocity_correction=(optimize_correction),
-        disambiguation_config=data_term.disambiguation.to_dict(),
+        maximum_line_of_sight_velocity_correction_m_per_s=maximum_correction,
     )
     term = StokesObservationTerm(**options)
     term.construction = {
         "type": "lte_stokes",
-        "options": {k: v for k, v in options.items() if k != "atmosphere_model"},
+        "options": {k: v for k, v in options.items() if k not in ("atmosphere_model", "synthesis_window")},
     }
     return term
 
 
-def _build_aia(stream, loaded, atmosphere_model, scene):
+def _build_aia(stream, loaded, atmosphere_model, scene, synthesis_windows=None):
     data_term = stream.data_term
     objective = data_term.objective
     channel_weights_by_id = {
@@ -107,11 +107,12 @@ class ForwardProvider:
     reconstruct: object
 
 
-def _restore_stokes(options, atmosphere, scene):
-    return StokesObservationTerm(atmosphere_model=atmosphere, **options)
+def _restore_stokes(options, atmosphere, scene, synthesis_windows):
+    return StokesObservationTerm(atmosphere_model=atmosphere,
+        synthesis_window=synthesis_windows[options["synthesis_window_id"]], **options)
 
 
-def _restore_aia(options, atmosphere, scene):
+def _restore_aia(options, atmosphere, scene, synthesis_windows=None):
     return AIAEUVObservationTerm(atmosphere_model=atmosphere, scene=scene, **options)
 
 
@@ -129,15 +130,15 @@ def register_forward_component(name, provider):
     _PROVIDERS[name] = provider
 
 
-def _default_term_builder(stream, loaded, atmosphere_model, scene):
+def _default_term_builder(stream, loaded, atmosphere_model, scene, synthesis_windows=None):
     return _PROVIDERS[stream.data_term.type].build(
-        stream, loaded, atmosphere_model, scene
+        stream, loaded, atmosphere_model, scene, synthesis_windows
     )
 
 
-def reconstruct_term(contract, atmosphere, scene):
+def reconstruct_term(contract, atmosphere, scene, synthesis_windows=None):
     term = _PROVIDERS[contract["type"]].reconstruct(
-        dict(contract["options"]), atmosphere, scene
+        dict(contract["options"]), atmosphere, scene, synthesis_windows
     )
     term.construction = contract
     return term

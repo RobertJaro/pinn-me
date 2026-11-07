@@ -68,6 +68,14 @@ def test_integrated_stokes_rejects_nonfinite_and_integer_stokes():
         integrated_stokes(torch.ones(1, 4, 2, dtype=torch.int64), wavelength, weights)
 
 
+def test_integrated_stokes_preserves_precise_wavelength_intervals():
+    wavelength = torch.tensor([6302.5000, 6302.5001, 6302.5002], dtype=torch.float64)
+    stokes = torch.ones(2, 4, 3, dtype=torch.float32)
+    actual = integrated_stokes(stokes, wavelength, torch.ones(3))
+    expected = torch.full_like(actual, float(wavelength[-1] - wavelength[0]))
+    torch.testing.assert_close(actual, expected)
+
+
 def test_validation_collector_keeps_all_integrals_and_bounded_profiles():
     collector = ValidationSampleCollector(max_profile_samples=3)
     wavelength = torch.tensor((6300.0, 6301.0, 6302.0, 6303.0))
@@ -96,11 +104,31 @@ def test_map_coordinates_uses_canonical_observation_field():
         )
     )
 
-    x_mm, y_mm = map_coordinates(
+    x_megameter, y_megameter = map_coordinates(
         SimpleNamespace(coordinates=coordinates),
         np.array((0, 1)),
         np.array((0, 1)),
     )
 
-    np.testing.assert_array_equal(x_mm, ((1.0, 2.0), (3.0, 4.0)))
-    np.testing.assert_array_equal(y_mm, ((10.0, 20.0), (30.0, 40.0)))
+    np.testing.assert_array_equal(x_megameter, ((1.0, 2.0), (3.0, 4.0)))
+    np.testing.assert_array_equal(y_megameter, ((10.0, 20.0), (30.0, 40.0)))
+
+
+def test_raw_profiles_and_pixel_ids_stay_aligned_across_reservoir_merges():
+    # Distinct values expose a gather that trims one profile array differently.
+    pixels = torch.stack((torch.arange(11), torch.zeros(11, dtype=torch.long)), -1)
+    raw = torch.arange(11.)[:, None, None].expand(-1, 4, 3)
+    wavelength = torch.arange(3.)
+    collectors = [ValidationSampleCollector(3), ValidationSampleCollector(3)]
+    for collector, selection in zip(collectors, (slice(0, 6), slice(6, 11))):
+        collector.add(
+            raw[selection] / 10, raw[selection] / 5, pixels[selection], wavelength,
+            torch.ones(3), raw_prediction=raw[selection], raw_reference=raw[selection] * 2,
+        )
+    merged = collectors[0].merge_payloads([c.local_payload() for c in collectors])
+    selected = merged["profile_pixel_index"][:, 0]
+    assert len(selected) == 3
+    torch.testing.assert_close(merged["raw_stokes_pred"], raw[selected])
+    torch.testing.assert_close(merged["raw_stokes_reference"], raw[selected] * 2)
+    torch.testing.assert_close(merged["stokes_pred"], raw[selected] / 10)
+    torch.testing.assert_close(merged["stokes_reference"], raw[selected] / 5)

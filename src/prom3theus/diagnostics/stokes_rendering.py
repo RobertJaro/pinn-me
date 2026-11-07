@@ -14,6 +14,48 @@ from .sampling import map_coordinates
 class StokesPlotter(DiagnosticPlotter):
     """Build observed-versus-predicted Stokes validation figures."""
 
+    def individual_profiles_figure(self, outputs, wavelength_angstrom, label):
+        """Retain signs and individual line shapes that ensemble medians hide.
+
+        Selection uses the observed profiles in the deterministic reservoir,
+        never model predictions. Raw atlas units expose intensity errors before
+        continuum normalization or an asinh transform can magnify them.
+        """
+        reference = outputs["raw_stokes_reference"].numpy()
+        prediction = outputs["raw_stokes_pred"].numpy()
+        pixels = outputs["profile_pixel_index"].numpy()
+        wave = wavelength_angstrom.detach().cpu().numpy()
+        linear_power = np.mean(reference[:, 1:3] ** 2, axis=(1, 2))
+        circular_power = np.mean(reference[:, 3] ** 2, axis=1)
+        brightness = np.mean(reference[:, 0], axis=1)
+        selections = [
+            (int(np.argmax(linear_power)), "largest Q/U RMS"),
+            (int(np.argmax(circular_power)), "largest V RMS"),
+            (int(np.argmin(brightness)), "lowest mean I"),
+        ]
+        figure = Figure(figsize=(16, 8.5), constrained_layout=True)
+        FigureCanvasAgg(figure)
+        axes = figure.subplots(3, 4, squeeze=False, sharex=True)
+        for row, (index, description) in enumerate(selections):
+            for component, name in enumerate(("I", "Q", "U", "V")):
+                axis = axes[row, component]
+                axis.plot(wave, reference[index, component], "o-", color="black", markersize=3, label="observed")
+                axis.plot(wave, prediction[index, component], "o-", color="tab:red", markersize=3, label="predicted")
+                axis.axhline(0, color="0.75", linewidth=0.6)
+                axis.grid(alpha=0.18)
+                axis.set_title(name)
+                if component == 0:
+                    axis.set_ylabel(f"{description}\npixel {tuple(map(int, pixels[index]))}")
+                axis.ticklabel_format(useOffset=False, axis="x")
+        axes[0, 0].legend(loc="best")
+        figure.suptitle(
+            f"Individual Stokes profiles — {label}\n"
+            "Observed selection within the bounded validation sample; atlas units before loss transforms"
+        )
+        figure.supxlabel(r"air wavelength [$\AA$]")
+        figure.supylabel(r"Stokes component / $I_{c,\,atlas}(\mu=1)$")
+        return figure
+
     def validation_figure(
         self,
         outputs,
@@ -29,7 +71,7 @@ class StokesPlotter(DiagnosticPlotter):
     ) -> Figure:
         """Show loss-space Stokes predictions and references without rescaling."""
 
-        wavelength = wavelength_angstrom.detach().float().cpu().numpy()
+        wavelength = wavelength_angstrom.detach().cpu().numpy()
         finite_wavelength = wavelength[np.isfinite(wavelength)]
         if finite_wavelength.size < 2:
             raise ValueError(
@@ -73,12 +115,12 @@ class StokesPlotter(DiagnosticPlotter):
         reference_maps = np.full_like(prediction_maps, np.nan)
         prediction_maps[compact_rows, compact_columns] = integrated_prediction
         reference_maps[compact_rows, compact_columns] = integrated_reference
-        map_x_mm, map_y_mm = map_coordinates(raster, sampled_rows, sampled_columns)
+        map_x_megameter, map_y_megameter = map_coordinates(raster, sampled_rows, sampled_columns)
         # The image values stay on the native, strided detector array. Carrington
         # coordinates are used only to label its outer pixel edges; they do not
         # define a second mesh or trigger spatial interpolation.
-        x_centers = np.nanmedian(map_x_mm, axis=0)
-        y_centers = np.nanmedian(map_y_mm, axis=1)
+        x_centers = np.nanmedian(map_x_megameter, axis=0)
+        y_centers = np.nanmedian(map_y_megameter, axis=1)
 
         def outer_edges(centers: np.ndarray) -> tuple[float, float]:
             if centers.size == 1:
@@ -114,8 +156,8 @@ class StokesPlotter(DiagnosticPlotter):
         scatter_figure.subplots_adjust(
             left=0.07, right=0.99, bottom=0.22, top=0.82, wspace=0.16
         )
-        map_figure.supxlabel("Carrington chart X [Mm]")
-        map_figure.supylabel("Carrington chart Y [Mm]")
+        map_figure.supxlabel("Carrington chart X [megameter]")
+        map_figure.supylabel("Carrington chart Y [megameter]")
         map_figure.text(
             0.985, 0.66, "reference", rotation=-90, ha="center", va="center"
         )
@@ -124,11 +166,23 @@ class StokesPlotter(DiagnosticPlotter):
         )
         profile_figure.supxlabel(r"air wavelength [$\AA$]")
         asinh = (objective_config or {}).get("type") == "asinh_mse"
+        scales = (objective_config or {}).get("stokes_scales")
         comparison_label = (
             f"I linear; Q/U/V normalized asinh\na={objective_config['asinh_scale']:g}"
             if asinh
             else r"Stokes component / $I_{c,\,atlas}(\mu=1)$"
         )
+        if (objective_config or {}).get("continuum_normalization", False):
+            legacy = objective_config.get("continuum_floor") is not None
+            description = ("floored observed continuum" if legacy else
+                           f"observed Stokes-I quantile ({objective_config.get('continuum_quantile', .9):g})")
+            comparison_label = (
+                comparison_label + f"\n(after {description} normalization)"
+                if asinh else f"Stokes component / {description}"
+            )
+        if scales is not None:
+            comparison_label += "\nlinear I/Q/U/V scales: " + "/".join(
+                f"{scales[name]:g}" for name in ("I", "Q", "U", "V"))
         profile_figure.supylabel(comparison_label)
         scatter_figure.supxlabel(r"reference absolute integral [$\AA$]")
         scatter_figure.supylabel(r"predicted absolute integral [$\AA$]")
@@ -138,6 +192,8 @@ class StokesPlotter(DiagnosticPlotter):
                 if asinh and component
                 else name
             )
+            if scales is not None:
+                display_name = f"{name}/{scales[name]:g}"
             finite = reference_maps[..., component][
                 np.isfinite(reference_maps[..., component])
             ]
@@ -290,135 +346,6 @@ class StokesPlotter(DiagnosticPlotter):
         )
         return figure
 
-    def phase_figure(
-        self,
-        outputs,
-        raster,
-        label: str,
-        *,
-        rows: np.ndarray,
-        columns: np.ndarray,
-        step: int,
-        cold_steps: int,
-        handoff_step: int,
-    ) -> Figure:
-        """Show the temporary Stokes disambiguation phase on the validation grid.
-
-        The phase is displayed in degrees because the two equivalent
-        transverse-field branches are separated by 180 degrees.  The second
-        panel shows the exact smooth binary objective used during warmup,
-        ``sin(phi)^2``.
-        """
-
-        if not isinstance(outputs, dict):
-            raise TypeError("Phase visualization requires the streamed callback payload.")
-
-        def as_numpy(value) -> np.ndarray:
-            if isinstance(value, torch.Tensor):
-                return value.detach().cpu().numpy()
-            return np.asarray(value)
-
-        phase = as_numpy(outputs["phase_rad"]).astype(np.float32, copy=False).reshape(-1)
-        pixel_index = as_numpy(outputs["pixel_index"])
-        if pixel_index.ndim != 2 or pixel_index.shape[1] != 2:
-            raise ValueError("Phase visualization pixel_index must have shape [N, 2].")
-        if pixel_index.shape[0] != phase.shape[0]:
-            raise ValueError(
-                "Phase visualization phase and pixel_index must contain the same samples."
-            )
-        sampled_rows = np.asarray(rows, dtype=np.int64)
-        sampled_columns = np.asarray(columns, dtype=np.int64)
-        selected = (
-            np.isin(pixel_index[:, 0], sampled_rows)
-            & np.isin(pixel_index[:, 1], sampled_columns)
-            & np.isfinite(phase)
-        )
-        if not np.any(selected):
-            raise ValueError(
-                "The shared visualization grid contains no finite phase samples."
-            )
-        pixel_index = pixel_index[selected]
-        phase = phase[selected]
-        compact_rows = np.searchsorted(sampled_rows, pixel_index[:, 0])
-        compact_columns = np.searchsorted(sampled_columns, pixel_index[:, 1])
-        phase_degrees = np.rad2deg(phase)
-        # The network output is an unconstrained real phase.  Wrap only for
-        # display so equivalent 0/360-degree branches share a cyclic color.
-        wrapped_phase_degrees = (phase_degrees + 180.0) % 360.0 - 180.0
-        binary_distance = np.square(np.sin(phase))
-        phase_map = np.full(
-            (sampled_rows.size, sampled_columns.size), np.nan, dtype=np.float32
-        )
-        binary_map = np.full_like(phase_map, np.nan)
-        phase_map[compact_rows, compact_columns] = wrapped_phase_degrees
-        binary_map[compact_rows, compact_columns] = binary_distance
-        map_x_mm, map_y_mm = map_coordinates(raster, sampled_rows, sampled_columns)
-        x_centers = np.nanmedian(map_x_mm, axis=0)
-        y_centers = np.nanmedian(map_y_mm, axis=1)
-
-        def outer_edges(centers: np.ndarray) -> tuple[float, float]:
-            if centers.size == 1:
-                return float(centers[0] - 0.5), float(centers[0] + 0.5)
-            return (
-                float(centers[0] - 0.5 * (centers[1] - centers[0])),
-                float(centers[-1] + 0.5 * (centers[-1] - centers[-2])),
-            )
-
-        image_extent = (*outer_edges(x_centers), *outer_edges(y_centers))
-        figure = Figure(figsize=(13.0, 6.2))
-        FigureCanvasAgg(figure)
-        axes = np.asarray(figure.subplots(1, 2, squeeze=False))[0]
-        panels = (
-            (
-                phase_map,
-                "twilight",
-                -180.0,
-                180.0,
-                r"wrapped phase $\phi$ [deg] (mod 360°)",
-                "degrees",
-            ),
-            (
-                binary_map,
-                "viridis",
-                0.0,
-                1.0,
-                r"binary distance $\sin^2(\phi)$",
-                "dimensionless",
-            ),
-        )
-        for axis, (values, cmap, vmin, vmax, title, colorbar_label) in zip(
-            axes, panels, strict=True
-        ):
-            image = axis.imshow(
-                values,
-                origin="lower",
-                extent=image_extent,
-                interpolation="none",
-                cmap=cmap,
-                vmin=vmin,
-                vmax=vmax,
-                rasterized=True,
-            )
-            axis.set_aspect("equal", adjustable="box")
-            axis.set_xlabel("Carrington chart X [Mm]")
-            axis.set_ylabel("Carrington chart Y [Mm]")
-            axis.set_title(title)
-            axis.grid(alpha=0.15)
-            colorbar = figure.colorbar(
-                image, ax=axis, orientation="horizontal", pad=0.10, fraction=0.08
-            )
-            colorbar.set_label(colorbar_label)
-
-        if step < cold_steps:
-            state = "cold start: binary penalty off"
-        elif step >= handoff_step:
-            state = "hard handoff: phase mask bypassed"
-        else:
-            state = "phase network active; physical field remains unrotated"
-        figure.suptitle(
-            f"Stokes disambiguation phase — {label} — step {step}\n{state}"
-        )
-        return figure
 
 
 __all__ = ["StokesPlotter"]

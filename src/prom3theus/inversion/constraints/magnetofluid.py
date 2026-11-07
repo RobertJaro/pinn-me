@@ -25,6 +25,7 @@ VOLUME_EQUATIONS = (
     "induction",
     "continuity",
     "adiabatic_pressure",
+    "vector_potential_gauge",
 )
 UPPER_VOLUME_EQUATIONS = (
     "upper_domain_microturbulence_prior",
@@ -198,6 +199,11 @@ class PhysicsState:
     model_primitive_derivatives: "PrimitiveDerivatives | None" = None
     model_length_scale_m: float | None = None
     model_magnetic_scale_gauss: float | None = None
+    # div A, supplied by the atmosphere model from the same Jacobian that
+    # produces B = curl(A).  Present only for the vector-potential
+    # representation; it is never differentiated again here.
+    vector_potential_divergence_gauss: torch.Tensor | None = None
+    vector_potential_divergence_model: torch.Tensor | None = None
 
     def derivative(self, name: str) -> torch.Tensor:
         if name == "velocity_cross_magnetic":
@@ -632,6 +638,7 @@ class MagnetofluidConstraints(nn.Module):
                 "induction",
                 "continuity",
                 "adiabatic_pressure",
+                "vector_potential_gauge",
                 "coronal_energy",
                 "upper_boundary_current_free",
                 "side_boundary_current_free",
@@ -770,6 +777,11 @@ class MagnetofluidConstraints(nn.Module):
             getattr(atmosphere_model, "magnetic_representation", "direct")
             == "vector_potential"
         )
+        if "vector_potential_gauge" in active_equations and not uses_vector_potential:
+            raise ValueError(
+                "vector_potential_gauge requires the vector_potential magnetic "
+                "representation."
+            )
         radial_unit = position_rsun / torch.linalg.vector_norm(
             position_rsun, dim=-1, keepdim=True
         )
@@ -955,6 +967,14 @@ class MagnetofluidConstraints(nn.Module):
             ),
             model_magnetic_scale_gauss=(
                 float(atmosphere_model.magnetic_scale_gauss)
+                if has_model_units
+                else None
+            ),
+            vector_potential_divergence_gauss=fields.get(
+                "vector_potential_divergence"
+            ),
+            vector_potential_divergence_model=(
+                normalized_fields.get("vector_potential_divergence")
                 if has_model_units
                 else None
             ),
@@ -1243,10 +1263,12 @@ class MagnetofluidConstraints(nn.Module):
             advective_coefficient = density_scale * velocity_scale**2 / pressure_scale_pa
             centrifugal_coefficient = (
                 density_scale
-                * (CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S**2)
                 * length_scale_m**2
-                / pressure_scale_pa
+                / (pressure_scale_pa * time_scale_s**2)
             )
+            # ``centrifugal`` already contains (Omega * T0)^2 through
+            # omega_hat. Convert rho_hat * x_hat / t_hat^2 into the common
+            # force-density unit P0/L0 without inserting Omega a second time.
             inertial_force = density[:, None] * (
                 time_coefficient * time_velocity
                 + advective_coefficient * advective
@@ -1337,6 +1359,24 @@ class MagnetofluidConstraints(nn.Module):
                 "magnetic_divergence",
                 {"∇·B_hat": divergence},
                 {"∇·B_hat": residual.reshape_as(divergence)},
+            )
+
+        if "vector_potential_gauge" in active:
+            # B = curl(A) leaves A free along every gauge direction, which
+            # changes no data or physics residual.  div(A_hat) already comes
+            # out of the curl Jacobian, so this fixes the gauge on the volume
+            # collocation points at no extra sampling or evaluation cost.
+            # Penalize the raw model-unit divergence, without a field-dependent
+            # denominator, floor, or physics normalization scale.
+            gauge_divergence = state.vector_potential_divergence_model
+            residual = state.grouped(gauge_divergence)
+            losses["vector_potential_gauge"] = state.height_group_mse(
+                residual, robust_delta=self.robust_loss_delta
+            )
+            record(
+                "vector_potential_gauge",
+                {"∇·A_hat": gauge_divergence},
+                {"∇·A_hat": residual.reshape_as(gauge_divergence)},
             )
 
         if "magnetic_force_free" in active:
@@ -1718,6 +1758,18 @@ class MagnetofluidConstraints(nn.Module):
             )
             record("magnetic_divergence", {"∇·B": divergence},
                    lambda value: normalize_magnetic(value, self.normalization.length_m), "G/m")
+        if "vector_potential_gauge" in active:
+            # Convert the physical adapter's div A to the same model units
+            # as the native path. This is only a unit conversion, independent
+            # of all physics normalization settings and learned field values.
+            gauge_divergence = state.vector_potential_divergence_gauss
+            magnetic_unit = float(atmosphere_model.magnetic_scale_gauss)
+            residual = state.grouped(gauge_divergence / magnetic_unit)
+            losses["vector_potential_gauge"] = state.height_group_mse(
+                residual, robust_delta=self.robust_loss_delta
+            )
+            record("vector_potential_gauge", {"∇·A": gauge_divergence},
+                   lambda value: state.grouped(value / magnetic_unit), "G")
         if "magnetic_force_free" in active:
             # L (curl B x B) / B_scale^2, using the same fixed, height,
             # or cached normalization as div B.
@@ -1852,6 +1904,7 @@ class MagnetofluidConstraints(nn.Module):
         *,
         height_group_shape: tuple[int, int],
         create_graph: bool = True,
+        return_diagnostics: bool = False,
     ) -> PhysicsResult:
         """Regularize the spectrally invisible upper atmosphere."""
 
@@ -1860,8 +1913,11 @@ class MagnetofluidConstraints(nn.Module):
         zero = parameter.new_zeros(())
         losses = {name: zero for name in UPPER_VOLUME_EQUATIONS}
         active = {name for name in UPPER_VOLUME_EQUATIONS if self.is_active(name)}
+        diagnostics: dict = {}
         if not active:
-            return PhysicsResult(losses, weights)
+            return PhysicsResult(
+                losses, weights, equation_diagnostics=diagnostics if return_diagnostics else None
+            )
         position = position_m.reshape(-1, 3)
         time = time_hours.to(parameter).reshape(-1, 1)
         if position.shape[0] < 1 or time.shape[0] != position.shape[0]:
@@ -1890,20 +1946,80 @@ class MagnetofluidConstraints(nn.Module):
             minimum = self.coronal_energy.options.minimum_height_megameter * 1.0e6
             heights = position.norm(dim=-1) - atmosphere_model.solar_radius_m
             selected = heights >= minimum
-            if selected.any():
+            if return_diagnostics:
+                # The diagnostic slice (diagnostics.physics_equations) always
+                # supplies its own dedicated, height-clamped grid rather than
+                # this shared batch, so a partial mask here means the caller
+                # is misusing the diagnostics contract -- keep rejecting it,
+                # and keep pre-filtering before the forward pass since that
+                # grid is small and already guaranteed valid.
+                if selected.any():
+                    with torch.enable_grad():
+                        if not selected.all():
+                            raise ValueError(
+                                "coronal_energy diagnostics require every sampled "
+                                "point to lie at or above minimum_height_megameter."
+                            )
+                        residual, components, pressure_scale = (
+                            self.coronal_energy._residual_normalized(
+                                atmosphere_model,
+                                position[selected],
+                                time[selected],
+                                self.adiabatic_index,
+                                self.normalization.transport_time_s,
+                                create_graph=create_graph,
+                                model_time_scale_s=self.normalization.time_s,
+                                return_components=True,
+                            )
+                        )
+                        if not torch.isfinite(residual).all():
+                            raise FloatingPointError(
+                                "Non-finite coronal_energy diagnostic residual"
+                            )
+                        diagnostics["coronal_energy"] = {
+                            "units": "dimensionless model pressure-rate",
+                            "robust_loss_delta": self.robust_loss_delta,
+                            "terms": {
+                                key: value.detach() for key, value in components.items()
+                            },
+                            "normalized_terms": {
+                                key: (value / pressure_scale).detach()
+                                for key, value in components.items()
+                            },
+                            "residual": sum(components.values()).detach(),
+                            "normalized_residual": residual.detach(),
+                            "weight": weights["coronal_energy"],
+                        }
+                        losses["coronal_energy"] = _mean_square(
+                            residual, robust_delta=self.robust_loss_delta
+                        )
+            elif selected.any():
+                # Share the batch already sampled for the ordinary volume
+                # equations: evaluate the full residual everywhere (including
+                # points below minimum_height_megameter, where it is not
+                # physically meaningful but stays numerically finite -- see
+                # the exp() clamps in HeatingNetwork/CoronalEnergy) and mask
+                # only this reduction, rather than drawing and evaluating a
+                # second, independent batch restricted to the valid region.
                 with torch.enable_grad():
                     residual = self.coronal_energy.residual(
                         atmosphere_model,
-                        position[selected],
-                        time[selected],
+                        position,
+                        time,
                         self.adiabatic_index,
                         self.normalization.transport_time_s,
                         create_graph=create_graph,
                         model_time_scale_s=self.normalization.time_s,
                     )
-                    losses["coronal_energy"] = _mean_square(
-                        residual, robust_delta=self.robust_loss_delta
+                selected_residual = residual[selected]
+                if not torch.isfinite(selected_residual).all():
+                    raise FloatingPointError(
+                        "Non-finite coronal_energy residual at a point above "
+                        "minimum_height_megameter"
                     )
+                losses["coronal_energy"] = _mean_square(
+                    selected_residual, robust_delta=self.robust_loss_delta
+                )
         thermodynamic_active = {
             "upper_domain_microturbulence_prior",
             "upper_domain_temperature_prior",
@@ -1950,7 +2066,9 @@ class MagnetofluidConstraints(nn.Module):
                 )
             residual = torch.log(fields["temperature"]) - reference_log_temperature
             losses["upper_domain_temperature_prior"] = grouped_mean_square(residual)
-        return PhysicsResult(losses, weights)
+        return PhysicsResult(
+            losses, weights, equation_diagnostics=diagnostics if return_diagnostics else None
+        )
 
     def upper_boundary(
         self,

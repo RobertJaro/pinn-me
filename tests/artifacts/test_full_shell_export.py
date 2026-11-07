@@ -21,7 +21,7 @@ class _FakeEOS:
 
 
 class _FakeFullShellAtmosphere(torch.nn.Module):
-    shell_height_bounds_Mm = (20.0, -0.1)
+    shell_height_bounds_megameter = (20.0, -0.1)
 
     def __init__(self):
         super().__init__()
@@ -68,8 +68,8 @@ def test_full_shell_height_grid_covers_the_configured_physical_domain():
         "height_order": "outer_to_inner",
         "spatial_sampling": "radial_carrington_columns",
         "spatial_coordinates": [
-            "carrington_chart_x_mm",
-            "carrington_chart_y_mm",
+            "carrington_chart_x_megameter",
+            "carrington_chart_y_megameter",
             "time_hours",
         ],
         "valid_mask": "valid_mask",
@@ -124,8 +124,8 @@ def test_full_shell_evaluation_uses_radial_columns_and_shared_valid_mask():
 
 def test_full_shell_evaluation_matches_real_extrapolation_model_contract():
     model = StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(20.0, -0.1),
-        line_formation_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(20.0, -0.1),
+        line_formation_height_bounds_megameter=(1.5, -0.1),
         upper_atmosphere_config={
             "type": "hydrostatic_corona",
             "transition_region_top_megameter": 2.5,

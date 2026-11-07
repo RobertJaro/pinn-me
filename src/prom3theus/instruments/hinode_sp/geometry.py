@@ -194,8 +194,8 @@ def solar_radius_arcsec(
 
 
 def coordinate_affine_metadata(
-    x_mm: np.ndarray,
-    y_mm: np.ndarray,
+    x_megameter: np.ndarray,
+    y_megameter: np.ndarray,
     valid: np.ndarray,
     *,
     headers: Sequence[fits.Header],
@@ -205,8 +205,8 @@ def coordinate_affine_metadata(
 ) -> dict:
     """Build the saved isotropic affine shared by atmospheric networks."""
 
-    valid_x = np.asarray(x_mm, dtype=np.float64)[valid]
-    valid_y = np.asarray(y_mm, dtype=np.float64)[valid]
+    valid_x = np.asarray(x_megameter, dtype=np.float64)[valid]
+    valid_y = np.asarray(y_megameter, dtype=np.float64)[valid]
     if valid_x.size == 0:
         raise ValueError("Cannot define a coordinate affine without valid samples.")
     centre = np.asarray(
@@ -218,9 +218,9 @@ def coordinate_affine_metadata(
 
     spacings: list[float] = []
     for axis in (0, 1):
-        if x_mm.shape[axis] < 2:
+        if x_megameter.shape[axis] < 2:
             continue
-        separation = np.hypot(np.diff(x_mm, axis=axis), np.diff(y_mm, axis=axis))
+        separation = np.hypot(np.diff(x_megameter, axis=axis), np.diff(y_megameter, axis=axis))
         detector_indices = slit_indices if axis == 0 else scan_indices
         detector_steps = np.abs(np.diff(np.asarray(detector_indices, dtype=np.float64)))
         if np.any(detector_steps == 0):
@@ -253,16 +253,16 @@ def coordinate_affine_metadata(
             for value in angular_scales
         ]
 
-    native_spacing_mm = float(np.median(np.asarray(spacings)))
-    if not np.isfinite(native_spacing_mm) or native_spacing_mm <= 0:
+    native_spacing_megameter = float(np.median(np.asarray(spacings)))
+    if not np.isfinite(native_spacing_megameter) or native_spacing_megameter <= 0:
         raise ValueError("Hinode physical neighbour spacing must be positive.")
-    scale_mm = HINODE_COORDINATE_NORMALIZATION_PIXELS * native_spacing_mm
+    scale_megameter = HINODE_COORDINATE_NORMALIZATION_PIXELS * native_spacing_megameter
     return {
-        "center_mm": centre.tolist(),
-        "scale_mm": [scale_mm, scale_mm],
-        "formula": "normalized_xy=(solar_xy_mm-center_mm)/scale_mm",
+        "center_megameter": centre.tolist(),
+        "scale_megameter": [scale_megameter, scale_megameter],
+        "formula": "normalized_xy=(solar_xy_megameter-center_megameter)/scale_megameter",
         "isotropic": True,
-        "native_neighbor_spacing_mm": native_spacing_mm,
+        "native_neighbor_spacing_megameter": native_spacing_megameter,
         "normalization_pixels": HINODE_COORDINATE_NORMALIZATION_PIXELS,
         "spacing_estimator": (
             "median positive centre separation per detector-index step in scan/slit "

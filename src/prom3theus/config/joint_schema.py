@@ -1,4 +1,4 @@
-"""Typed schema-v3 contract for multimodal inversions and optional setup checks.
+"""Typed schema-v5 contract for multimodal inversions and optional setup checks.
 
 This module contains configuration data and validation only.  It deliberately
 does not import observation adapters, resource loaders, forward operators, or
@@ -18,7 +18,6 @@ from typing import Literal
 from .schema import (
     AtmosphereConfig,
     ConfigNode,
-    DepthSamplingConfig,
     CoarseToFineConfig,
     HMIObservationConfig,
     HinodeObservationConfig,
@@ -29,8 +28,9 @@ from .schema import (
     PhysicsConfig,
     RaySamplingConfig,
     SliceSamplingConfig,
-    SynthesisConfig,
 )
+
+from .synthesis_schema import LTESynthesisConfig, LTEWindowConfig
 
 
 AIA_TEMPERATURE_RESPONSE_RESOURCE = "aia_euv_v1:aia_temperature_response"
@@ -155,15 +155,17 @@ class ImageDataLoaderConfig(ConfigNode):
 
 @dataclass(frozen=True, slots=True)
 class AIAObservationConfig(ConfigNode):
-    """Prepared, native-grid AIA image sequence used by schema version 3."""
+    """Prepared, native-grid AIA image sequence used by schema version 5."""
 
     type: Literal["aia_euv"]
     directory: Path
     channels_angstrom: tuple[int, ...]
     selection: AIASelectionConfig
     loader: ImageDataLoaderConfig
+    binning: int = 1
 
     def __post_init__(self) -> None:
+        _require_positive_integer(self.binning, "binning")
         channels = self.channels_angstrom
         if any(type(channel) is not int for channel in channels):
             raise TypeError("channels_angstrom must contain integers")
@@ -211,96 +213,23 @@ class DataWeightScheduleConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class DisambiguationConfig(ConfigNode):
-    """Temporary smooth 180-degree phase continuation for raw Stokes data.
-
-    A SIREN predicts the phase in units of pi, so the synthesis angle is
-    ``pi * phase_network_output``.  During training, the phase rotation is
-    active from step zero, while its binary ``sin(phi)^2`` preference is held
-    at zero for ``cold_steps`` and warmed up afterward.  At the fixed handoff,
-    and in evaluation mode, the rotation and its loss are removed from the
-    forward graph.
-    """
-
-    enabled: bool = False
-    cold_steps: int = 2_000
-    warmup_steps: int = 5_000
-    handoff_step: int = 15_000
-    binary_weight: float = 0.01
-    hidden_dimension: int = 64
-    hidden_layers: int = 3
-    first_omega_0: float = 1.0
-    hidden_omega_0: float = 1.0
-
-    def __post_init__(self) -> None:
-        _require_bool(self.enabled, "disambiguation.enabled")
-        _require_positive_integer(
-            self.cold_steps,
-            "disambiguation.cold_steps",
-            minimum=0,
-        )
-        _require_positive_integer(
-            self.warmup_steps,
-            "disambiguation.warmup_steps",
-            minimum=0,
-        )
-        _require_positive_integer(
-            self.handoff_step,
-            "disambiguation.handoff_step",
-            minimum=0,
-        )
-        _require_finite_nonnegative(
-            self.binary_weight,
-            "disambiguation.binary_weight",
-        )
-        _require_positive_integer(
-            self.hidden_dimension,
-            "disambiguation.hidden_dimension",
-        )
-        _require_positive_integer(
-            self.hidden_layers,
-            "disambiguation.hidden_layers",
-        )
-        _require_finite_positive(
-            self.first_omega_0,
-            "disambiguation.first_omega_0",
-        )
-        _require_finite_positive(
-            self.hidden_omega_0,
-            "disambiguation.hidden_omega_0",
-        )
-        if self.enabled:
-            if self.warmup_steps < 1:
-                raise ValueError(
-                    "Enabled disambiguation requires warmup_steps > 0 so the "
-                    "binary penalty starts at zero."
-                )
-            if self.binary_weight <= 0.0:
-                raise ValueError(
-                    "Enabled disambiguation requires a positive binary_weight."
-                )
-            if self.handoff_step <= self.cold_steps + self.warmup_steps:
-                raise ValueError(
-                    "disambiguation.handoff_step must be greater than cold_steps "
-                    "plus warmup_steps."
-                )
-
-
-@dataclass(frozen=True, slots=True)
 class LTEStokesDataTermConfig(ConfigNode):
-    """Complete LTE Stokes forward/objective contract for a v3 stream."""
+    """Instrument likelihood of differentiable formal LTE Stokes synthesis."""
 
     type: Literal["lte_stokes"]
+    synthesis_window: str
     weight: float
-    synthesis: SynthesisConfig
     instrument: InstrumentConfig
     objective: LossConfig
-    depth_sampling: DepthSamplingConfig
+    excluded_wavelength_windows_angstrom: tuple[tuple[float, float], ...] = ()
     weight_schedule: DataWeightScheduleConfig | None = None
-    disambiguation: DisambiguationConfig = field(default_factory=DisambiguationConfig)
 
     def __post_init__(self) -> None:
-        _require_finite_nonnegative(self.weight, "LTE Stokes stream weight")
+        _require_safe_id(self.synthesis_window, "synthesis_window")
+        _require_finite_nonnegative(self.weight, "Stokes stream weight")
+        for interval in self.excluded_wavelength_windows_angstrom:
+            if len(interval) != 2 or not all(math.isfinite(v) for v in interval) or interval[0] >= interval[1]:
+                raise ValueError("excluded_wavelength_windows_angstrom must contain finite increasing pairs")
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +352,8 @@ class ObservationStreamConfig(ConfigNode):
             supported_instruments = {
                 ("hinode_sp", "hinode_sp"),
                 ("hmi_stokes", "hmi_filter_profiles"),
+                ("muram_stored", "hmi_filter_profiles"),
+                ("muram_stored", "hinode_sp"),
             }
             if instrument_pair not in supported_instruments:
                 raise ValueError(
@@ -494,34 +425,6 @@ class VectorMagnitudeRegularizationConfig(ConfigNode):
         _validate_grouped_samples(self.sample_count, self.height_layers)
 
 
-@dataclass(frozen=True, slots=True)
-class VectorPotentialRegularizationConfig(ConfigNode):
-    """Gauge and smoothness regularization for a vector-potential atmosphere."""
-
-    id: str
-    type: Literal["vector_potential"]
-    gauge_weight: float
-    smoothness_weight: float
-    sample_count: int
-    height_layers: int
-    domain: Literal["full_shell", "line_formation"] = "full_shell"
-    smoothness_step_megameter: float = 0.25
-
-    def __post_init__(self) -> None:
-        _require_safe_id(self.id, "atmosphere regularization id")
-        _require_finite_nonnegative(self.gauge_weight, "gauge_weight")
-        _require_finite_nonnegative(self.smoothness_weight, "smoothness_weight")
-        if self.gauge_weight == self.smoothness_weight == 0.0:
-            raise ValueError(
-                "Vector-potential regularization requires a positive component weight"
-            )
-        _validate_grouped_samples(self.sample_count, self.height_layers)
-        _require_finite_positive(
-            self.smoothness_step_megameter,
-            "smoothness_step_megameter",
-        )
-
-
 def _validate_grouped_samples(sample_count: int, height_layers: int) -> None:
     _require_positive_integer(sample_count, "sample_count")
     _require_positive_integer(height_layers, "height_layers")
@@ -530,9 +433,7 @@ def _validate_grouped_samples(sample_count: int, height_layers: int) -> None:
 
 
 AtmosphereRegularizationConfig = (
-    STICTableSupportRegularizationConfig
-    | VectorMagnitudeRegularizationConfig
-    | VectorPotentialRegularizationConfig
+    STICTableSupportRegularizationConfig | VectorMagnitudeRegularizationConfig
 )
 
 
@@ -619,18 +520,25 @@ class DryRunConfig(ConfigNode):
 
 @dataclass(frozen=True, slots=True)
 class JointTrainingConfig(ConfigNode):
-    """Joint optimization and checkpoint controls, including externally launched ranks."""
+    """Joint optimization controls. A limit of -1 disables that stopping limit.
+
+    With both max_steps and max_epochs set to -1, training runs until stopped.
+    """
 
     max_steps: int
     learning_rate: float
     final_learning_rate: float
+    optimizer: Literal["adam", "muon", "soap"] = "adam"
     device: str = "auto"
+    devices: int | Literal["auto"] = "auto"
     max_epochs: int = -1
+    # Fixed-length epochs use fresh random samples and validate at each epoch end.
+    steps_per_epoch: int | None = None
+    learning_rate_decay_steps: int | None = None
     checkpoint_every_n_steps: int = 1000
     validation_every_n_steps: int = 1000
     validation_samples_per_stream: int = 256
     log_every_n_steps: int = 10
-    warmup_steps: int = 0
     gradient_clip_norm: float | None = 0.1
     reference_stream: str | None = None
     resume_from_checkpoint: Path | None = None
@@ -646,8 +554,12 @@ class JointTrainingConfig(ConfigNode):
 
 
     def __post_init__(self) -> None:
+        if self.optimizer not in ("adam", "muon", "soap"):
+            raise ValueError("training.optimizer must be 'adam', 'muon', or 'soap'")
         for name in ("migrate_data_order", "gpu_prefetch"):
             _require_bool(getattr(self, name), name)
+        if self.devices != "auto":
+            _require_positive_integer(self.devices, "devices")
         for name in ("reader_workers", "loader_block_bytes", "loader_cache_bytes",
                      "loader_prefetch_batches", "loader_max_batch_bytes"):
             _require_positive_integer(getattr(self, name), name)
@@ -659,8 +571,10 @@ class JointTrainingConfig(ConfigNode):
             value = getattr(self, name)
             if value != -1:
                 _require_positive_integer(value, name)
-        if self.max_steps == self.max_epochs == -1:
-            raise ValueError("Set a positive max_steps or max_epochs.")
+        if self.learning_rate_decay_steps is not None:
+            _require_positive_integer(self.learning_rate_decay_steps, "learning_rate_decay_steps")
+        if self.steps_per_epoch is not None:
+            _require_positive_integer(self.steps_per_epoch, "steps_per_epoch")
         for name in (
             "checkpoint_every_n_steps",
             "validation_every_n_steps",
@@ -668,7 +582,6 @@ class JointTrainingConfig(ConfigNode):
             "log_every_n_steps",
         ):
             _require_positive_integer(getattr(self, name), name)
-        _require_positive_integer(self.warmup_steps, "warmup_steps", minimum=0)
         for name in ("learning_rate", "final_learning_rate"):
             _require_finite_positive(getattr(self, name), name)
         if self.gradient_clip_norm is not None:
@@ -689,7 +602,8 @@ class LossBalanceConfig(ConfigNode):
     min_multiplier: float = 0.01
     max_multiplier: float = 100.0
     probe_parameter_count: int = 4
-    excluded_objectives: tuple[str, ...] = ()
+    # Only these objectives adapt; an empty list keeps every weight fixed.
+    included_objectives: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_bool(self.enabled, "loss_balance.enabled")
@@ -733,23 +647,24 @@ class LossBalanceConfig(ConfigNode):
         )
         if any(
             not isinstance(value, str) or not value.strip()
-            for value in self.excluded_objectives
+            for value in self.included_objectives
         ):
             raise ValueError(
-                "loss_balance.excluded_objectives must contain non-empty strings"
+                "loss_balance.included_objectives must contain non-empty strings"
             )
-        if len(set(self.excluded_objectives)) != len(self.excluded_objectives):
-            raise ValueError("loss_balance.excluded_objectives must be unique")
+        if len(set(self.included_objectives)) != len(self.included_objectives):
+            raise ValueError("loss_balance.included_objectives must be unique")
 
 
 @dataclass(frozen=True, slots=True)
 class JointInversionConfig(ConfigNode):
     """Complete HMI/Hinode plus AIA configuration contract."""
 
-    schema_version: Literal[3]
+    schema_version: Literal[5]
     solver: JointSolverConfig
     scene: SceneConfig
     atmosphere: AtmosphereConfig
+    synthesis: LTESynthesisConfig
     physics: PhysicsConfig
     atmosphere_regularization: tuple[AtmosphereRegularizationConfig, ...]
     streams: tuple[ObservationStreamConfig, ...]
@@ -761,8 +676,25 @@ class JointInversionConfig(ConfigNode):
     )
 
     def __post_init__(self) -> None:
+        synthesis_windows = {window.id: window for window in self.synthesis.windows}
+        requested_fields = {
+            stream.data_term.synthesis_window for stream in self.streams
+            if isinstance(stream.data_term, LTEStokesDataTermConfig)
+        }
+        if requested_fields != set(synthesis_windows):
+            raise ValueError(
+                "synthesis.windows must match the synthesis_window references: "
+                f"missing={sorted(requested_fields - set(synthesis_windows))}, "
+                f"unused={sorted(set(synthesis_windows) - requested_fields)}"
+            )
+        for window in synthesis_windows.values():
+            if window.shell_height_bounds_megameter is not None:
+                lower, upper = window.shell_height_bounds_megameter
+                geometry = self.atmosphere.geometry
+                if lower < geometry.inner_height_megameter or upper > geometry.line_formation_outer_height_megameter:
+                    raise ValueError("synthesis shell_height_bounds_megameter must lie inside the photospheric line-formation domain")
         if not self.streams:
-            raise ValueError("schema version 3 requires at least one stream")
+            raise ValueError("schema version 5 requires at least one stream")
         stream_ids = tuple(stream.id for stream in self.streams)
         if len(set(stream_ids)) != len(stream_ids):
             raise ValueError("stream ids must be unique")
@@ -794,6 +726,18 @@ class JointInversionConfig(ConfigNode):
                 raise ValueError("Potential source height must lie in the line-formation domain")
 
 
+        gauge = self.physics.equations.vector_potential_gauge
+        if (
+            gauge.enabled
+            and gauge.weight > 0.0
+            and self.atmosphere.parameters.magnetic_field.representation
+            != "vector_potential"
+        ):
+            raise ValueError(
+                "vector_potential_gauge requires the vector_potential magnetic "
+                "representation"
+            )
+
         temporal_equations = (
             self.physics.equations.momentum,
             self.physics.equations.induction,
@@ -813,34 +757,6 @@ class JointInversionConfig(ConfigNode):
         ):
             raise ValueError(
                 "Temporal joint physics requires atmosphere.geometry.time_dependent=true"
-            )
-
-        stokes_terms = tuple(
-            stream.data_term
-            for stream in self.streams
-            if isinstance(stream.data_term, LTEStokesDataTermConfig)
-        )
-        if not self.atmosphere.geometry.time_dependent and any(
-            term.instrument.optimize_line_of_sight_velocity_correction
-            or term.instrument.line_of_sight_velocity_correction_m_per_s != 0.0
-            for term in stokes_terms
-        ):
-            raise ValueError(
-                "Static joint inversions must leave every LOS velocity correction "
-                "disabled"
-            )
-        induction = self.physics.equations.induction
-        if (
-            induction.enabled
-            and induction.weight > 0.0
-            and not any(
-                term.instrument.optimize_line_of_sight_velocity_correction
-                for term in stokes_terms
-            )
-        ):
-            raise ValueError(
-                "Dynamic induction inversions require an optimized Stokes "
-                "instrument LOS velocity correction"
             )
 
         geometry = self.atmosphere.geometry
@@ -863,16 +779,6 @@ class JointInversionConfig(ConfigNode):
                 "extension above the line-formation domain"
             )
 
-        configured_quadrature = set(self.dry_run.quadrature_samples)
-        for stream in self.streams:
-            if isinstance(stream.data_term, AIAOpticallyThinDataTermConfig):
-                ray_samples = stream.data_term.synthesis.ray_samples
-                if ray_samples not in configured_quadrature:
-                    raise ValueError(
-                        "dry_run.quadrature_samples must include every configured "
-                        "AIA ray_samples value"
-                    )
-
 
 Configuration = JointInversionConfig
 
@@ -892,7 +798,6 @@ __all__ = [
     "AtmosphereRegularizationConfig",
     "Configuration",
     "DataWeightScheduleConfig",
-    "DisambiguationConfig",
     "DryRunConfig",
     "ImageDataLoaderConfig",
     "JointDataTermConfig",
@@ -902,10 +807,11 @@ __all__ = [
     "JointSolverConfig",
     "JointVisualizationConfig",
     "LTEStokesDataTermConfig",
+    "LTESynthesisConfig",
+    "LTEWindowConfig",
     "ObservationStreamConfig",
     "STICTableSupportRegularizationConfig",
     "SceneConfig",
     "TimeWindowConfig",
     "VectorMagnitudeRegularizationConfig",
-    "VectorPotentialRegularizationConfig",
 ]

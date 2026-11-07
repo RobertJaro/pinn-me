@@ -6,12 +6,18 @@
 
 **Physics-informed Reconstruction Of Magnetism in 3D THrough EUV and Spectropolarimetry**
 
-PROM3THEUS is a clean LTE spectropolarimetric inversion framework built with
-PyTorch and PyTorch Lightning. It fits a continuous, depth-stratified solar
-atmosphere directly to Stokes observations and can add magnetofluid constraints
-at independent collocation points.
+PROM3THEUS fits a continuous solar atmosphere with PyTorch and PyTorch Lightning.
+For each observed ray, local LTE coefficients feed differentiable formal Stokes
+integration and the instrument response. An ordered tree reduction parallelizes
+the depth calculation; no radiation network or RT residual loss is trained.
+Magnetofluid constraints act on the same atmosphere at separate physical samples.
 
-This release supports two complete inversion paths:
+The inversion presets use SIREN atmosphere networks with width 256 and eight
+hidden layers, first-layer frequency 30 and hidden-layer frequency 1. Radial
+weighting is disabled. Changing from an MLP requires a fresh training run/output
+directory; existing observation stores and synthetic profiles can be reused.
+
+The runtime connects two observation paths:
 
 - Hinode/SOT Spectro-Polarimeter Fe I 6301/6302 A rasters
 - SDO/HMI Fe I 6173 A Stokes rasters with acquisition-specific filter profiles
@@ -27,33 +33,35 @@ checksum-bound tensor artifacts through one stream runtime.
 ## Design
 
 ```text
-configuration + CLI
+configuration + observations
         |
         v
-application runner ---- observations ---- instrument response
-        |                       |
-        v                       v
-inversion objective ---- canonical raster/store
+coordinate atmosphere network ---- magnetofluid constraints
         |
         v
-LTE backend ---- explicit ray path ---- polarized formal solver
+local LTE emission and propagation matrices (all ray depths)
         |
         v
-coordinate atmosphere + optional magnetofluid constraints
+parallel formal Stokes integration ---- instrument response ---- data loss
 ```
 
-The numerical LTE backend does not depend on Lightning, FITS readers,
-visualization, or the command line. Hinode and HMI are independent adapters that
-meet the same canonical observation contract. Model artifacts are a versioned
-JSON manifest plus tensor-only weights and checksum-protected NumPy arrays.
+Hinode and HMI share scene-owned LTE synthesis windows while retaining their
+observation contracts and response operators. `rt.formal_transfer` composes
+ordered affine layer maps in O(log depth) batched stages, with ordinary PyTorch
+autograd. The independent sequential implementation in `prom3theus.validation`
+remains available for accuracy checks and synthetic-data generation.
 
-The package name and forward-model boundary are not LTE-specific. A future NLTE
-backend can own its population/convergence state behind the same observation,
-instrument, optimization, and artifact layers.
+Transfer uses dimensional propagation coefficients and the Planck source,
+retaining the `thermalized_continuum` approximation. Scattering redistribution
+and non-LTE populations require a different coupled model.
 
-See the [documentation overview](docs/README.md), [architecture](docs/architecture.md), and the
-[complete porting plan](docs/porting-plan.md) for the dependency rules and
-removal inventory.
+See the [documentation overview](docs/README.md), [architecture](docs/architecture.md),
+and [parallel formal transfer notes](docs/parallel-formal-transfer.md).
+
+SOAP is enabled for the MURaM Hinode Stokes-only run. Install the updated checkout with `python -m pip install -e .`; other configurations can
+select `training.optimizer: soap`. SOAP adds preconditioner matrix work without
+extra model passes and uses the configured learning-rate schedule. Use a fresh
+output directory when changing optimizer type.
 
 ## Installation
 
@@ -130,38 +138,66 @@ fallback lookup into the former flat resource directory.
 
 ## Run configurations
 
-For a bounded experiment with this checkout's `data/hmi`, see the
-[local HMI inversion and force-free baseline](docs/local-hmi-baseline.md).
-It combines a small photospheric LTE inversion with a separate spherical
-potential extrapolation to 20 Mm and explicit fit/field acceptance checks.
-The local example is `configs/hmi_local_constant.yaml`; it assumes a height-independent
-photospheric magnetic field and requires a matching
-prepared HMI response archive and does not download calibration during training.
+Configurations are grouped by observation source. Synthetic MURaM runs have
+separate Hinode and SDO presets:
 
-The maintained source and distribution contain five public YAML run files:
+| Directory | Presets |
+| --- | --- |
+| `configs/hinode/` | [MHS](configs/hinode/mhs.yaml), [MHS extrapolation](configs/hinode/mhs_extrapolation.yaml) |
+| `configs/sdo/` | [HMI dynamic](configs/sdo/hmi_dynamic.yaml), [HMI+AIA dynamic](configs/sdo/hmi_aia_dynamic.yaml), [dynamic with energy](configs/sdo/hmi_aia_dynamic_energy.yaml), [potential boundary](configs/sdo/hmi_aia_potential.yaml), [vector potential](configs/sdo/hmi_aia_vector_potential.yaml) |
+| `configs/muram/hinode/` | [Stokes only](configs/muram/hinode/stokes_only.yaml), [MHS](configs/muram/hinode/mhs.yaml), [synthetic instrument settings](configs/muram/hinode/synthesis.yaml) |
+| `configs/muram/sdo/` | [Stokes only](configs/muram/sdo/stokes_only.yaml), [MHS](configs/muram/sdo/mhs.yaml), [joint HMI+AIA](configs/muram/sdo/joint.yaml) |
 
-- [`configs/hinode_lte_mhs.yaml`](configs/hinode_lte_mhs.yaml)
-- [`configs/hinode_lte_mhs_extrapolation.yaml`](configs/hinode_lte_mhs_extrapolation.yaml)
-- [`configs/hmi_lte_mhs.yaml`](configs/hmi_lte_mhs.yaml)
-- [`configs/hmi_lte_dynamic.yaml`](configs/hmi_lte_dynamic.yaml)
-- [`configs/hmi_aia_dynamic.yaml`](configs/hmi_aia_dynamic.yaml)
+For the current synthetic Hinode inversion, submit
+`qsub scripts/muram_hinode/run_stokes_only.sh`; see the
+[server workflow](scripts/muram_hinode/README.md).
+Keep private local configurations with their runs and pass their paths explicitly.
+Maintained YAML files list required fields, nondefault overrides, and a few
+intentional pins such as ray depth count and transfer precision. Loader/cache
+tuning, optional nulls, and disabled equations otherwise use the typed schema
+defaults. Omitted physics equations are disabled; activate an equation explicitly
+with `enabled: true` and a positive `weight`. Existing nondefault settings remain
+explicit, including sampling and normalization choices prepared for physics runs.
 
-All maintained configurations use strict schema version 3 and the same joint
-runner. A single-observation run contains one stream. Schema versions 1 and 2,
-legacy Lightning checkpoints, and earlier P3S/archive formats are unsupported.
+To inspect a complete configuration with all defaults expanded:
+
+```python
+import yaml
+from prom3theus.muram import config as _register_muram_schema
+from prom3theus.config import load_config
+
+config = load_config("configs/muram/hinode/stokes_only.yaml")
+print(yaml.safe_dump(config.to_dict(), sort_keys=False))
+```
+
+Use fresh output and work directories when changing the forward model or data;
+an existing `last.ckpt` in the output directory is automatically resumed.
+
+All maintained inversion configurations use strict schema version 5 and the same joint
+runner. Each Stokes term uses `type: lte_stokes` and references a
+`synthesis_window` in `synthesis.windows`. A window owns line IDs, vacuum spectral
+bounds, radiance normalization, physical shell and numerical integration controls.
+The defaults are 257 depth points, 16 wavelengths per block and float32 transfer
+arithmetic. Inversion presets enable stratified interior ray jitter during training.
+The Hinode Stokes-only preset uses 32 coarse plus 32 contribution-guided fine
+points (`coarse_to_fine`), sorted with epsilon separation before integration.
+Coarse coefficients are reused and only fine points receive a second network
+evaluation. Evaluation uses deterministic coarse points and fine quantiles.
+Local geometry and centered wavelength offsets
+preserve small heights and Doppler shifts in float32.
+Old learned-RT checkpoints and P3S artifacts require a new run.
 
 ```text
-schema_version
+schema_version: 5
 solver
-resources
-observation
+scene
 atmosphere
-synthesis
-instrument
+synthesis: {windows, source_closure}
+physics
+atmosphere_regularization
+streams: [{id, observation, data_term}]
 training
-loss
 diagnostics
-runtime
 logging
 ```
 
@@ -169,20 +205,20 @@ Unknown or duplicate keys are errors. The solver and instrument are always
 explicit. Relative paths are resolved from the configuration file, so commands
 behave the same from every working directory.
 
-The Stokes `objective` supports `type: mse` in stored disk-center
-atlas-continuum units. `stokes_weights` multiply the component MSEs directly:
-`loss = sum(weight[c] * mean(residual[c]**2))`. They are not normalized, so
-multiplying all four by a factor scales the Stokes loss relative to physics.
-There is no separate sigma scaling. Older preset coefficients were converted
-with `new_weight[c] = old_weight[c] / sum(old_weights) / old_sigma[c]**2`
-to preserve their effective losses. Q/U warmup sets only their coefficients
-to zero, leaving I/V unchanged.
-`type: asinh_mse` keeps I linear and compares Q/U/V after applying
-`asinh(value / asinh_scale) / asinh(1 / asinh_scale)` to prediction and target separately. Its default
-`asinh_scale` is `1e-3`; direct component weights also apply in this mode.
-The HMI+AIA dynamic preset uses linear I and asinh Q/U/V with this scale.
-This normalized stretch maps -1, 0 and 1 to themselves and reduces sensitivity
-to larger signals. Component weights apply after the normalized transform.
+Stokes presets use `type: mse` and SPINNME-style linear component scaling:
+`stokes_scales: {I: 1.0, Q: 0.1, U: 0.1, V: 0.1}`. Both predicted and observed
+profiles are first divided by the observation's 90th-percentile Stokes I, then by
+these scales. Continuum normalization runs after the instrument response and uses
+the same detached observed denominator for both profiles, preserving sensitivity
+to absolute intensity errors. `continuum_quantile` defaults to 0.9; raw predictions and
+stored observations retain their original units.
+Thus Q/U/V residuals are multiplied by 10 and their squared errors by 100;
+there is no asinh stretch. The separate `stokes_weights` are all one in the
+presets, avoiding additional component reweighting. In general the reduction is
+`loss = sum(weight[c] * mean(((prediction[c]-target[c])/scale[c])**2))`.
+Q/U warmup sets only their weights to zero, leaving I/V unchanged. Omitted
+`stokes_scales` preserve unscaled legacy objectives; archived `asinh_mse` remains
+readable but cannot be combined with linear scales.
 Stokes validation uses the instrument-integrated predictions and observations
 passed to the objective and applies the same transform before plotting.
 Profiles retain their signs; maps and scatter panels summarize absolute
@@ -192,9 +228,8 @@ summaries; the loss compares individual instrument samples before reduction.
 All data and physics losses use squared residuals with their existing masks,
 normalization, and component weights. AIA objectives use `type: asinh_mse`.
 Remove the former `huber_delta` setting from
-custom configurations. Older P3S snapshots remain readable: their objective
-metadata and obsolete sigma buffers are migrated in memory to direct weights,
-without changing saved atmosphere weights or files.
+custom configurations. Evaluation artifacts must use the current formal-LTE
+format and carry atmosphere, synthesis and calibration state.
 
 All maintained YAML files hard-code their GLade input/output paths and Derecho
 scratch paths. Ambient environment variables do not redirect these workflows.
@@ -202,31 +237,32 @@ scratch paths. Ambient environment variables do not redirect these workflows.
 Inspect the fully resolved, typed configuration before a run:
 
 ```bash
-prom3theus validate-config configs/hinode_lte_mhs.yaml
-prom3theus validate-config configs/hinode_lte_mhs_extrapolation.yaml
-prom3theus validate-config configs/hmi_lte_mhs.yaml
-prom3theus validate-config configs/hmi_lte_dynamic.yaml
-prom3theus validate-config configs/hmi_aia_dynamic.yaml
+prom3theus validate-config configs/hinode/mhs.yaml
+prom3theus validate-config configs/hinode/mhs_extrapolation.yaml
+prom3theus validate-config configs/sdo/hmi_aia_potential.yaml
+prom3theus validate-config configs/sdo/hmi_dynamic.yaml
+prom3theus validate-config configs/sdo/hmi_aia_dynamic.yaml
 ```
 
 ### Hinode MHS extrapolation
 
 The extrapolation configuration uses one atmospheric PINN over the complete
-physical shell. LTE synthesis and opacity-guided ray refinement stop at the
-configured line-formation top, while independent collocation batches apply MHS
+physical shell. Formal Stokes integration covers the configured line-formation domain,
+while independent atmospheric collocation batches apply MHS
 and `div B` throughout the full shell, microturbulence and hydrostatic-coronal
 temperature priors only above the line-formation domain, and transmissive-flow
 and tangential magnetic Neumann conditions at the outer boundary. The transmissive velocity
 condition drives its normal derivative to zero without selecting inward or
-outward flow. The maintained extrapolation configuration reaches 20 Mm while
+outward flow. The maintained extrapolation configuration reaches 20 megameter while
 retaining one PINN for both domains.
 
 ### HMI static and dynamic inversions
 
-`hmi_lte_mhs.yaml` fits every selected acquisition with one time-independent
-atmosphere constrained by MHS, `div B`, and the top-pressure prior.
-`hmi_lte_dynamic.yaml` represents the observed time sequence explicitly over a
-single -0.1--50 Mm PINN. HMI line formation remains below 1.5 Mm. The three
+The static HMI+AIA potential and vector-potential presets fit selected
+acquisitions with a shared time-independent atmosphere and their configured
+magnetic and thermodynamic constraints.
+`configs/sdo/hmi_dynamic.yaml` represents the observed time sequence explicitly over a
+single -0.1--50 megameter PINN. HMI line formation remains below 1.5 megameter. The three
 Cartesian magnetic network components are a vector potential `A` in G m;
 the physical field used by synthesis and physics is `B = curl(A)` in G. Ideal
 induction, momentum, continuity, and the exact vector-potential `div B` constraint
@@ -235,7 +271,7 @@ maintained run disables the adiabatic-pressure and radial magnetic-energy
 heuristics and has no potential- or NLFFF-volume loss. A weak prescribed
 temperature stabilization acts only in the invisible upper domain. A
 transmissive velocity condition, tangential magnetic Neumann condition, and an
-external-pressure condition apply at the 50 Mm boundary. Independent random
+external-pressure condition apply at the 50 megameter boundary. Independent random
 samples cover the four angular side faces with equal face counts and no shared
 height groups. Those faces use zero normal velocity gradient and zero normal
 gradient of the tangential magnetic field; no zero-field or zero-normal-flux
@@ -294,23 +330,30 @@ This is a soft bias toward smaller currents throughout the volume, including
 physical currents; it is not a substitute for force balance or evidence that a
 particular current sheet is artificial.
 
-The atmosphere is a continuous spherical shell, configured entirely by physical
-height bounds. It has no `depth_grid` or model-level sample count. Each Stokes
-stream owns `data_term.depth_sampling`: `sample_count`, coarse-to-fine
-refinement, and `reference_log_tau500_bounds` (default `[-5, 1]`). These FALC
-reference coordinates shape the sampling distribution before conversion to metres;
-they are not the learned atmosphere's optical depth. AIA independently samples
-geometric heights with its power-two distribution. Exported physical depths are
-`geometric_height_m`; `stokes_reference_log_tau500` labels only the Stokes sampling
-proposal. Optical depth is derived from predicted opacity.
+The atmosphere is a continuous spherical shell configured by physical height
+bounds. Each Stokes ray crosses the true lower boundary and the outer line shell.
+Uniform ray-distance nodes sample the atmosphere; frozen midpoint layers are
+composed with a balanced, order-preserving tree. `synthesis.windows[].depth_count`
+controls quadrature accuracy and must be checked for convergence. Unsupported
+grazing rays and unspecified lateral inflow fail explicitly.
+
+The lower intensity is the local bottom Planck source unless
+`incoming_temperature_k` explicitly supplies a fixed thermal boundary. The
+canonical Stokes basis is constant along each ray and rotates into the detector
+basis after integration. Material velocity includes Carrington rotation;
+observer motion, registration shifts and instrument offsets map detector
+wavelengths to the inertial frame.
+
+AIA retains its independent optically thin quadrature. Export sampling does not
+control Stokes transport accuracy.
 
 The top gas pressure is not a YAML tuning parameter. The bundled reference keeps
 the existing 25-point STiC FALC_82 line-formation mapping on
 `-5 <= log10(tau500) <= 1` unchanged, then restores all 37 native FALC samples
 with `log10(tau500) < -5` for the physical-height thermodynamic reference. The
-true native top is 2.073502459 Mm, where `T = 100 kK` and
+true native top is 2.073502459 megameter, where `T = 100 kK` and
 `p = 0.0319344213 Pa`. Above that point, a quintic smootherstep in `log(T)`
-reaches the configured 1 MK corona at 2.5 Mm and remains isothermal. Pressure is
+reaches the configured 1 MK corona at 2.5 megameter and remains isothermal. Pressure is
 integrated hydrostatically to the configured outer height using inverse-square
 gravity and the same combined plasma closure used by synthesis.
 
@@ -517,7 +560,7 @@ The overlap is approximate; timing, orientation, and pixel rounding can differ.
 There is no reference-file matching, reprojection, or HMI footprint mask.
 Off-disk and invalid AIA pixels remain excluded from fitting.
 Reuse checks reject changed crop settings. `run.sh` starts the
-inversion from `configs/hmi_aia_dynamic.yaml`. HMI and physics optimize while
+inversion from `configs/sdo/hmi_aia_dynamic.yaml`. HMI and physics optimize while
 AIA renders at weight zero. Setting `coronal_euv.data_term.weight` positive
 (for example, `0.1`) activates its likelihood and calibration priors; no run-mode
 change is needed. The script only launches training when you execute it.
@@ -586,19 +629,19 @@ email, or removed namespace assumptions.
 ## Running an inversion
 
 ```bash
-prom3theus invert configs/hinode_lte_mhs.yaml
-prom3theus invert configs/hinode_lte_mhs_extrapolation.yaml
-prom3theus invert configs/hmi_lte_mhs.yaml
-prom3theus invert configs/hmi_lte_dynamic.yaml
+prom3theus invert configs/hinode/mhs.yaml
+prom3theus invert configs/hinode/mhs_extrapolation.yaml
+prom3theus invert configs/sdo/hmi_aia_potential.yaml
+prom3theus invert configs/sdo/hmi_dynamic.yaml
 ```
 
 Start joint optimization:
 
 ```bash
-prom3theus invert configs/hmi_aia_dynamic.yaml
+prom3theus invert configs/sdo/hmi_aia_dynamic.yaml
 ```
 
-The initial training path uses one CPU/CUDA device, Adam, a configured learning-rate
+The training path supports Adam, Muon, and SOAP with a configured learning-rate
 schedule, every configured stream, and shared physics/regularization objectives.
 It logs online to W&B and preserves the LTE Stokes, thermodynamic, magnetic-field,
 velocity, current-density, optical-depth, and meridional-slice figures. AIA adds
@@ -622,15 +665,21 @@ the calibration gain and loss. The asinh scale is divided by that maximum too;
 both objective and plots apply the normalized stretch in these dimensionless units.
 Predictions are not clipped. The
 maxima are recorded in run metadata/checkpoints; prepared stores remain in
-physical DN/s/pixel and do not need rebuilding. Older checkpoints migrate the
-non-trainable scale buffers when resuming.
+physical DN/s/pixel and do not need rebuilding. Resume requires the current
+formal LTE checkpoint contract.
 
-The dashboard keeps the original `train.*` / `valid.*` LTE metrics. AIA adds
-`train.aia_loss`, `valid.aia_loss`, and per-channel validation losses and gains
-(`valid.aia_171_loss`, `valid.aia_171_gain`, etc.). AIA losses are the unweighted
-asinh-space MSE mismatch; the YAML stream weight controls their contribution
-to the total loss. Detailed internal reports are not flattened into W&B metrics.
-Previously logged W&B history is not deleted by this cleanup.
+The dashboard uses stream-qualified `train.streams.<id>.*` and
+`valid.streams.<id>.*` metrics. Training `data_loss` is the weighted objective
+contribution; validation `data_loss` is the unweighted likelihood. Stokes streams
+report `component_mse.I/Q/U/V` in objective units and
+`stokes_I/Q/U/V_raw_residual_rms` before objective normalization. Validation also
+checks outgoing Stokes admissibility. A fitted LOS velocity correction is logged
+only during training; fixed corrections remain configuration values. Q/U warmup
+is disabled in every supplied run configuration, and `qu_weight_factor` is logged
+only when warmup is enabled. AIA validation adds `asinh_rmse`; channel losses and
+gains remain in local JSON reports. Optimizer logging retains one shared
+`train.optimizer.learning_rate`. Optional loss-balancing diagnostics remain
+available when enabled. Previously logged W&B history is not deleted.
 
 The maintained joint run fits HMI Stokes and AIA EUV data with weights 1.0 and
 0.1. Both use the shared atmosphere. AIA uses 96 coarse plus 96 emission-guided
@@ -639,8 +688,7 @@ random fine quantiles; validation/export uses fixed points and quantiles. The
 final merged grid supplies physical line elements in metres, including half-interval
 endpoint weights; refinement never adds the coarse and fine integrals separately.
 Coarse and fine evaluations share gradients and the fine pass evaluates only new
-points. Shared inverse-CDF and sample-merging machinery also serves LTE's
-opacity-guided refinement.
+points. These quadrature controls apply to AIA; Stokes uses its own configured depth grid and parallel formal integration.
 
 `training.reference_stream` selects the stream defining an epoch (the scene
 reference is used if omitted). Other loaders keep their own cursors across
@@ -660,14 +708,14 @@ store or calibration files, observation/loader selections, time windows, resourc
 and code/dependency changes invalidate setup. `--rebuild-observations` bypasses
 reuse. A missing or damaged snapshot falls back to normal loading. This disposable
 Python-object cache is local to the work directory, not a portable data format.
-Public observation stores and `.p3s` snapshots keep their existing formats.
+Observation stores retain their modality-specific data contracts. The version-3 `.p3s` format stores atmosphere and synthesis state and rejects prior artifacts.
 
 Validation plots and metrics are written under
 `solver.work_directory/validation/step_XXXXXXXX`. The output directory contains
 the two rolling durable files directly:
 
 ```text
-state.p3s   # atomic evaluation snapshot: atmosphere, all streams, resources, progress
+state.p3s   # atmosphere, LTE windows, calibration, streams and resources
 last.ckpt   # optimizer, scheduler, sampling cursors/RNG, and model state
 ```
 
@@ -795,19 +843,39 @@ layer that owns an operation:
 ```python
 from prom3theus.config import load_config
 from prom3theus.resources import validate_resource_bundle
-from prom3theus.rt import LTESynthesizer, RayDistancePath
+from prom3theus.rt import LTELocalCoefficients
+from prom3theus.inversion.lte import LTEWindow
+from prom3theus.rt.formal_transfer import formal_stokes
 
-config = load_config("configs/hinode_lte_mhs.yaml")
+config = load_config("configs/hinode/mhs.yaml")
 resources = validate_resource_bundle()
 ```
 
-Standalone LTE synthesis always receives an explicit integration path. The
-formal solver never guesses whether an array represents optical depth,
-geometric height, or ray distance.
+`LTELocalCoefficients` evaluates dimensional propagation matrices and thermal
+sources at arbitrary points. `LTEWindow` samples the atmosphere along observed
+characteristics and calls `formal_stokes` before the instrument operator.
+Independent reference synthesis is available from `prom3theus.validation`.
+
+## LTE training and performance
+
+Atmosphere and calibration parameters receive gradients directly from observed
+Stokes losses. There is no learned radiation state, collocation sampler, PDE
+penalty, separate radiation optimizer group or residual certification stage.
+Atmosphere loss balancing is supported. A zero-weight Stokes stream does not
+add an independent transport objective.
+
+The tree removes the sequential depth recurrence, but local coefficients and
+matrix exponentials still cost time. Production Stokes forward/backward arithmetic
+uses float32; explicit float64 transfer remains available for reference checks.
+Depth convergence still needs scientific validation for the chosen column.
+CPU timing does not establish GPU speedup. See
+[parallel formal transfer](docs/parallel-formal-transfer.md) for the equations,
+accuracy controls and benchmark command.
 
 ## Synthetic recovery and tests
 
-Run the differentiable synthetic recovery check:
+Run the independent numerical-reference recovery check (this validates the
+independent reference synthesis gradients):
 
 ```bash
 prom3theus recovery --check --steps 500
@@ -823,3 +891,6 @@ The suite covers the strict maintained configurations, coordinates and neural
 primitives, LTE opacity and polarized transfer, ray geometry, both instruments,
 safe observation/artifact persistence, inversion constraints, training
 orchestration, CLI behavior, package boundaries, and wheel contents.
+
+For synthetic validation, see [MURaM forward synthesis](docs/muram-synthesis.md)
+for HMI, Hinode/SP, and AIA workflows and their physical assumptions.

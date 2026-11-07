@@ -23,7 +23,7 @@ from .runtime import _move_value, _temporary_eval_mode, state_dict_sha256
 
 
 def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids=None):
-    """Reuse the original LTE renderers with the joint run's shared atmosphere."""
+    """Render outgoing radiation predictions and independent atmosphere diagnostics."""
     from prom3theus.diagnostics.evaluation import (
         AtmosphereEvaluator,
         AtmosphereSampling,
@@ -61,15 +61,11 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
             SimpleNamespace(datamodule=data), raster, sampling.max_ray_pixels
         )
         label = stream_id
-        disambiguation_options = getattr(term, "disambiguation_options", None)
-        phase_for_diagnostics = getattr(term, "phase_for_diagnostics", None)
-        phase_enabled = (
-            isinstance(disambiguation_options, Mapping)
-            and bool(disambiguation_options.get("enabled", False))
-            and callable(phase_for_diagnostics)
-        )
-        with _temporary_eval_mode(term), torch.no_grad():
-            if options.render_streams or phase_enabled:
+        # Terms reference shared modules without registering duplicate owners.
+        with _temporary_eval_mode(
+            term, term.synthesis_window, runtime.model.atmosphere_model
+        ), torch.no_grad():
+            if options.render_streams:
                 dataset = data.evaluation_dataset()
                 indices = grid_indices(dataset, rows, columns)
                 loader = buffered_dataloader(
@@ -83,35 +79,22 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
                     if options.render_streams
                     else None
                 )
-                phase_payloads = []
                 for batch in loader:
                     device_batch = _move_value(batch, runtime.device)
                     if options.render_streams:
                         result = term.evaluate_batch(device_batch)
                         payload = result.diagnostics
+                        compared_prediction, compared_target = term.objective.comparison_profiles(
+                            payload["prediction"], payload["target"]
+                        )
                         collector.add(
-                            term.objective.transform(payload["prediction"]),
-                            term.objective.transform(payload["target"]),
+                            compared_prediction,
+                            compared_target,
                             payload["pixel_index"],
                             term.wavelength_angstrom,
                             term.wavelength_weights,
-                        )
-                    if phase_enabled:
-                        pixel_index = device_batch.get("pixel_index")
-                        if pixel_index is None:
-                            raise ValueError(
-                                "Disambiguation phase validation requires pixel_index values."
-                            )
-                        phase = phase_for_diagnostics(device_batch["coordinates"])
-                        if phase is None:
-                            raise RuntimeError(
-                                "Enabled disambiguation did not return a diagnostic phase."
-                            )
-                        phase_payloads.append(
-                            {
-                                "phase_rad": phase.detach().float().cpu().reshape(-1),
-                                "pixel_index": pixel_index.detach().cpu(),
-                            }
+                            raw_prediction=payload["prediction"],
+                            raw_reference=payload["target"],
                         )
                 if options.render_streams:
                     paths.append(
@@ -126,41 +109,23 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
                             objective_config=term.objective.configuration(),
                             exclusion_windows_angstrom=stream_configs[
                                 stream_id
-                            ].data_term.synthesis.excluded_wavelength_windows_angstrom,
+                            ].data_term.excluded_wavelength_windows_angstrom,
                             line_centers_angstrom=[
                                 line.wavelength_air_angstrom
-                                for line in term.synthesizer.lines
+                                for line in term.synthesis_window.coefficients.lines
                             ],
                         )
                     )
-                if phase_enabled and phase_payloads:
-                    phase_payload = {
-                        key: torch.cat([payload[key] for payload in phase_payloads], dim=0)
-                        for key in ("phase_rad", "pixel_index")
-                    }
                     paths.append(
-                        renderer.render_disambiguation_phase(
-                            trainer,
-                            phase_payload,
-                            raster,
-                            label,
-                            rows=rows,
-                            columns=columns,
-                            step=int(getattr(term, "step", trainer.global_step)),
-                            cold_steps=int(disambiguation_options["cold_steps"]),
-                            handoff_step=int(disambiguation_options["handoff_step"]),
+                        renderer.render_stokes_profiles(
+                            trainer, collector.local_payload(),
+                            term.wavelength_angstrom, label,
                         )
                     )
             if options.render_atmosphere:
                 view = SimpleNamespace(
                     atmosphere_model=runtime.model.atmosphere_model,
-                    forward_composition=term._composition,
-                    synthesizer=term.synthesizer,
-                    sample_depth_grid=lambda randomize=False: (
-                        term._composition.sample_depth_grid(
-                            term.coarse_depth_grid, randomize=randomize
-                        )
-                    ),
+                    synthesis_window=term.synthesis_window,
                 )
                 paths.extend(
                     renderer.render_atmosphere(

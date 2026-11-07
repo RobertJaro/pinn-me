@@ -145,7 +145,7 @@ def test_training_logs_only_progress_summary(monkeypatch):
         module, "log", lambda key, value, **kwargs: logged.update({key: value})
     )
     module.training_step({"hmi": {"loss": torch.tensor(2.0, requires_grad=True)}}, 0)
-    assert set(logged) == {"train.loss", "train.streams.hmi.data_loss"}
+    assert set(logged) == {"train.loss", "train.streams.hmi.data_loss", "train.streams.hmi.component_mse.I"}
 
 
 def test_zero_weight_stream_is_not_logged_but_active_zero_loss_is():
@@ -160,8 +160,13 @@ def test_zero_weight_stream_is_not_logged_but_active_zero_loss_is():
             "disabled": {"loss": torch.tensor(99.0)},
         }
     )
-    assert set(result.training_metrics()) == {"loss", "streams.active.data_loss"}
-    assert "streams.disabled.data_loss" in result.validation_metrics()
+    assert set(result.training_metrics()) == {"loss", "streams.active.data_loss", "streams.active.component_mse.I"}
+    assert "streams.disabled.data_loss" not in result.validation_metrics()
+    model.eval()
+    validation = model.evaluate_batches(
+        {"active": {"loss": torch.tensor(0.0)}, "disabled": {"loss": torch.tensor(99.0)}}
+    )
+    assert "streams.disabled.data_loss" in validation.validation_metrics()
 
 
 def test_inactive_shared_term_does_not_create_a_training_series():
@@ -176,4 +181,72 @@ def test_inactive_shared_term_does_not_create_a_training_series():
             "disabled": SharedTermResult(torch.tensor(0.0), {}, {}, active=False)
         },
     )
-    assert set(result.training_metrics()) == {"loss", "streams.data.data_loss"}
+    assert set(result.training_metrics()) == {"loss", "streams.data.data_loss", "streams.data.component_mse.I"}
+
+
+@pytest.mark.parametrize("clip_norm", [0.1, None])
+@pytest.mark.parametrize("multiple_groups", [False, True])
+def test_optimizer_logs_only_shared_learning_rate(monkeypatch, clip_norm, multiple_groups):
+    from prom3theus.config.joint_schema import JointTrainingConfig
+    from prom3theus.training.joint import JointInversionModule
+
+    layer = torch.nn.Linear(2, 1, bias=True)
+    model = JointForwardModel(layer, {"data": Term()}, {"data": 1.0})
+    module = JointInversionModule(
+        model,
+        JointTrainingConfig(
+            max_steps=1, learning_rate=0.01, final_learning_rate=0.001,
+            gradient_clip_norm=clip_norm,
+        ),
+        {},
+    )
+    parameters = ([{"params": [layer.weight]}, {"params": [layer.bias]}]
+                  if multiple_groups else module.parameters())
+    optimizer = torch.optim.Adam(parameters, lr=0.003)
+    layer.weight.grad = torch.tensor([[3., 0.]])
+    layer.bias.grad = torch.tensor([4.])
+    logged = {}
+    monkeypatch.setattr(module, "log", lambda name, value, **kw: logged.update({name: value}))
+    module.on_before_optimizer_step(optimizer)
+
+    assert logged == {"train.optimizer.learning_rate": .003}
+    # Removing metrics must not alter gradients; Lightning owns clipping.
+    torch.testing.assert_close(layer.weight.grad, torch.tensor([[3., 0.]]))
+    torch.testing.assert_close(layer.bias.grad, torch.tensor([4.]))
+
+
+def test_training_omits_diagnostics_and_metric_collectives_between_log_steps(monkeypatch):
+    from types import SimpleNamespace
+    from prom3theus.config.joint_schema import JointTrainingConfig
+    from prom3theus.training.joint import JointInversionModule
+    import prom3theus.training.joint as training
+
+    class AuditedTerm(Term):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def evaluate_batch(self, batch):
+            self.calls.append('diagnostics')
+            return super().evaluate_batch(batch)
+
+        def evaluate_training_batch(self, batch):
+            self.calls.append('score')
+            return super().evaluate_batch(batch)
+
+    term = AuditedTerm()
+    model = JointForwardModel(torch.nn.Linear(1, 1), {'stokes': term}, {'stokes': 1.})
+    module = JointInversionModule(model, JointTrainingConfig(
+        max_steps=20, learning_rate=.01, final_learning_rate=.001, log_every_n_steps=10), {})
+    module._trainer = SimpleNamespace(global_step=1)
+    logs, reductions = [], []
+    monkeypatch.setattr(module, 'log', lambda *args, **kw: logs.append(args))
+    monkeypatch.setattr(training, 'reduce_training_metrics', lambda metrics, *args, **kw: (reductions.append(1), metrics)[1])
+    batch = {'stokes': {'loss': torch.tensor(2., requires_grad=True)}}
+    module.training_step(batch, 1)
+    assert term.calls == ['score'] and not logs and not reductions
+    module._trainer.global_step = 9
+    module.training_step(batch, 9)
+    assert term.calls == ['score', 'diagnostics'] and logs and reductions == [1]
+    model.evaluate_batches(batch)
+    assert term.calls[-1] == 'diagnostics'  # Public evaluation stays complete.

@@ -18,7 +18,6 @@ from prom3theus.config.joint_schema import (
     JointInversionConfig,
     STICTableSupportRegularizationConfig,
     VectorMagnitudeRegularizationConfig,
-    VectorPotentialRegularizationConfig,
 )
 from prom3theus.inversion.assembly import build_physics_assembly
 from prom3theus.inversion.data_terms import (
@@ -61,8 +60,8 @@ def _atmosphere_options(config: JointInversionConfig, scene: SceneContract) -> d
         **{
             name: coordinate[name]
             for name in (
-                "spatial_coordinate_center_mm",
-                "spatial_coordinate_scale_mm",
+                "spatial_coordinate_center_megameter",
+                "spatial_coordinate_scale_megameter",
                 "time_coordinate_center_hours",
                 "time_coordinate_scale_hours",
                 "scene_geometry_config",
@@ -228,7 +227,6 @@ def _default_shared_terms_builder(
             regularization.height_layers,
             regularization.sample_count // regularization.height_layers,
         )
-        smoothness_step_m = None
         if isinstance(regularization, STICTableSupportRegularizationConfig):
             weights = {
                 "temperature": regularization.temperature_weight,
@@ -239,13 +237,6 @@ def _default_shared_terms_builder(
                 "magnetic": regularization.magnetic_weight,
                 "velocity": regularization.velocity_weight,
             }
-            smoothness_step_m = None
-        elif isinstance(regularization, VectorPotentialRegularizationConfig):
-            weights = {
-                "gauge": regularization.gauge_weight,
-                "smoothness": regularization.smoothness_weight,
-            }
-            smoothness_step_m = regularization.smoothness_step_megameter * 1.0e6
         else:  # pragma: no cover - closed typed schema
             raise TypeError(
                 f"Unsupported atmosphere regularization {type(regularization).__name__}."
@@ -255,7 +246,6 @@ def _default_shared_terms_builder(
             position_m=sample["position_m"],
             time_hours=sample["time_hours"],
             component_weights=weights,
-            smoothness_step_m=smoothness_step_m,
         )
     return SharedTermAssembly(
         terms=terms,
@@ -321,8 +311,15 @@ def build_joint_runtime(
         atmosphere = build_atmosphere(config, scene, resources)
     if not isinstance(atmosphere, nn.Module):
         raise TypeError("atmosphere_builder must return torch.nn.Module.")
+    from prom3theus.inversion.lte import LTEWindow
+    synthesis_windows = {
+        field.id: LTEWindow(atmosphere, configuration=field.to_dict())
+        for field in config.synthesis.windows
+    }
     terms = {
-        stream.id: build_term(stream, loaded[stream.id], atmosphere, scene)
+        stream.id: build_term(stream, loaded[stream.id], atmosphere, scene,
+                             **({"synthesis_windows": synthesis_windows}
+                                if factories.term_builder is None else {}))
         for stream in config.streams
     }
     with _startup_stage("scan domain geometry and build shared objectives"):
@@ -342,6 +339,7 @@ def build_joint_runtime(
         weights,
         shared_terms=shared.terms,
         weight_schedules=weight_schedules,
+        synthesis_windows=synthesis_windows,
     ).to(device)
     with _startup_stage("collect validation batches"):
         validation_batches = {

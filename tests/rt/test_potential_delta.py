@@ -61,7 +61,7 @@ class LinearPotentialDeltaHead(nn.Module):
 
 def _model(*, cool_steps=4_000, ramp_steps=2_000) -> StratifiedAtmosphereModel:
     model = StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(5.0, -0.1),
+        shell_height_bounds_megameter=(5.0, -0.1),
         magnetic_representation="potential_delta",
         magnetic_potential_delta_cool_steps=cool_steps,
         magnetic_potential_delta_ramp_steps=ramp_steps,

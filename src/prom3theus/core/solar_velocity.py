@@ -7,6 +7,8 @@ import math
 import numpy as np
 import torch
 
+from prom3theus.core.validation import require_tensor
+
 
 CARRINGTON_SIDEREAL_ROTATION_PERIOD_DAYS = 25.38
 CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S = (
@@ -30,8 +32,11 @@ def carrington_rotation_velocity_cartesian(
         position = torch.as_tensor(position_m)
         if not position.is_floating_point():
             position = position.to(torch.get_default_dtype())
-        if position.shape[-1:] != (3,) or not torch.isfinite(position).all():
-            raise ValueError("position_m must end in a finite Cartesian three-vector.")
+        if position.shape[-1:] != (3,):
+            raise ValueError('position_m must end in a finite Cartesian three-vector.')
+        require_tensor(
+            torch.isfinite(position).all(),
+            'position_m must end in a finite Cartesian three-vector.')
         omega = torch.as_tensor(
             CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S
             if angular_velocity_rad_per_s is None
@@ -39,8 +44,11 @@ def carrington_rotation_velocity_cartesian(
             dtype=position.dtype,
             device=position.device,
         )
-        if omega.numel() != 1 or not torch.isfinite(omega):
-            raise ValueError("angular_velocity_rad_per_s must be one finite scalar.")
+        if omega.numel() != 1:
+            raise ValueError('angular_velocity_rad_per_s must be one finite scalar.')
+        require_tensor(
+            torch.isfinite(omega).all(),
+            'angular_velocity_rad_per_s must be one finite scalar.')
         zeros = torch.zeros_like(position[..., 0])
         return torch.stack(
             (-omega * position[..., 1], omega * position[..., 0], zeros), dim=-1

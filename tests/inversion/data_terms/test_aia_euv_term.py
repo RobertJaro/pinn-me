@@ -30,7 +30,7 @@ class _Atmosphere(nn.Module):
             "solar_radius_m", torch.tensor(RADIUS_M, dtype=torch.float64)
         )
         self.solar_radius_value_m = RADIUS_M
-        self.shell_height_bounds_Mm = (1.0, -0.1)
+        self.shell_height_bounds_megameter = (1.0, -0.1)
         self.thermodynamic_eos = _EOS()
 
     def evaluate_chart_height_points(self, coordinates, height):
@@ -46,8 +46,8 @@ def _scene():
         scene_basis=torch.eye(3, dtype=torch.float64),
         solar_radius_m=RADIUS_M,
         reference_time_tai_seconds=1_700_000_000.0,
-        spatial_coordinate_center_mm=(0.0, 0.0),
-        spatial_coordinate_scale_mm=(10.0, 10.0),
+        spatial_coordinate_center_megameter=(0.0, 0.0),
+        spatial_coordinate_scale_megameter=(10.0, 10.0),
         time_coordinate_center_hours=0.0,
         time_coordinate_scale_hours=1.0,
         height_bounds_m=(-1.0e5, 1.0e6),

@@ -27,7 +27,7 @@ from .checkpoint import ValidatedSaveState, load_validated_save_state
 from .contracts import StoredRasterSelection
 from .errors import ArtifactExportError
 from .evaluation import (
-    depth_grid,
+    photospheric_height_grid,
     evaluate_atmosphere,
     resolve_storage_dtype,
     select_export_device,
@@ -51,12 +51,6 @@ class P3SLoader:
         self.device_name = str(device)
         self._data_module = None
         configuration = deepcopy(self.state.context["configuration"])
-        potential = configuration.get("physics", {}).get("potential_boundary", {})
-        if "interior" in potential:
-            # Old potential sampling is training-only and has no role in P3S
-            # queries. Keep its original metadata in state.context; do not
-            # reinterpret a historical volume prior as a photospheric prior.
-            configuration["physics"].pop("potential_boundary")
         self._config = parse_config(configuration, base_directory=self.state.path.parent)
         self.stream_id = stream_id or self._config.scene.reference_stream
         if self.stream_id not in self.state.module.terms:
@@ -341,7 +335,7 @@ class P3SLoader:
         return evaluate_atmosphere(
             module,
             selection.raster,
-            depth_grid=depth_grid(module, depth_samples),
+            height_grid_m=photospheric_height_grid(module, depth_samples),
             batch_size=batch_size,
             storage_dtype=storage_dtype,
         )
@@ -512,7 +506,7 @@ class P3SLoader:
         )
 
         outer_height_m, inner_height_m = (
-            float(value) * 1.0e6 for value in model.shell_height_bounds_Mm
+            float(value) * 1.0e6 for value in model.shell_height_bounds_megameter
         )
         offset_m = 1.0e5
         above_reference = (

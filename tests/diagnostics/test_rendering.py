@@ -23,8 +23,28 @@ from prom3theus.diagnostics.rendering import AtmosphereRenderer
 from prom3theus.diagnostics.stokes_rendering import StokesPlotter
 
 
+def test_individual_stokes_profiles_retain_signs_and_raw_units():
+    raw = torch.zeros(3, 4, 3)
+    raw[:, 0] = torch.tensor([1., .4, .8])[:, None]
+    raw[0, 1] = torch.tensor([-.2, .3, -.1])
+    raw[2, 3] = torch.tensor([.5, 0., -.5])
+    outputs = {
+        "raw_stokes_reference": raw,
+        "raw_stokes_pred": raw * .5,
+        "profile_pixel_index": torch.tensor([[2, 3], [4, 5], [6, 7]]),
+        # The summary payload may have a completely different loss transform.
+        "stokes_reference": raw * 100,
+        "stokes_pred": raw * 50,
+    }
+    figure = StokesPlotter().individual_profiles_figure(outputs, torch.arange(3.), "test")
+    np.testing.assert_array_equal(figure.axes[1].lines[0].get_ydata(), raw[0, 1])
+    np.testing.assert_array_equal(figure.axes[7].lines[1].get_ydata(), raw[2, 3] * .5)
+    assert "pixel (2, 3)" in figure.axes[0].get_ylabel()
+    assert "pixel (4, 5)" in figure.axes[8].get_ylabel()
+
+
 def test_stokes_plotter_accepts_the_canonical_observation_contract():
-    wavelength = torch.tensor((6300.0, 6301.0, 6302.0, 6303.0))
+    wavelength = torch.tensor((6302.5000, 6302.5001, 6302.5002, 6302.5003), dtype=torch.float64)
     reference = torch.linspace(-0.02, 1.0, 64).reshape(4, 4, 4)
     prediction = reference * 0.95
     pixel_index = torch.tensor(((0, 0), (0, 1), (1, 0), (1, 1)))
@@ -52,47 +72,8 @@ def test_stokes_plotter_accepts_the_canonical_observation_contract():
     )
 
     assert len(figure.axes) >= 12
-    figure.clear()
-
-
-def test_phase_plotter_displays_wrapped_phase_in_degrees_and_binary_distance():
-    coordinates = torch.tensor(
-        (
-            ((1.0, 10.0, 0.0), (2.0, 10.0, 0.0)),
-            ((1.0, 20.0, 0.0), (2.0, 20.0, 0.0)),
-        )
-    )
-    outputs = {
-        "phase_rad": torch.tensor((0.0, math.pi / 2.0, math.pi, -math.pi / 2.0)),
-        "pixel_index": torch.tensor(((0, 0), (0, 1), (1, 0), (1, 1))),
-    }
-
-    figure = StokesPlotter().phase_figure(
-        outputs,
-        SimpleNamespace(coordinates=coordinates),
-        "phase-test",
-        rows=np.array((0, 1)),
-        columns=np.array((0, 1)),
-        step=3_000,
-        cold_steps=2_000,
-        handoff_step=15_000,
-    )
-
-    phase_image = figure.axes[0].images[0]
-    binary_image = figure.axes[1].images[0]
-    np.testing.assert_allclose(
-        np.asarray(phase_image.get_array()),
-        np.array(((0.0, 90.0), (-180.0, -90.0))),
-    )
-    np.testing.assert_allclose(
-        np.asarray(binary_image.get_array()),
-        np.array(((0.0, 1.0), (0.0, 1.0))),
-        atol=1.0e-6,
-    )
-    assert phase_image.get_clim() == (-180.0, 180.0)
-    assert "deg" in figure.axes[0].get_title()
-    assert "active" in figure._suptitle.get_text()
-    figure.canvas.draw()
+    for axis in figure.axes[8:12]:
+        np.testing.assert_array_equal(axis.lines[0].get_xdata(), wavelength.numpy())
     figure.clear()
 
 
@@ -227,7 +208,7 @@ def test_vector_panels_render_magnetic_angles_and_los_velocity():
         assert "=0" in figure.axes[len(fields)].texts[0].get_text()
         row_label_axes = figure.axes[0 : 2 * len(fields) : len(fields)]
         assert all(
-            "mathrm{Mm}" in axis.texts[0].get_text() for axis in row_label_axes
+            "mathrm{megameter}" in axis.texts[0].get_text() for axis in row_label_axes
         )
         figure.clear()
 

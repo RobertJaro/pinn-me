@@ -617,12 +617,11 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
     atmosphere_config = {
         "height_input_scale_m": 1.0e6,
         "time_dependent": True,
-        "shell_height_bounds_Mm": [1.5, -0.1],
+        "shell_height_bounds_megameter": [1.5, -0.1],
         "tangent_margin_m": 1_000.0,
         "reference_atmosphere_config": "falc_82",
         "temperature_log_scale": 0.1,
         "velocity_scale_m_per_s": 1_000.0,
-        "velocity_max_m_per_s": 100_000.0,
         "magnetic_scale_gauss": 100.0,
         "microturbulence_log_scale": 0.2,
         "gas_pressure_log_scale": 0.5,
@@ -637,8 +636,8 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
     coordinates = module.raster.metadata["coordinates"]
     geometry = module.raster.metadata["ray_geometry"]
     atmosphere_config.update(
-        spatial_coordinate_center_mm=coordinates["network_affine"]["center_mm"],
-        spatial_coordinate_scale_mm=coordinates["network_affine"]["scale_mm"],
+        spatial_coordinate_center_megameter=coordinates["network_affine"]["center_megameter"],
+        spatial_coordinate_scale_megameter=coordinates["network_affine"]["scale_megameter"],
         time_coordinate_center_hours=coordinates["time_affine"]["center_hours"],
         time_coordinate_scale_hours=coordinates["time_affine"]["scale_hours"],
         scene_geometry_config={"solar_radius_m": geometry["solar_radius_m"], "scene_basis": geometry["scene_basis_rows"]},
@@ -670,13 +669,22 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         )
     }
     atmosphere = StratifiedAtmosphereModel( **atmosphere_config).float()
+    from prom3theus.inversion.lte import LTEWindow
+    radiation = LTEWindow(atmosphere, configuration={
+        "line_ids": list(observation.required_line_ids),
+        "wavelength_bounds_vacuum_angstrom": [6172., 6179.],
+        "radiance_scale": observation.radiance_scale_w_m3_sr,
+        "id": "fe_i_6173", "depth_count": 17,
+        "lateral_halo_megameter": 5.,
+    }).float()
     inversion = StokesObservationTerm(
         atmosphere_model=atmosphere,
+        synthesis_window=radiation,
+        synthesis_window_id="fe_i_6173",
         objective_config={
             "type": "mse",
         },
         wavelength_angstrom=observation.wavelength_angstrom,
-        synthesizer_config={"line_ids": list(observation.required_line_ids)},
         instrument_config={
             "type": observation.instrument_type,
             "magnetic_azimuth_offset_deg": 90.0,
@@ -686,14 +694,6 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         wavelength_exclude_windows_angstrom=[],
         continuum_indices=observation.continuum_indices,
         atlas_continuum_radiance_w_m3_sr=observation.radiance_scale_w_m3_sr,
-        depth_sampling_config={
-            "sample_count": 3,
-            "coarse_to_fine": {
-                "enabled": False,
-                "fine_sample_count": 1,
-                "uniform_weight_floor": 0.0,
-            },
-        },
         observation_id=observation.observation_id,
         velocity_synthesis_mode=observation.velocity_synthesis_mode.value,
         instrument_line_of_sight_velocity_correction_m_per_s=0.0,
@@ -703,18 +703,45 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
     inversion.objective = StokesObjective(type="asinh_mse", asinh_scale=1e-3)
     with torch.no_grad():
         inversion.instrument_line_of_sight_velocity_correction_normalized.fill_(
-            125.0 / inversion.velocity_scale_m_per_s
+            torch.atanh(torch.tensor(125.0) / inversion.maximum_velocity_correction)
         )
     inversion.eval()
     evaluation = inversion.evaluate_batch(batch)
     correction = evaluation.metrics["line_of_sight_velocity_correction_m_per_s"]
     torch.testing.assert_close(correction, correction.new_tensor(125.0))
     assert not correction.requires_grad
+    # A restored calibration retains the exact physical spectral map even when
+    # frozen for subsequent evaluation.
+    from copy import deepcopy
+    saved = deepcopy(inversion.state_dict())
+    frozen = deepcopy(inversion)
+    frozen.instrument_line_of_sight_velocity_correction_normalized.requires_grad_(False)
+    frozen.load_state_dict(saved, strict=True)
+    torch.testing.assert_close(frozen.instrument_line_of_sight_velocity_correction_m_per_s, correction)
+    assert not frozen.instrument_line_of_sight_velocity_correction_normalized.requires_grad
+    trainable = deepcopy(inversion)
+    trainable.load_state_dict(saved, strict=True)
+    torch.testing.assert_close(trainable.instrument_line_of_sight_velocity_correction_m_per_s, correction)
+    torch.testing.assert_close(
+        saved["instrument_line_of_sight_velocity_correction_normalized"],
+        torch.atanh(correction / inversion.maximum_velocity_correction),
+    )
     from prom3theus.inversion.joint import JointEvaluation
     joint = JointEvaluation(evaluation.likelihood_loss, {"hmi": evaluation}, {}, {}, {})
     metric = "streams.hmi.line_of_sight_velocity_correction_m_per_s"
     torch.testing.assert_close(joint.training_metrics()[metric], correction)
-    torch.testing.assert_close(joint.validation_metrics()[metric], correction)
+    assert metric not in joint.validation_metrics()
+    for index, component_name in enumerate(("I", "Q", "U", "V")):
+        for logged in (joint.training_metrics(), joint.validation_metrics()):
+            torch.testing.assert_close(
+                logged[f"streams.hmi.component_mse.{component_name}"],
+                evaluation.component_losses[component_name],
+            )
+            torch.testing.assert_close(
+                logged[f"streams.hmi.stokes_{component_name}_raw_residual_rms"],
+                (evaluation.diagnostics["prediction"][..., index, :] - batch["stokes"][..., index, :])
+                .square().mean().sqrt(),
+            )
     result = {"stokes": inversion.predict(batch)}
     loss = evaluation.likelihood_loss
     torch.testing.assert_close(evaluation.diagnostics["prediction"], result["stokes"])
@@ -730,3 +757,4 @@ def test_tiny_sequence_builds_calibrated_rasters_and_response_batches(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in atmosphere.parameters()
     )
+    assert not list(radiation.parameters())

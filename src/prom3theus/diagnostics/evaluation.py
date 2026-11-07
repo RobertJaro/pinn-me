@@ -13,13 +13,12 @@ from prom3theus.observations.bulk import read_native_grid
 import torch
 
 from prom3theus.core import (
+    carrington_rotation_velocity_cartesian,
     cartesian_to_spherical,
     project_cartesian_to_spherical,
     spherical_to_cartesian,
 )
-from dataclasses import replace
 
-from prom3theus.rt import project_vectors_to_stokes
 from prom3theus.rt.wavelength import air_to_vacuum_angstrom
 
 from .sampling import subsample_grid
@@ -187,84 +186,30 @@ class AtmosphereEvaluator:
         return bases[center_index]
 
     @staticmethod
-    def _line_core_extinction(pl_module, atmosphere, stokes_basis) -> torch.Tensor:
-        """Return total extinction at the most opaque observed line core, in m^-1.
-
-        This is the diagonal ``eta_I`` the formal solver actually integrates on
-        the ray path: continuum plus Zeeman-split line absorption at the
-        configured line centres, evaluated with the observer-frame field and
-        line-of-sight velocity.  Integrating it gives the optical depth the
-        observation genuinely sees, which reaches unity far higher in the
-        atmosphere than the 500 nm continuum does.
-
-        The field and velocity must be projected onto the Stokes basis first:
-        ``eta_I`` depends on the field's inclination to the line of sight and
-        on the Doppler shift of the core, neither of which the model-frame
-        vectors carry.  Azimuth is irrelevant here, since ``eta_I`` depends
-        only on ``sin^2(theta)`` and ``cos^2(theta)``.
-        """
-
-        synthesizer = pl_module.synthesizer
-        temperature = atmosphere.temperature
-        gas_pressure = atmosphere.gas_pressure
-        basis = stokes_basis.to(temperature)
-        observed = replace(
-            atmosphere,
-            magnetic_field=project_vectors_to_stokes(
-                atmosphere.magnetic_field.to(temperature), basis
-            ),
-            velocity_field=project_vectors_to_stokes(
-                atmosphere.velocity_field.to(temperature), basis
-            ),
+    def _line_core_extinction(pl_module, atmosphere, direction, position_m) -> torch.Tensor:
+        """Local inertial-frame line-core eta_I in m^-1, without solving transfer."""
+        field = pl_module.synthesis_window
+        coefficients = field.coefficients
+        state = {
+            "temperature": atmosphere.temperature,
+            "gas_pressure": atmosphere.gas_pressure,
+            "microturbulence": atmosphere.microturbulence,
+            "magnetic_field": atmosphere.magnetic_field,
+            "velocity_field": atmosphere.velocity_field + carrington_rotation_velocity_cartesian(
+                position_m, torch
+            ).to(atmosphere.velocity_field),
+        }
+        # Preserve sub-Angstrom offsets before casting in the coefficient layer.
+        wavelength = air_to_vacuum_angstrom(torch.tensor(
+            [line.wavelength_air_angstrom for line in coefficients.lines],
+            dtype=torch.float64, device=atmosphere.temperature.device,
+        ))
+        basis = field.basis(direction)
+        local = coefficients(
+            state, wavelength, direction=direction[:, None, :],
+            stokes_basis=basis[:, None, :, :], radiance_scale=field.radiance_scale,
         )
-        wavelength = temperature.new_tensor(
-            [line.wavelength_air_angstrom for line in synthesizer.lines]
-        )
-        wavelength, _ = torch.sort(wavelength)
-        continuum_grid = torch.cat(
-            (
-                air_to_vacuum_angstrom(wavelength),
-                wavelength.new_tensor([5000.0]),
-            )
-        )
-        plasma_state = synthesizer.continuum_opacity.prepare_plasma_state(
-            temperature, gas_pressure
-        )
-        continuum = synthesizer.continuum_opacity(
-            continuum_grid, temperature, gas_pressure, plasma_state
-        )
-        thermodynamics = synthesizer.continuum_opacity.reference_line_thermodynamics(
-            temperature,
-            gas_pressure,
-            plasma_state,
-            include_electron_density=synthesizer.requires_stark_electron_density,
-        )
-        propagation = synthesizer.line_opacity(
-            wavelength,
-            temperature,
-            observed.v_los,
-            observed.microturbulence,
-            observed.magnetic_field,
-            continuum[..., :-1],
-            continuum[..., -1],
-            lower_level_populations=(
-                synthesizer.continuum_opacity.reference_lower_level_populations(
-                    synthesizer.lines,
-                    temperature,
-                    gas_pressure,
-                    plasma_state,
-                    fe_i_population_over_partition=thermodynamics[
-                        "fe_i_population_over_partition"
-                    ],
-                )
-            ),
-            damping_electron_density=thermodynamics.get("electron_density"),
-            damping_hydrogen_neutral=thermodynamics["hydrogen_neutral"],
-            # Absolute m^-1, matching the RayDistancePath the inversion uses.
-            normalize_to_alpha500=False,
-        )
-        # eta_I is the [0, 0] element; keep the most opaque core across lines.
-        return propagation[..., 0, 0].amax(dim=-1)
+        return local.propagation_m1[..., 0, 0].amax(dim=-1)
 
     def evaluate_ray_optical_depth(
         self,
@@ -285,12 +230,8 @@ class AtmosphereEvaluator:
         ray_direction = read_native_grid(raster.ray_direction, rows, columns)
         surface_position_m = read_native_grid(raster.surface_position_m, rows, columns)
         valid = read_native_grid(raster.valid_mask, rows, columns)
-        stokes_basis = read_native_grid(raster.stokes_basis, rows, columns)
         flat_coords = coords[valid].to(device=parameter.device, dtype=parameter.dtype)
         flat_ray_direction = ray_direction[valid].to(device=parameter.device)
-        flat_stokes_basis = stokes_basis[valid].to(
-            device=parameter.device, dtype=parameter.dtype
-        )
         if flat_coords.numel() == 0:
             raise ValueError(
                 "No valid observation pixels remain for atmosphere visualization."
@@ -308,30 +249,28 @@ class AtmosphereEvaluator:
                     batch_coords = flat_coords[
                         start : start + self.ray_evaluation_batch_size
                     ]
-                    (
-                        atmosphere,
-                        ray_trace,
-                    ) = pl_module.forward_composition.trace_atmosphere(
-                        batch_coords,
-                        flat_ray_direction[
-                            start : start + self.ray_evaluation_batch_size
-                        ],
-                        pl_module.sample_depth_grid(randomize=False),
+                    ray = flat_ray_direction[start : start + self.ray_evaluation_batch_size]
+                    field = pl_module.synthesis_window
+                    field.boundary_queries(batch_coords, ray)
+                    inner, outer = field.height_bounds_m.detach().cpu().tolist()
+                    heights = torch.linspace(
+                        outer, inner, self.slice_radial_points,
+                        dtype=parameter.dtype, device=parameter.device,
                     )
+                    atmosphere, ray_trace = model.trace_rays(batch_coords, ray, heights)
                     gas_pressure = atmosphere.gas_pressure
                     if gas_pressure is None:
                         raise RuntimeError(
                             "LTE atmosphere visualization requires predicted gas pressure."
                         )
-                    alpha500 = pl_module.synthesizer.continuum_opacity.volume_extinction_at_5000(
+                    alpha500 = pl_module.synthesis_window.coefficients.plasma_provider.volume_extinction_at_5000(
                         atmosphere.temperature, gas_pressure
                     )
                     line_extinction = self._line_core_extinction(
                         pl_module,
                         atmosphere,
-                        flat_stokes_basis[
-                            start : start + self.ray_evaluation_batch_size
-                        ],
+                        -ray,
+                        ray_trace.position_m,
                     )
                     distance_interval_m = (
                         ray_trace.distance_m[..., 1:] - ray_trace.distance_m[..., :-1]
@@ -710,7 +649,7 @@ class AtmosphereEvaluator:
             latitude_min, latitude_max, self.slice_latitude_points
         )
         outer_height_m, inner_height_m = (
-            float(value) * 1.0e6 for value in model.shell_height_bounds_Mm
+            float(value) * 1.0e6 for value in model.shell_height_bounds_megameter
         )
         height = torch.linspace(
             outer_height_m, inner_height_m, self.slice_radial_points

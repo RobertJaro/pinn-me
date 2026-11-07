@@ -528,7 +528,7 @@ def test_aia_provider_writes_and_logs_validation_images(tmp_path, stream_count):
     from prom3theus.application.joint_training import _log_validation
 
     config = load_config(
-        Path(__file__).resolve().parents[2] / "configs/hmi_aia_dynamic.yaml"
+        Path(__file__).resolve().parents[2] / "configs/sdo/hmi_aia_dynamic.yaml"
     )
     stream = config.streams[1]
     rasters = [_raster(channel) for channel in (171, 193, 211)]
@@ -552,6 +552,7 @@ def test_aia_provider_writes_and_logs_validation_images(tmp_path, stream_count):
     term.objective = SimpleNamespace(asinh_scales=torch.ones(3))
     term.intensity_scales = torch.ones(3)
     model = torch.nn.Module()
+    model.shared_objectives = torch.nn.ModuleDict()
     streams = tuple(replace(stream, id=f"aia_{index}") for index in range(stream_count))
     model.terms = torch.nn.ModuleDict({item.id: term for item in streams})
     runtime = SimpleNamespace(

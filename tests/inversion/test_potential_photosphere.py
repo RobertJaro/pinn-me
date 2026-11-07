@@ -214,7 +214,7 @@ def _chart_from_positions(term, name, positions):
     )
     mu0, mu1 = map(math.sin, domain.latitude_bounds_rad)
     lat = (positions[:, 2] / radius - mu0) / (mu1 - mu0)
-    height = (radius - term.radius) / (domain.height_bounds_Mm[1] * 1e6)
+    height = (radius - term.radius) / (domain.height_bounds_megameter[1] * 1e6)
     if name in ("top", "photosphere"):
         uv = torch.stack((lon, lat), -1)
         torch.testing.assert_close(
@@ -223,7 +223,7 @@ def _chart_from_positions(term, name, positions):
                 radius,
                 term.radius
                 if name == "photosphere"
-                else term.radius + domain.height_bounds_Mm[1] * 1e6,
+                else term.radius + domain.height_bounds_megameter[1] * 1e6,
             ),
         )
     else:

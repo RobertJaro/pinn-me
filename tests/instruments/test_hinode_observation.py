@@ -169,17 +169,17 @@ def test_raster_preserves_detector_order_and_exact_velocity_gauge(
         value.dtype == torch.float32
         for value in (
             raster.stokes,
-            raster.wavelength_angstrom,
             raster.coordinates,
             raster.ray_direction,
             raster.stokes_basis,
         )
     )
+    assert raster.wavelength_angstrom.dtype == torch.float64
     np.testing.assert_allclose(
         raster.wavelength_angstrom.numpy(),
         expected_hinode_wavelength,
         rtol=0.0,
-        atol=3e-4,
+        atol=1e-10,
     )
     assert torch.all(raster.wavelength_angstrom[1:] > raster.wavelength_angstrom[:-1])
 

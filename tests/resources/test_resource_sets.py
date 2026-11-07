@@ -7,7 +7,9 @@ import pytest
 from prom3theus.resources import (
     AIA_RESOURCE_SET_ID,
     AIA_TEMPERATURE_RESPONSE_RESOURCE,
+    CORONAL_COOLING_RESOURCE,
     LEGACY_LTE_RESOURCE_SET_ID,
+    PLASMA_RESOURCE_SET_ID,
     resolve_resource_reference,
     resource_path,
     resource_set_path,
@@ -53,6 +55,38 @@ def test_aia_resources_do_not_change_the_exact_legacy_inventory():
         (LEGACY_LTE_RESOURCE_SET_ID, AIA_RESOURCE_SET_ID)
     )
     assert tuple(validated) == (LEGACY_LTE_RESOURCE_SET_ID, AIA_RESOURCE_SET_ID)
+
+
+def test_plasma_resource_set_is_independent_and_scientifically_explicit():
+    metadata = validate_resource_set(PLASMA_RESOURCE_SET_ID)
+
+    assert metadata["resource_set_id"] == "plasma_v1"
+    assert metadata["logical_resources"] == {"coronal_cooling": "coronal_cooling_v1.json"}
+    assert metadata["compatibility"] == {"chianti_database_release": "11.0.2"}
+    contract = metadata["scientific_contract"]
+    assert contract["unit"] == "W m^3"
+    assert contract["density_convention"] == "n_e * n_H"
+    assert contract["temperature_log10_k"] == [4.0, 9.0]
+    assert contract["components"] == ["free_bound", "free_free", "lines", "two_photon"]
+    assert contract["fiasco_version"] == "0.8.2"
+
+
+def test_plasma_and_aia_resources_share_one_chianti_release():
+    validated = validate_resource_sets(
+        (LEGACY_LTE_RESOURCE_SET_ID, AIA_RESOURCE_SET_ID, PLASMA_RESOURCE_SET_ID)
+    )
+    assert tuple(validated) == (
+        LEGACY_LTE_RESOURCE_SET_ID,
+        AIA_RESOURCE_SET_ID,
+        PLASMA_RESOURCE_SET_ID,
+    )
+
+
+def test_coronal_cooling_reference_resolves_only_declared_logical_resources():
+    path = resolve_resource_reference(CORONAL_COOLING_RESOURCE)
+    assert path.name == "coronal_cooling_v1.json"
+    with pytest.raises(KeyError, match="no logical resource"):
+        resolve_resource_reference("plasma_v1:not_declared")
 
 
 def test_aia_response_reference_resolves_only_declared_logical_resources():

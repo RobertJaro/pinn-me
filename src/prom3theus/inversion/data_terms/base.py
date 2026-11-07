@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -17,22 +17,26 @@ from torch import nn
 
 @dataclass(frozen=True, slots=True)
 class DataTermBatchResult:
-    """One reduced observation likelihood plus diagnostic components."""
+    """Observation likelihood, diagnostics and independently weighted constraints."""
 
     likelihood_loss: torch.Tensor
     component_losses: Mapping[str, torch.Tensor]
     metrics: Mapping[str, torch.Tensor]
     sample_count: int
     diagnostics: Mapping[str, Any] | None = None
+    constraint_losses: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.likelihood_loss.ndim != 0:
             raise ValueError("likelihood_loss must be a scalar tensor.")
         if self.sample_count < 1:
             raise ValueError("sample_count must be positive.")
+        if any(value.ndim != 0 for value in self.constraint_losses.values()):
+            raise ValueError("Observation constraint losses must be scalar tensors.")
         for collection_name, values in (
             ("component_losses", self.component_losses),
             ("metrics", self.metrics),
+            ("constraint_losses", self.constraint_losses),
         ):
             if not isinstance(values, Mapping):
                 raise TypeError(f"{collection_name} must be a mapping.")
@@ -50,6 +54,10 @@ class ObservationDataTerm(nn.Module, ABC):
     @abstractmethod
     def evaluate_batch(self, batch: Mapping[str, Any]) -> DataTermBatchResult:
         """Synthesize and score one deterministic or scheduled batch."""
+
+    def evaluate_training_batch(self, batch: Mapping[str, Any]) -> DataTermBatchResult:
+        """Optional fast scoring path; terms may omit diagnostic-only work."""
+        return self.evaluate_batch(batch)
 
     def nuisance_losses(self) -> Mapping[str, torch.Tensor]:
         """Return unweighted nuisance priors, evaluated once per joint step."""

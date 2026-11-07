@@ -7,7 +7,25 @@ cross sections use the corresponding vacuum wavelength.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
+
+
+@dataclass(frozen=True)
+class CenteredWavelength:
+    """Vacuum wavelength represented by a fixed origin and precise small offsets.
+
+    Float32 absolute optical wavelengths cannot retain small Doppler shifts.
+    Line profiles use the offsets directly; smooth continuum/Planck expressions
+    may reconstruct the approximate absolute wavelength with ``vacuum()``.
+    """
+
+    origin_angstrom: float
+    offset_angstrom: torch.Tensor
+
+    def vacuum(self) -> torch.Tensor:
+        return self.offset_angstrom + self.origin_angstrom
 
 
 def air_to_vacuum_angstrom(wavelength_air_angstrom) -> torch.Tensor:
@@ -43,4 +61,4 @@ def air_to_vacuum_angstrom(wavelength_air_angstrom) -> torch.Tensor:
     return wavelength * refractive_index
 
 
-__all__ = ["air_to_vacuum_angstrom"]
+__all__ = ["CenteredWavelength", "air_to_vacuum_angstrom"]

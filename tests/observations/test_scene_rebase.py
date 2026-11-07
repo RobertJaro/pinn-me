@@ -6,7 +6,7 @@ import torch
 from astropy.time import Time
 from prom3theus.observations import ObservationRaster, SceneContract
 from prom3theus.observations.scene import rebase_stokes_raster
-from prom3theus.rt.geometry import direction_to_chart_mm
+from prom3theus.rt.geometry import direction_to_chart_megameter
 
 
 def test_rebase_changes_only_chart_and_time_coordinates():
@@ -15,7 +15,7 @@ def test_rebase_changes_only_chart_and_time_coordinates():
     position = torch.tensor(
         [[[0.1 * radius, 0, math.sqrt(0.99) * radius]]], dtype=torch.float64
     )
-    chart = direction_to_chart_mm(position, torch.eye(3, dtype=torch.float64), radius)
+    chart = direction_to_chart_megameter(position, torch.eye(3, dtype=torch.float64), radius)
     coordinates = torch.cat(
         (chart, torch.full((1, 1, 1), 2.0, dtype=torch.float64)), dim=-1
     )
@@ -32,7 +32,7 @@ def test_rebase_changes_only_chart_and_time_coordinates():
             "times": [origin.isot],
             "coordinates": {
                 "time_scale": "tai",
-                "network_affine": {"center_mm": [0.0, 0.0], "scale_mm": [100.0, 100.0]},
+                "network_affine": {"center_megameter": [0.0, 0.0], "scale_megameter": [100.0, 100.0]},
             },
             "ray_geometry": {
                 "solar_radius_m": radius,
@@ -60,7 +60,7 @@ def test_rebase_changes_only_chart_and_time_coordinates():
         (-1e5, 1e7),
     )
     rebased = rebase_stokes_raster(raster, scene)
-    expected = direction_to_chart_mm(position, basis, radius)
+    expected = direction_to_chart_megameter(position, basis, radius)
     torch.testing.assert_close(rebased.coordinates[..., :2], expected)
     torch.testing.assert_close(
         rebased.coordinates[..., 2], torch.ones(1, 1, dtype=torch.float64)

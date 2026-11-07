@@ -1,5 +1,14 @@
 # Investigating iteration time
 
+The default Stokes training path uses float32 for geometry, local physics,
+spectral offsets, formal transfer and backward. Local geometry avoids solar-radius
+subtraction; centered wavelengths retain small Doppler shifts. Inversion presets
+also use midpoint-bounded jitter with an epsilon margin and directly computed
+line elements. Explicit float64 transfer is retained for reference checks, and
+fixed calibration preparation may use CPU float64 once at construction.
+These changes should be benchmarked on the deployment GPU; earlier timings using
+float64 transfer are not measurements of the current path.
+
 Similar V100 and A100 iteration times can indicate host overhead, but timing
 alone does not identify the limiting operation. The current training path has
 several explicit tensor-to-Python decisions that synchronize CUDA execution.
@@ -25,7 +34,7 @@ available for the investigation.
 Run the same configuration on each GPU, adding a separate trace directory:
 
 ```bash
-prom3theus invert configs/hmi_aia_dynamic.yaml --profile /tmp/p3s-a100
+prom3theus invert configs/sdo/hmi_aia_dynamic.yaml --profile /tmp/p3s-a100
 ```
 
 Use your actual configuration if different. This runs normal training, including
@@ -48,10 +57,11 @@ In the trace, inspect:
   through direct cursors; older shuffled states require explicit migration.
 - Scalar reads, device-to-host copies, and synchronization: additional runtime
   geometry, plasma, and transfer validation checks remain.
-- Forward/backward kernel duration and launch gaps: the polarized solver uses a
-  batched matrix exponential followed by a sequential Python depth recurrence.
-  The recurrence and higher-order physics derivatives need GPU profiling before
-  choosing compilation or a different algorithm.
+- Forward/backward kernel duration and launch gaps: the polarized solver uses an
+  analytic local exponential and an ordered logarithmic-depth reduction. Point
+  physics is prepared once and shared by spectral blocks. Voigt polynomial
+  operations remain separate eager kernels; GPU profiling should determine
+  whether kernel fusion is useful.
 - Logging and callbacks: progress metrics are read on the host, and validation
   rendering/checkpointing add periodic work unrelated to steady training compute.
 - Zero-weight streams: these still execute their diagnostic forward pass in the
@@ -86,10 +96,12 @@ stores and work-directory arrays available. This is a trusted local Python snaps
 separate from model checkpoints. Legacy incompatible snapshots require an explicit
 rebuild; failed loads never silently regenerate data.
 
-For distributed training, launch one process per device, for example:
+For distributed training, use `training.devices: auto` (the default) and
+`training.device: cuda` to use all GPUs visible through `CUDA_VISIBLE_DEVICES`. Launch the usual Python command;
+Lightning starts DDP ranks automatically. For example, the four-GPU Hinode preset:
 
 ```bash
-torchrun --standalone --nproc-per-node=2 -m prom3theus.cli.main invert configs/hmi_aia_dynamic.yaml
+PYTHONPATH=src python -m prom3theus.muram.cli invert configs/muram/hinode/stokes_only.yaml
 ```
 
 The application initializes the process group before preparing data. Global rank zero
@@ -98,7 +110,9 @@ the same generation. Use shared storage across nodes. Each rank receives differe
 batch IDs; incomplete final rank groups use zero-weight data placeholders so optimizer
 steps stay synchronized. Likelihoods use global sample counts, including per-channel
 AIA counts. Shared physics priors remain active on every rank. Checkpoint cursors count
-committed optimizer steps; changing world size requires explicit data-order migration.
+committed optimizer steps; changing world size restarts data coverage automatically
+while retaining model and optimizer state. Configured observation and physics collocation
+counts are per rank; four ranks multiply the effective count per update by four.
 Model snapshots, online logging, and diagnostics are owned by rank zero.
 
 The CPU distributed training/resume tests cover this path. Actual multi-GPU throughput,
@@ -179,3 +193,22 @@ PYTHONPATH=src python -m prom3theus.diagnostics.benchmark_loading
 The first global-shuffle pass includes preparation; subsequent passes measure
 batch slicing and selection. This CPU benchmark does not establish disk or GPU
 throughput. Validate convergence on the same observations and optimizer budget.
+## Muon optimization
+
+Set `training.optimizer: muon` to use native PyTorch Muon for MLP/SIREN
+hidden-layer weight matrices. Input and output layers, biases, and auxiliary
+parameters use AdamW. Both use zero weight decay, the configured learning rate,
+and the existing warmup/decay schedule. Muon uses momentum 0.95 and
+`adjust_lr_fn="match_rms_adamw"` to make the existing learning-rate scale a
+reasonable starting point; convergence still needs evaluation on the inversion.
+
+Install support with `pip install -e '.[muon]'` (PyTorch >=2.9). The default
+for configurations without an optimizer setting remains Adam. The MURaM HMI,
+MURaM Hinode, and real Hinode MHS presets select Muon explicitly. A running
+process does not change optimizer when its YAML is edited. Start a new run;
+resuming an Adam checkpoint as Muon is rejected because its optimizer state
+is incompatible. Muon checkpoints preserve both algorithms' states.
+
+The implementation uses one public optimizer so Lightning performs one
+backward pass, clips/unscales all gradients together, and advances both
+parameter groups and their scheduler together.

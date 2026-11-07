@@ -581,7 +581,7 @@ class AIAEUVDiagnosticRenderer:
             )
             axis.legend(loc="best", fontsize=8)
         axis.set_xlabel("Normalized response-weighted contribution")
-        axis.set_ylabel("Geometric height [Mm]")
+        axis.set_ylabel("Geometric height [megameter]")
         axis.set_title(
             f"AIA {channel} Angstrom contribution functions "
             f"({normalized.shape[0]} rays)"

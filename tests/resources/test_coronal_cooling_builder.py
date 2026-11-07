@@ -36,6 +36,30 @@ def test_builder_records_si_components_and_provenance(tmp_path, monkeypatch):
     assert document["provenance"]["database_version"] == "11.0.2"
     assert len(document["provenance"]["abundance_sha256"]) == 64
 
+    import hashlib
+
+    manifest = json.loads((output.parent / "manifest.json").read_text())
+    sources = json.loads((output.parent / "sources.json").read_text())
+    assert manifest["resource_set_id"] == "plasma_v1"
+    assert manifest["logical_resources"] == {"coronal_cooling": output.name}
+    assert manifest["resource_sha256"] == {
+        output.name: hashlib.sha256(output.read_bytes()).hexdigest()
+    }
+    assert manifest["source_manifest_sha256"] == hashlib.sha256(
+        (output.parent / "sources.json").read_bytes()
+    ).hexdigest()
+    assert manifest["compatibility"] == {"chianti_database_release": "11.0.2"}
+    chianti = sources["scientific_sources"]
+    assert chianti["chianti_atomic_database"]["sha256"] == (
+        document["provenance"]["database_sha256"]
+    )
+    assert chianti["chianti_abundance"]["sha256"] == (
+        document["provenance"]["abundance_sha256"]
+    )
+    assert chianti["chianti_ionization_equilibrium"]["sha256"] == (
+        document["provenance"]["ioneq_sha256"]
+    )
+
 
 @pytest.mark.skipif(
     not os.environ.get("CHIANTI_DATABASE_ROOT"),

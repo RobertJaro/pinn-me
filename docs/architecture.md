@@ -4,10 +4,83 @@
 
 [Documentation overview](README.md) · [Project README](../README.md)
 
-`prom3theus` is an LTE inversion framework with an explicit radiative-transfer
-backend boundary.  The package name is intentionally not tied to LTE so that an
-NLTE backend can be added later without moving observation, instrument, or
-optimization code.
+`prom3theus` learns one atmosphere. Local LTE coefficients and differentiable
+parallel formal Stokes integration map that atmosphere to instrument predictions.
+Schema v5 contains no learned radiation field or transfer-residual objective.
+
+## One inversion update
+
+The production Stokes path has explicit stages with one owner for each stage:
+
+```mermaid
+flowchart TD
+    batch[Observation batch: rays, wavelengths, measured Stokes] --> rays[Sample ray points and canonical polarization basis]
+    rays --> atmosphere[Evaluate atmosphere network once]
+    atmosphere --> physics[Prepare plasma, populations and line physics once]
+    batch --> queries[Prepare exact spectral coordinates once]
+    physics --> coefficients[Evaluate spectral coefficients in wavelength blocks]
+    queries --> coefficients
+    coefficients --> transfer[Ordered parallel formal Stokes integration]
+    transfer --> detector[Rotate Stokes and apply instrument response]
+    detector --> objective[Transform profiles once and compute likelihood]
+    objective --> update[Backpropagate and update atmosphere parameters]
+    objective --> diagnostics[Fit diagnostics only at logging or validation cadence]
+```
+
+| Stage | Component | Data lifetime |
+| --- | --- | --- |
+| Ray tracing and sampling | `LTEWindow.boundary_queries`, `sample_rays` | True shell intersections; stratified training jitter shared across all wavelengths; fixed endpoints and deterministic evaluation |
+| Atmosphere | `LTEWindow.evaluate_atmosphere` | One batched network evaluation at all sampled points |
+| Point physics | `LTELocalCoefficients.prepare_atmosphere`, `PolarizedLineOpacity.prepare` | One forward call; live tensors retain gradients |
+| Spectral coordinates | `LTELocalCoefficients.prepare_spectrum` | Full query prepared once, then sliced into blocks |
+| Spectral coefficients | `LTELocalCoefficients.evaluate_spectrum`, `PolarizedLineOpacity.evaluate_prepared` | Continuum and Voigt/Faraday profiles for one spectral block |
+| Formal integration | `formal_stokes`, `affine_transfer_reduce` | Local propagators followed by an ordered balanced reduction |
+| Detector response | `StokesObservationTerm.observe_stokes` | Emergent spectra rotated, calibrated and spectrally sampled |
+| Likelihood | `StokesObjective.compare` and scoring methods | Transformed prediction/target and continuum weights reused |
+| Training and reporting | `JointInversionModule`, `training.metrics` | Optimizer every update; detached fit diagnostics at log cadence |
+
+`PreparedLTEAtmosphere` owns compact point state; `PreparedSpectrum` owns spectral
+queries. Their axes remain separate. A per-ray grid broadcasts across depth and
+uses gathers from each point's continuum table; it never replicates the entire
+plasma state over wavelength. Field orientation, Doppler widths, damping, Zeeman
+splitting and integrated line strengths are prepared once, before spectral
+blocks. Prepared state is not cached across optimizer updates or detached.
+
+The shipped inversion presets set `synthesis.windows[].jitter_fraction: 1.0`.
+Interior points jitter independently between grid midpoints, with a small epsilon
+margin to keep neighboring nodes separated. Both geometric shell endpoints remain
+fixed. The formal solver receives actual line elements computed from these local
+jitter offsets. Sampling is vectorized on the model device;
+it needs no sorting, extra network pass or sequential depth loop. Owning model
+`.eval()` disables jitter. Existing configurations that omit this option retain
+uniform sampling. See [ray sampling details](parallel-formal-transfer.md).
+
+Production Stokes arithmetic uses float32 throughout forward and backward.
+`sample_shell_characteristic` retains local scene and ray offsets to compute
+height and chart coordinates accurately; the network never recovers height by
+subtracting the solar radius from a rounded global position. `CenteredWavelength`
+likewise keeps small Doppler shifts separate from the absolute optical wavelength.
+The fixed detector calibration is prepared once at higher precision on CPU.
+
+`core.validation.deferred_validation` collects device-side validity flags at the
+production prediction boundary. Nested numerical routines contribute flags and
+the outer boundary transfers them together once per device. Public numerical
+calls outside this context still validate immediately. Shape/type/index-safety
+checks remain eager; invalid numerical inputs still raise an error before a
+prediction is returned. This removes repeated validation waits inside spectral
+blocks, not all CPU orchestration in training.
+
+Training calls the lightweight scoring path between logging steps. Public
+`evaluate_batches` retains full diagnostics by default for evaluation, artifacts
+and standalone callers. Distributed diagnostics use valid sample counts; RMS
+metrics combine squared values and maxima use a maximum reduction. The objective
+already includes DDP normalization and is averaged across ranks only once.
+
+The model is still an atmosphere network with optional physical constraints.
+There is no radiation network, iterative LTE population solve, or sequential
+layer-intensity recurrence. Wavelength blocks and the fixed algebraic polynomial
+operations are implementation loops; the ordered depth reduction needs only
+`ceil(log2(number_of_layers))` stages.
 
 ## Observation preprocessing
 
@@ -50,19 +123,20 @@ Dependencies must point down this diagram.  In particular:
 | Package | Owns | Does not own |
 | --- | --- | --- |
 | `core` | Coordinates, constants, neural primitives, solar kinematics | File formats, instruments, training |
-| `config` | One strict schema-v3 stream configuration, environment expansion, path resolution | Component construction, defaults chosen by adapters |
+| `config` | One strict schema-v5 scene/synthesis/stream configuration, environment expansion, path resolution | Component construction, defaults chosen by adapters |
 | `resources` | The immutable legacy bundle, independently versioned optional scientific sets, and checksum validation | Downloads, runtime table generation |
 | `resource_builder` | Flat common-atomic and per-instrument builders, pinned downloads, STiC/Wittmann generation, FTS extraction, and exact reproduction | Runtime imports, training-time generation |
-| `rt` | Atmosphere contracts, unified plasma lookup, polarized synthesis, formal transfer, generic optically thin quadrature | Observation I/O, instrument response, optimization |
+| `rt` | Atmosphere contracts, unified plasma lookup, local polarized LTE coefficients, formal polarized transfer and characteristic geometry, generic optically thin quadrature | Observation I/O, instrument response, optimization |
 | `observations` | Independent typed Stokes and scalar-image raster/batch contracts, safe sequence stores, data loading, shared scene metadata | FITS-specific calibration, synthesis |
 | `instruments` | Independent Hinode, HMI, and AIA readers/preparation plus their response operators | Optimizers, loss scheduling, artifact policy |
 | `download` | Independent observation-download workflows such as AIA time-series/calibration acquisition | Instrument-specific parsing, deployment dates/paths, training |
 | `preprocess` | Reusable HMI/AIA preparation workflows, directory scanning, crop-aware reuse checks, and instrument API composition | Deployment paths, fixed crop settings, optimization |
 | `application` | Run orchestration, typed configuration translation, stream/scene assembly, setup evaluation, and report scheduling | Numerical equations, optimizer internals |
-| `inversion` | Backend-neutral forward compositions, shared objective reduction, runtime component assembly, and constraints | Diagnostic rendering, schema translation, Lightning lifecycle |
+| `inversion` | Scene LTE synthesis windows, stream likelihoods, shared objective reduction, physical constraints | Diagnostic rendering, schema translation, Lightning lifecycle |
 | `training` | One stream training lifecycle and resumable reference-stream scheduling | Radiative-transfer equations, instrument parsing |
 | `artifacts` | Atomic self-contained persistence and strict reconstruction/export | Observation preparation, training orchestration |
-| `diagnostics` | Synthetic recovery, scientific checks, and registered native-grid renderers | Production-run mutation |
+| `diagnostics` | Scientific convergence checks, and registered native-grid renderers | Production-run mutation |
+| `validation` | Independent numerical transfer, comparison spectra, synthetic recovery, reference convergence | Production training or evaluation backends |
 | `cli` | Argument parsing and lazy dispatch | Hidden scientific configuration |
 
 HMI and AIA have independent download entry points. The HMI command calls its
@@ -78,46 +152,100 @@ lower-level `prepare hmi-subframes`, `prepare hmi-responses`, and
 `prepare aia-euv` commands remain available for individual preparation steps.
 Runtime loading remains network-free.
 
-The data objective operates directly in the canonical fixed disk-center
-atlas-continuum units. Each Stokes residual is divided by an instrument-specific
-effective sigma and passed through an elementwise MSE penalty. The sigmas
-combine measurement noise with a conservative allowance for unresolved
-structure and forward-model discrepancy. No nonlinear transform is applied to
-the prediction or observation separately, and no local continuum normalization
-is performed. Configured Stokes component weights express relative scientific
-preference and are normalized to sum to one before being combined, so their
-global scale cannot change the balance between data and physics losses.
+Stored and synthesized Stokes profiles use fixed disk-center atlas-continuum
+units. With `objective.continuum_normalization: true`, the Stokes objective
+divides all four components of both profiles by the observation's
+90th-percentile Stokes I across detector wavelengths. The quantile defaults to
+`objective.continuum_quantile: 0.9`. Prediction and observation share the same
+detached observed denominator, so prediction errors cannot change the scale. This
+happens after the instrument response and before linear component scaling.
+Shipped presets enable it. Omitted normalization remains disabled.
 
-The atmosphere is represented by a SIREN coordinate network. Its first sine
-frequency is modulated by a configurable radial envelope: normalized horizontal
-coordinates, and time in dynamic runs, retain full bandwidth near the solar
-surface and are tapered toward the outer shell. The radial coordinate uses the
-integral of the same envelope, so its local derivative equals the bandwidth
-weight while the coordinate remains strictly monotonic. This supplies a
-high-detail near-Sun prior and a progressively smoother outer-field prior while
-keeping all coordinate derivatives differentiable for the physics residuals.
+This continuum proxy can retain line absorption, especially for HMI; it is not
+an independent line-free measurement. The loss retains sensitivity to predicted
+brightness, so absolute continuum intensity still constrains temperature.
+Nonpositive or nonfinite observed continua produce nonfinite losses; finite
+nonpositive predictions remain penalized against a valid observation.
+Loader data, physical forward synthesis, and raw residual metrics retain their
+original units; loss-space diagnostic plots use the training transform.
+Older artifacts with an explicit `continuum_floor` retain their original shared,
+detached observed-mean normalization for reproducible evaluation.
 
-## Radiative-transfer boundary
+Maintained Stokes presets use `mse` with `stokes_scales` of I=1 and Q/U/V=0.1.
+After continuum normalization, both profiles are divided by those component
+scales before subtraction. Separate component weights are one, so Q/U/V
+squared residuals receive a factor of 100 relative to unscaled residuals.
+Training, comparison plots and artifact metadata share this same transform.
+The scales are configuration-derived buffers and cannot overwrite new settings
+when a training checkpoint resumes. Legacy `asinh_mse`
+keeps I linear and stretches Q/U/V before subtraction, after any continuum
+normalization. Component weights multiply mean squared residuals directly,
+without normalizing their sum. Per-profile continuum normalization removes absolute
+brightness; it is not a noise-weighted likelihood.
 
-Atmosphere state, ray geometry, spectral grids, and synthesis results are
-backend-neutral contracts.  The LTE backend computes populations and source
-functions directly from local thermodynamic state.  A future NLTE backend may
-own global populations and convergence state behind the same scene-level
-synthesis interface.
+The maintained presets use SIREN coordinate networks with width 256 and eight
+hidden layers. Schema defaults set the first sine frequency to 30 and hidden
+frequencies to 1; radial weighting is explicitly disabled. They use normalized
+local spatial coordinates, plus time for dynamic runs, without a separate
+positional encoder. Isotropic-feature MLPs remain supported for existing models
+and explicit custom configurations. Switching architectures requires a fresh
+training run and output directory; observation stores can be reused.
 
-`StratifiedAtmosphereModel` accepts physical shell bounds and evaluates physical
-heights; it owns no observation quadrature grid. Stokes streams own their FALC
-reference-coordinate bounds and sample counts. `LTEForwardComposition` converts
-those reference coordinates to heights before ray tracing. Refinement and transfer
-use physical path lengths. Sampled atmosphere records carry generic ordered labels,
-so sample indices cannot be mistaken for derived optical depth. AIA uses its own
-geometric-height proposal and the common jitter/refinement tools.
+## Formal LTE transfer and ownership
 
-The formal solver never guesses its integration coordinate.  Traced spherical
-rays carry monotonically increasing physical distance.  A plane-parallel
-solver, when used, is selected explicitly and has its own input contract.
+`LTEWindow` owns local atomic physics and numerical integration controls for a
+spectral window. `JointForwardModel` registers windows once; observation terms
+keep non-owning references. Only atmosphere and calibration parameters are
+trained. `LTELocalCoefficients` supplies dimensional K and normalized Planck
+sources independently at every ray node.
 
-MHS closure and LTE synthesis share one `SolarPlasmaTable` instance. Its
+`rt.formal_transfer` computes frozen midpoint layer attenuation in parallel,
+then composes ordered affine maps in a balanced tree. For adjacent near/far
+layers, `(A,b) = (A_near A_far, b_near + A_near b_far)`. Associativity permits
+O(log depth) stages without assuming commuting propagation matrices. The
+reduction works relative to the bottom intensity to preserve constant thermal
+equilibrium. Standard tensor operations support first and higher derivatives.
+Float64 transfer arithmetic is the default; outputs retain the coefficient dtype.
+
+Every observed characteristic reaches the true lower shell boundary. The bottom
+source is the modeled local Planck function, or a configured fixed incoming
+temperature. Uniform distance nodes include both boundaries. Lower-boundary
+optical thickness and depth convergence remain scientific validation requirements.
+AIA keeps its independent optically thin quadrature.
+
+Each ray uses a nonsingular canonical polarization basis constant along its
+length; detector projection handles the spin-two rotation. There is no trained
+angular support cone. Geometry rejects grazing rays without lower-boundary
+intersection and characteristics outside the configured lateral halo. Spectral
+queries must remain inside the configured vacuum window after detector shifts.
+
+Learning-rate decay uses `training.learning_rate_decay_steps`, or the estimated
+run length (10000 updates for unbounded runs). All trainable parameters optimize
+from the first step; the data loss differentiates through formal integration.
+
+Spatial names spell out `megameter` throughout configuration, Python APIs,
+serialized metadata, and plot labels (one megameter is 1,000,000 metres).
+For example, use `lateral_halo_megameter`, `shell_height_bounds_megameter`,
+and `spatial_coordinate_scale_megameter`. Values and conversions are unchanged.
+The abbreviated field names are not retained as compatibility aliases; external
+configurations and consumers must adopt the new names. Existing checkpoints and
+prepared metadata containing the old names must be regenerated.
+
+Wavelengths are vacuum Angstrom in one inertial frame. Local material velocities
+include the Carrington rotation contribution; spacecraft motion, removed
+registration shifts and bounded instrument offsets map detector wavelengths to
+field queries. The source uses the line-shift-only moving-medium approximation.
+Transfer is quasi-static, and total continuum extinction uses the named
+`thermalized_continuum` approximation. Physical scattering redistribution and
+non-LTE populations require a different coupled equation.
+
+The retained numerical solvers are explicitly imported from
+`validation.reference_synthesis`, `validation.reference_transfer` and
+`validation.reference_forward` for comparison and MURaM fixture generation.
+Production `rt`, inversion, training, components and artifact reconstruction do
+not import those solvers. No legacy aliases remain in the public runtime.
+
+MHS closure and local LTE coefficients use the same `SolarPlasmaTable` physics. Its
 thermodynamic branch matches the bundled STiC state in the photosphere,
 continues through a reduced CHIANTI default-coronal-equilibrium electron
 mapping, and transitions to the fully ionized ideal STiC mixture. The CHIANTI
@@ -147,9 +275,9 @@ The radial reference deliberately separates the line-formation grid from its
 upper thermodynamic support. Its established 25-point FALC_82 mapping over
 `-5 <= log10(tau500) <= 1` remains unchanged for LTE rays. The physical-height
 reference additionally restores the 37 native FALC nodes at
-`log10(tau500) < -5`, ending at 2.073502459 Mm with `T = 100 kK` and
+`log10(tau500) < -5`, ending at 2.073502459 megameter with `T = 100 kK` and
 `p = 0.0319344213 Pa`. From that native top, a quintic smootherstep in
-`log(T)` reaches the configured 1 MK value at 2.5 Mm, after which the reference
+`log(T)` reaches the configured 1 MK value at 2.5 megameter, after which the reference
 is isothermal. Pressure is continued hydrostatically through the full domain
 with inverse-square gravity and the thermodynamic branch of `SolarPlasmaTable`.
 
@@ -157,8 +285,13 @@ Maintained magnetofluid runs use a Cartesian vector-potential parameterization:
 the three magnetic network channels are `A` in G m, and the exposed magnetic
 field is `B = curl(A)` in G. This makes `div B` identically zero; an enabled
 `magnetic_divergence` entry reports that exact zero without constructing a
-redundant magnetic Jacobian. Direct Cartesian `B` decoding remains available
-as a compatibility mode for older constructors and checkpoints. Dynamic runs
+redundant magnetic Jacobian. `A` itself is determined only up to a gauge, so
+the `vector_potential_gauge` equation penalizes `div A` on the ordinary volume
+collocation points: that divergence is the trace of the same Jacobian the curl
+already builds, so the gauge is fixed with no additional samples, network
+evaluations, or derivative graph. It is normalized by the local field scale
+exactly like the other magnetic residuals. Direct Cartesian `B` decoding remains available
+as an explicit current atmospheric representation. Dynamic runs
 use the ideal induction equation, momentum, logarithmic continuity
 `D ln(rho)/Dt + div(v) = 0`, and the vector-potential magnetic field. The maintained dynamic HMI run additionally applies a
 volume current-free (`curl B = 0`) initialization for its first 5,000 optimizer
@@ -232,10 +365,9 @@ the Stokes fit and active physical equations. The correction does not change the
 radial or transverse physical fields used by momentum, induction, and
 continuity. Static inversions leave it disabled.
 
-An NLTE implementation would provide the existing forward-backend protocol and
-own its population/convergence state in a separate backend package. Supporting
-it would require an explicit new configuration and artifact schema version;
-NLTE behavior must not be introduced as conditionals inside the LTE solver.
+A future non-LTE or physically scattering model must explicitly add population
+and angular coupling equations, new boundary data and a new artifact contract;
+there is no dormant numerical-backend switch in the current implementation.
 
 ## Observation and instrument boundary
 
@@ -249,7 +381,7 @@ constructs a static three-coordinate atmosphere. Nested raster sequences and
 time-range selection are rejected. The HMI adapter retains its independent
 time-dependent acquisition path.
 
-Schema version 3 adds an independent scalar-image contract rather than
+Schema version 5 retains the independent scalar-image contract rather than
 encoding EUV intensities as synthetic Stokes data. Each prepared AIA channel
 keeps its native registered grid, actual TAI exposure time, surface anchor,
 observer-to-Sun ray, uncertainty, valid mask, and calibration identity. A
@@ -265,85 +397,29 @@ edges and is exactly zero beyond them; only the observation response is tapered,
 not the atmosphere. An identifiable common/relative log-gain model accounts for
 residual calibration error without introducing an AIA-only density field.
 
-`JointForwardModel` owns one atmosphere, a module dictionary of observation
-terms, and separate shared physics/regularization terms. Its objective
-coordinator consumes only modality-neutral `DataTermBatchResult` values. The
-current setup runner uses closed typed HMI/AIA construction branches, while
-diagnostics use an observation-kind registry. A future third imager should move
-construction to the same explicit registration pattern rather than adding
-modality checks to objective evaluation.
+`JointForwardModel` owns one atmosphere, LTE windows, observation terms and
+shared objectives. Shared atmospheric physics runs once per optimizer step.
+Terms own calibration state and expose canonical-batch predictions. Metrics use
+stream-qualified names. Atmosphere gradient balancing is available because
+Stokes likelihoods now act directly on atmospheric parameters.
 
-HMI observation acquisition and response acquisition belong to explicit
-download/preparation modules. Runtime readers consume canonical, validated
-local inputs and never contact JSOC. Response preparation resolves each input
-`T_REC` through the definitive `hmi.B_720s.INVPHMAP` assignment and downloads
-the resulting camera-specific `hmi.phasemaps_extended` record; no calibration
-FSN is configured by the user.
-
-## Persistence
-
-Evaluation snapshots persist constructor contracts and tensor state without
-copying observation arrays. Prepared stores remain independent, immutable and
-checksum-verified. Neither format pickles Python model or data-module classes.
-
-The application coordinator in `application/data.py` prepares one joint data
-module and publishes `<work_directory>/data_module.pt` with ordinary `torch.save`.
-The versioned snapshot contains importable state records, file references, compact
-selection metadata, scene/domain summaries, and prepared training-pool specifications.
-`observations.persistence.load_data_module` uses `torch.load` and restores these
-records without calling provider or raster constructors. Rank zero also follows
-this restore path on subsequent runs. Source/scene/resource contract changes require
-an explicit rebuild; runtime loader settings bind independently.
-
-`ArrayRef` carries an NPY filename and schema/stat metadata. `ReadSession` owns a
-bounded set of process-local read-only mappings and copies into owned batch buffers.
-No open mapping, background producer, or provider callback enters the saved module.
-Unchanged canonical arrays are referenced directly; derived arrays and packed training
-pools have separate immutable files. Random physics samples remain generated from
-coordinate bounds on the model device. The data module is a trusted internal Python
-snapshot, separate from the public `.p3s` artifact and canonical observation formats.
-See [data loading implementation](data-loading-implementation.md) for lifecycle,
-distributed execution, validation, and remaining hardware checks.
-
-
-Scalar images use a parallel image-store schema with the same immutable,
-checksum-verified persistence rules. Static AIA/CHIANTI response data live in
-`resources/sets/euv/aia_euv_v1`; event-specific pointing/degradation tables are
-a separate acquisition bundle, and each prepared store seals the calibration
-convention connecting them.
-
-## One application runtime
-
-Every maintained configuration is schema version 3. A single observation is one
-entry in `streams`; arbitrary stream IDs distinguish multiple observations of
-one type. `application.joint_training.run_joint_inversion` is the sole optimizer
-runner. `application.joint_runner` performs setup/evaluation without optimizing.
-There is no schema-v2 decoder, legacy runner, old LTE Lightning module, or
-compatibility loader for prior P3S/archive formats.
-
-`components.observations` registers observation providers (loading and resource
-requirements); `components.forward` registers construction and reconstruction
-providers. `config.registry` registers additional strict dataclass schemas and
-compatible observation/term pairs before parsing. Registrations are explicit,
-with duplicate registrations rejected. The application assembly composes these
-providers with the shared scene, atmosphere and physics. New providers own their
-scientific requirements; shape compatibility alone is insufficient. Non-raster
-providers supply a scene contract and spatial/time sampling support. Stokes
-rasters are rebased into the shared scene chart and time origin without changing
-their physical ray geometry, polarization bases or observed targets.
-
-`JointForwardModel` owns one atmosphere, stream terms and shared objectives.
-Shared physics runs once per optimizer step. Terms own their calibration state
-and expose canonical-batch predictions. Metrics use stream-qualified names, so
-multiple HMI, Hinode or image streams cannot overwrite one another.
+There is no RT collocation objective or radiation certification stage. A zero
+stream weight disables that likelihood during training while retaining it for
+validation. Versioned checkpoint contracts reject the previous learned-RT model.
 
 Training logs the total loss plus its active weighted contributions: observation
 `data_loss`, enabled physics/regularization components, and enabled calibration
 priors. Disabled terms and expired scheduled losses create no series. An active
-loss remains visible even when its value is exactly zero. Validation logs only
-unweighted `data_loss` per stream plus Stokes residual RMS or AIA asinh RMSE;
-render-only streams remain available for validation. Component details stay in
-local reports. AIA plots from all configured observations share two stable media galleries:
+loss remains visible even when its value is exactly zero. Stokes training and
+validation both log component MSE in objective units and raw per-component
+residual RMS; validation also logs outgoing admissibility. Validation `data_loss`
+is unweighted, with AIA asinh RMSE reported separately. Render-only streams remain
+available for validation. Fixed LOS corrections and disabled Q/U warmup create
+no series; fitted corrections are logged only during training. All supplied runs
+disable Q/U warmup. Optimizer metrics contain one shared learning rate, with no
+gradient-norm or clipping-factor series. Optional loss-balancing diagnostics are
+retained. AIA channel losses and gains stay in local reports.
+AIA plots from all configured observations share two stable media galleries:
 `AIA observation comparison` and `AIA side view`. Optional contribution
 plots remain local;
 Stokes and atmosphere plots retain the renderer titles, such as
@@ -372,15 +448,24 @@ supply equivalent reproducible behavior; arbitrary external mutable loaders
 cannot promise exact replay. Worker counts do not change the outer scheduler,
 which runs in one process.
 
-`inversion.depth_sampling` owns bounded jitter, contribution-weighted inverse-CDF
-sampling and sample merging. LTE supplies attenuation-based interval masses;
-AIA supplies channel-specific optically thin emission masses. Coarse and fine
-field evaluations both retain gradients; proposal locations are detached. AIA
+`LTEWindow` evaluates jittered coarse ray-distance nodes. Optional
+`coarse_to_fine` adds contribution-guided fine points using the shared depth
+sampler: 32 coarse plus 32 fine in the Hinode Stokes-only preset. Coarse
+coefficients are reused, fine points receive a second batched network evaluation,
+and the sorted merged distances define the integration intervals. Both sets
+retain atmosphere gradients; proposal locations are detached. `depth_count`
+controls the coarse count; `wavelength_chunk_size` controls block size, not
+spectral resolution. All layer coefficients and affine-map pairings within a
+reduction stage are batched. No serial intensity loop remains in production.
+
+`inversion.depth_sampling` continues to provide bounded jitter, contribution-weighted
+inverse-CDF sampling and merging for Stokes and AIA's optically thin emission integrals.
+Coarse and fine atmospheric evaluations retain gradients; proposal locations are detached. AIA
 keeps float64 shell geometry and fixed photospheric/outer-shell endpoints.
 Training jitters interior coarse points independently per AIA ray and selects one
 random quantile per fine-sampling stratum; validation and export use deterministic
 coarse points and midpoint fine quantiles. `DepthRefinement` lives beside the
-common sampling functions, so AIA does not import the LTE forward composition. The maintained
+common sampling functions; AIA has no dependency on the reference Stokes solver. The maintained
 AIA configuration uses 96 coarse plus 96 fine samples. Adaptive trapezoidal
 quadrature is not guaranteed to outperform a fixed grid for every profile;
 dense-reference convergence checks remain necessary.
@@ -404,15 +489,22 @@ with no intermediate checkpoint directories or numbered versions. Plots,
 validation metrics, caches and logger working files go under `work_directory`.
 
 `artifacts.checkpoint` owns one tensor-only evaluation format. Its context
-contains model/term constructor options, the common scene, resource identities,
+contains atmosphere/synthesis/term constructor options, the common scene,
+spectral bounds, fixed physical scales, resource identities,
 observation references and resolved configuration. It stores all model/term
 parameters and buffers needed for evaluation and no optimizer or observation
 pixel arrays. `P3SLoader` reconstructs an `EvaluationModel` independently of
 training, verifies resource/tensor contracts, and exposes per-stream prediction
 and shared-field queries. Observation stores are accessed lazily for raster
 comparison/export. `--stream` selects the stream for raster-based CLI exports.
+Atmosphere exports keep physical Carrington and inertial velocity vectors;
+observer/registration and calibration shifts are exported as separate scalars
+and `detector_to_inertial_wavelength_factor`, never as modified material vectors.
 The full checkpoint additionally holds optimizer/scheduler state and sampling
-progress for continuation. Old formats are rejected, not migrated.
+progress for continuation. Old formats are rejected, not migrated. Within the
+current formal-LTE format, float64 fixed buffers from earlier snapshots may be
+converted to the float32 runtime. Tensor names, shapes, learned-parameter dtypes,
+and all other dtype changes remain strict; archived files are not rewritten.
 
 The component-extension test registers a third temperature-observation type,
 parses its configuration, differentiates its likelihood through the common

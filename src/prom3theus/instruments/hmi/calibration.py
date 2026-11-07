@@ -25,6 +25,13 @@ from .geometry import HMIDetectorGrid
 from .response import HMIResponseArchive
 
 
+def hmi_continuum_radiance(solar_reference) -> float:
+    """Common fixed atlas unit for observed and synthetic HMI training data."""
+    return float(disk_center_continuum_radiance(
+        solar_reference, [float(HMI_WAVELENGTH_CENTER.to_value(u.AA))]
+    )[0])
+
+
 def array_sha256(value: np.ndarray) -> str:
     """Hash an array together with its dtype and shape."""
 
@@ -142,11 +149,7 @@ def calibrate_stokes(
         )
     if np.any(np.abs(observer_los_velocity) >= SPEED_OF_LIGHT_M_PER_S):
         raise ValueError("HMI observer LOS velocity must be subluminal.")
-    continuum_scale = float(
-        disk_center_continuum_radiance(
-            solar_reference, [float(HMI_WAVELENGTH_CENTER.to_value(u.AA))]
-        )[0]
-    )
+    continuum_scale = hmi_continuum_radiance(solar_reference)
     i_mean = np.mean(stokes[..., 0, :], axis=-1)
     polarized = np.sqrt(np.sum(np.square(stokes[..., 1:, :]), axis=-2)).mean(axis=-1)
     fractional = polarized / i_mean

@@ -47,7 +47,7 @@ constructs photospheric targets at source-cell centres, where the piecewise-
 constant boundary data are continuous. Its radial operator is exactly the
 identity: target Br equals the source-cell Br. Tangential components use two
 exterior evaluations at numerical heights of 1e-4 and 5e-5 times the smallest
-angular cell width, linearly extrapolated to zero height. For a 3 Mm cell these
+angular cell width, linearly extrapolated to zero height. For a 3 megameter cell these
 are approximately 300 m and 150 m. These are quadrature regularization lengths;
 **the model fitting coordinates and the source remain exactly at r=1**. Nothing
 is reconstructed below the photosphere. Tests check radial identity, convergence
@@ -193,8 +193,8 @@ colorbar below the column.
 
 Both HMI dynamic presets use `uniform_spatial_scaling: true` with
 `height_input_scale_m: 1.0e7`. The network receives
-`[(x_mm-center_x_mm)/10, (y_mm-center_y_mm)/10, height_m/1.0e7, (time_hours-center_hours)/scale_hours]`.
-All three spatial coordinates therefore use a common 10 Mm normalization.
+`[(x_megameter-center_x_megameter)/10, (y_megameter-center_y_megameter)/10, height_m/1.0e7, (time_hours-center_hours)/scale_hours]`.
+All three spatial coordinates therefore use a common 10 megameter normalization.
 The scene's chart geometry and observation/ray coordinate transforms are unchanged.
 `radial_weighting: null` removes the SIREN coordinate warp entirely, including
 its previous height-dependent multiplication of time. Time retains its independent
@@ -203,12 +203,13 @@ uniform scaling is explicitly selected. A fresh run is required when changing
 the representation; old weights were fitted to different input coordinates.
 
 
-With `data_term.objective.qu_warmup_steps: 8000` (both dynamic presets),
+If `data_term.objective.qu_warmup_steps: 8000` is explicitly enabled,
 training omits Q/U contributions for optimizer steps 0–7,999. At step 8,000
 configured Q/U weights return immediately, without a ramp. This schedule is
 independent of whether the potential prior is enabled and when it ends.
 I/V coefficients are unchanged; weights are not renormalized during warmup.
 Validation retains the full Stokes objective and Q/U diagnostics throughout.
-The training metric `streams.<id>.qu_weight_factor` reports 0 or 1. The
+The training metric `train.streams.<id>.qu_weight_factor` reports 0 or 1 only
+when warmup is enabled. The
 optimizer global step supplies the schedule, including on checkpoint resume.
-The default `qu_warmup_steps: 0` enables Q/U from the first step.
+All supplied runs set `qu_warmup_steps: 0`, enabling Q/U from the first step.

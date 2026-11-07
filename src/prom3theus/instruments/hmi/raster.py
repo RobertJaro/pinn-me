@@ -9,7 +9,7 @@ from astropy.time import Time
 from sunpy.map import Map
 
 from prom3theus.observations import ObservationRaster
-from prom3theus.rt.geometry import direction_to_chart_mm
+from prom3theus.rt.geometry import direction_to_chart_megameter
 from prom3theus.rt.radiometry import load_solar_reference
 
 from .acquisition import (
@@ -46,13 +46,37 @@ def load_raster(
     response_sampler: HMIResponseArchive | None = None,
     solar_reference=None,
     acquisition: dict | None = None,
+    binning: int = 1,
 ):
     """Load, calibrate, and geometrically register one HMI acquisition."""
 
+    from prom3theus.muram.binning import bin_stokes_raster, validate_binning
+
+    validate_binning(binning)
     segments = resolve_segment_files(files)
     headers, stokes = read_stokes_cube(
         segments, require_quality_zero=require_quality_zero
     )
+    if any(header.get("SYNTHET", False) for header in headers):
+        from prom3theus.muram.fits import (
+            load_hmi_raster, SyntheticHMIResponse, synthetic_response_path,
+        )
+
+        if response_sampler is None:
+            response_sampler = SyntheticHMIResponse(
+                synthetic_response_path(transmission_profile_directory, segments["I0"])
+            )
+
+        raster = load_hmi_raster(
+            segments, headers, stokes,
+            reference_time=reference_time, scene_basis_rows=scene_basis_rows,
+            response_sampler=response_sampler,
+            solar_reference=solar_reference,
+            require_quality_zero=require_quality_zero,
+        )
+        return bin_stokes_raster(raster, binning)
+    if binning != 1:
+        raise ValueError("Loading-time Stokes binning is supported only for MURaM data")
     observer_velocity = observer_velocity_rwn(headers)
     reference_file = segments["I0"]
     if acquisition is None:
@@ -113,7 +137,7 @@ def load_raster(
 
     surface_unit = surface / np.linalg.norm(surface, axis=-1, keepdims=True)
     scene_basis = torch.tensor(ray_metadata["scene_basis_rows"], dtype=torch.float64)
-    chart = direction_to_chart_mm(
+    chart = direction_to_chart_megameter(
         torch.from_numpy(surface_unit), scene_basis, ray_metadata["solar_radius_m"]
     ).numpy()
     ref_time = s_map.date if reference_time is None else Time(reference_time)
@@ -138,18 +162,18 @@ def load_raster(
         "ref_time": str(ref_time.isot),
         "coordinates": {
             "order": [
-                "carrington_chart_x_mm",
-                "carrington_chart_y_mm",
+                "carrington_chart_x_megameter",
+                "carrington_chart_y_megameter",
                 "time_hours",
             ],
-            "units": ["Mm", "Mm", "hour"],
+            "units": ["megameter", "megameter", "hour"],
             "time_origin": str(ref_time.isot),
             "time_scale": str(ref_time.scale).upper(),
             "time_formula": "time_hours=(T_OBS-time_origin)/3600 s",
             "spatial_frame": "observer-independent Carrington gnomonic scene chart",
             "network_affine": {
-                "center_mm": centre.tolist(),
-                "scale_mm": scale.tolist(),
+                "center_megameter": centre.tolist(),
+                "scale_megameter": scale.tolist(),
             },
         },
         "normalization": {
@@ -231,7 +255,7 @@ def load_raster(
         raise ValueError("HMI observer LOS velocity must be finite and subluminal.")
     raster = ObservationRaster(
         stokes=torch.from_numpy(stokes.astype(np.float32)),
-        wavelength_angstrom=torch.from_numpy(wavelength.astype(np.float32)),
+        wavelength_angstrom=torch.from_numpy(wavelength.astype(np.float64)),
         coordinates=torch.from_numpy(coordinates),
         ray_direction=torch.from_numpy(rays.astype(np.float32)),
         surface_position_m=torch.from_numpy(surface.astype(np.float32)),

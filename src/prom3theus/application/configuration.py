@@ -13,11 +13,11 @@ def atmosphere_options(atmosphere: AtmosphereConfig) -> dict[str, Any]:
         "height_input_scale_m": geometry.height_input_scale_m,
         "uniform_spatial_scaling": geometry.uniform_spatial_scaling,
         "time_dependent": geometry.time_dependent,
-        "shell_height_bounds_Mm": [
+        "shell_height_bounds_megameter": [
             geometry.outer_height_megameter,
             geometry.inner_height_megameter,
         ],
-        "line_formation_height_bounds_Mm": [
+        "line_formation_height_bounds_megameter": [
             geometry.line_formation_outer_height_megameter,
             geometry.inner_height_megameter,
         ],
@@ -30,8 +30,8 @@ def atmosphere_options(atmosphere: AtmosphereConfig) -> dict[str, Any]:
         ),
         "temperature_log_scale": parameters.temperature.log_scale,
         "velocity_scale_m_per_s": parameters.velocity.scale_m_per_s,
-        "velocity_max_m_per_s": parameters.velocity.maximum_m_per_s,
         "magnetic_scale_gauss": parameters.magnetic_field.scale_gauss,
+        "scale_vector_potential": parameters.magnetic_field.scale_vector_potential,
         "magnetic_representation": parameters.magnetic_field.representation,
         "magnetic_potential_delta_cool_steps": (
             parameters.magnetic_field.potential_delta_cool_steps

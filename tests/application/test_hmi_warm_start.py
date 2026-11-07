@@ -24,7 +24,14 @@ def warm_start(tmp_path, monkeypatch):
     source_path = tmp_path / "source" / "state.p3s"
     source_path.parent.mkdir()
     source_path.write_bytes(b"fixed source snapshot")
-    source_config = load_config(Path(__file__).resolve().parents[2] / "configs/hmi_local_fine.yaml")
+    source_config = load_config(Path(__file__).resolve().parents[2] / "configs/sdo/hmi_dynamic.yaml")
+    source_config = replace(source_config,
+        physics=replace(source_config.physics, equations=replace(source_config.physics.equations,
+            vector_potential_gauge=replace(source_config.physics.equations.vector_potential_gauge,
+                enabled=False, weight=0.))),
+        atmosphere=replace(source_config.atmosphere,
+        parameters=replace(source_config.atmosphere.parameters, magnetic_field=replace(
+            source_config.atmosphere.parameters.magnetic_field, representation="direct"))))
     target = replace(source_config,
         solver=replace(source_config.solver, output_directory=tmp_path / "new_run"),
         atmosphere=replace(source_config.atmosphere, parameters=replace(

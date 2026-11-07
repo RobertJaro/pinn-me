@@ -1,7 +1,11 @@
-# Local HMI inversion and force-free baseline
+# Historical local HMI inversion and force-free baseline
 
-`scripts/hmi/run_local.py` uses `data/hmi` and defaults to
-`configs/hmi_local_constant.yaml`. It selects one 256 × 256 bipolar region of
+This records a local experiment whose machine-specific configuration is no longer
+distributed. `scripts/hmi/run_local.py` requires an explicit `--config` pointing to
+a user-supplied configuration. The commands below use `/path/to/local_hmi.yaml`;
+adapt its paths and settings to reproduce the recorded setup.
+
+The experiment uses `data/hmi` and selects one 256 × 256 bipolar region of
 the March 23, 2024 22:12 TAI acquisition, centered at Carrington longitude
 213.2877°, latitude −12.9481°. The existing input is already a cutout; further
 cropping accumulates its detector offsets so the HMI response still samples
@@ -9,9 +13,9 @@ the correct CCD location.
 
 The first stage is a small, static LTE inversion of all four Stokes components,
 with 32-pixel batches on CPU. The default allows 4,000 steps and uses a 128-wide, three-layer
-SIREN (34,697 parameters) with first frequency 90 and a 3 Mm height input scale.
+SIREN (34,697 parameters) with first frequency 90 and a 3 megameter height input scale.
 This increases horizontal detail while preserving the initial vertical
-frequencies of frequency 30 with a 1 Mm height scale. Physical heights and ray
+frequencies of frequency 30 with a 1 megameter height scale. Physical heights and ray
 distances remain unchanged. It uses the packaged LTE resources and the actual acquisition-specific
 HMI filter response. Logging and online services are disabled during the run.
 The standard checkpoint permits resuming with a larger total step count.
@@ -31,11 +35,11 @@ The second stage solves an exterior **spherical potential field**, the α=0
 case of a force-free field, from inferred photospheric Br. It uses the existing
 spherical Neumann Green solver, with 48 × 48 source cells, 32 × 32 horizontal
 output samples, and layers at
-0.5, 1, 2, 5, 10 and 20 Mm. Source-cell quadrature evaluates the inverted field
+0.5, 1, 2, 5, 10 and 20 megameter. Source-cell quadrature evaluates the inverted field
 exactly at r=1 using 4 × 4 Gauss quadrature per cell. The surface-limit solution
 is saved separately.
 
-This is a two-stage baseline. The LTE network covers −0.1 to 1.5 Mm; the derived
+This is a two-stage baseline. The LTE network covers −0.1 to 1.5 megameter; the derived
 potential model supplies the coronal magnetic field. Tangential magnetic field
 need not agree across that interface. There is no nonlinear force-free current,
 coronal thermodynamic inference or full-shell neural solution in this baseline.
@@ -51,7 +55,7 @@ Use Python ≥3.11 with the project, observation and visualization dependencies.
 In this checkout the `nf2` Conda environment has them installed.
 
 ```bash
-PYTHONPATH=src python scripts/hmi/run_local.py --prepare-only
+PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml --prepare-only
 ```
 
 This prepares the region and checks calibration, writing `preparation.json`
@@ -63,17 +67,17 @@ network operation, performed separately with a registered JSOC email:
 ```bash
 PYTHONPATH=src python -m prom3theus.cli.main prepare hmi-responses \
   data/hmi/*.fits --output data/hmi_responses_local --email YOUR_JSOC_EMAIL
-PYTHONPATH=src python scripts/hmi/run_local.py
+PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml
 # Continue the same inversion to a larger total step count if necessary:
-PYTHONPATH=src python scripts/hmi/run_local.py --steps 6000
+PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml --steps 6000
 ```
 
 The recorded height-independent refit starts from the completed unrestricted
 inversion and transfers network weights only:
 
 ```bash
-PYTHONPATH=src python scripts/hmi/run_local.py \
-  --config configs/hmi_local_constant.yaml --steps 1000 \
+PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml \
+  --steps 1000 \
   --initialize-from-state runs/hmi_local_fine/state.p3s
 ```
 
@@ -133,13 +137,13 @@ the fit report uses the preserved initial reference.
 
 The coronal report checks recovered photospheric Br, nonzero source and top
 field, Cartesian finite-difference divergence/curl/Lorentz residuals, and field
-lines reaching above 2.5 Mm. It records the source flux imbalance and the local
+lines reaching above 2.5 megameter. It records the source flux imbalance and the local
 exterior assumption. A failed fit or coronal check produces exit code 1 and
 `failed_validation`; reaching a training step count alone does not establish
 success. The checks establish numerical consistency, not independent agreement
 with the Sun's coronal magnetic field.
 For the height-independent configuration, the saved model must also reproduce
-the same magnetic vector at 0, 0.1, 0.15, 0.3 and 1 Mm on 256 angular columns,
+the same magnetic vector at 0, 0.1, 0.15, 0.3 and 1 megameter on 256 angular columns,
 within 0.001 G plus a relative tolerance of one part per million.
 
 On September 12, 2026 the official response was downloaded successfully to
@@ -189,10 +193,10 @@ residual errors at individual pixels, especially in fine-scale polarized
 profiles; they do not establish a unique vector inversion or coronal truth.
 
 The saved magnetic vector is identical at all five tested photospheric heights,
-while temperature remains stratified. The derived corona reaches 20 Mm with
-RMS field 75.62 G. At a 0.01 Mm difference step, the
+while temperature remains stratified. The derived corona reaches 20 megameter with
+RMS field 75.62 G. At a 0.01 megameter difference step, the
 maximum dimensionless divergence/curl/Lorentz residuals are
-4.38e-05 / 2.61e-05 / 2.09e-05, using a fixed 1 Mm normalization.
+4.38e-05 / 2.61e-05 / 2.09e-05, using a fixed 1 megameter normalization.
 The inferred local source has flux imbalance 17.7%;
 its exterior assumption remains explicit in the report.
 
@@ -203,5 +207,5 @@ The independent audit in `runs/hmi_local_constant/audit/` reloads the final P3S
 and reproduces all saved primary/representative Stokes predictions exactly.
 Source Br and sampled exported coronal vectors also reproduce exactly.
 Refining source cells from 48 × 48 to 64 × 64 changes coronal vectors by
-1.38% at 2 Mm, 0.38% at 5 Mm and 0.069% at 20 Mm; increasing source-cell
+1.38% at 2 megameter, 0.38% at 5 megameter and 0.069% at 20 megameter; increasing source-cell
 quadrature from order 4 to 6 changes them by at most 0.00023%.

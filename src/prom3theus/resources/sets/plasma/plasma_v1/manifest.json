@@ -1,0 +1,20 @@
+{
+  "compatibility": {
+    "chianti_database_release": "11.0.2"
+  },
+  "logical_resources": {
+    "coronal_cooling": "coronal_cooling_v1.json"
+  },
+  "resource_set_id": "plasma_v1",
+  "resource_set_type": "prom3theus-scientific-resource-set",
+  "resource_sha256": {
+    "coronal_cooling_v1.json": "5da031086ee3d443ec9adbeecd9e5d4aee263899aea495320fc23137cbf1c908"
+  },
+  "runtime_files": [
+    "coronal_cooling_v1.json",
+    "sources.json"
+  ],
+  "schema_version": 1,
+  "source_manifest_sha256": "45c34df5b425e45df1584833e249f3df2753119aa67044b8aacbdc157a8349d0",
+  "training_contract": "offline-read-only; no downloads or table conversion"
+}

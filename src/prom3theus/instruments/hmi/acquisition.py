@@ -257,7 +257,7 @@ def read_acquisition_header(path: Path) -> dict:
         raise ValueError(
             f"HMI FITS acquisition has unsupported HCAMID={hcamid}: {path}."
         )
-    return {
+    acquisition = {
         "date": date,
         "path": str(path.resolve()),
         "observation_time": observation_time,
@@ -265,6 +265,10 @@ def read_acquisition_header(path: Path) -> dict:
         "hcamid": hcamid,
         "acquisition_key": hmi_acquisition_key(record_time, hcamid),
     }
+
+    if header.get("SYNTHET", False):
+        acquisition["synthetic_schema"] = str(header.get("SYNSCHEM", "unknown"))
+    return acquisition
 
 
 def read_stokes_cube(

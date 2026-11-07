@@ -64,3 +64,18 @@ def test_operator_rejects_a_mismatched_forward_grid():
     stokes = torch.ones(1, 4, synthesis.numel())
     with pytest.raises(ValueError, match="do not match"):
         operator(stokes, synthesis + 0.1, observed)
+
+
+def test_precise_grid_survives_float_profiles_and_module_dtype_roundtrip():
+    operator = HinodeSpectralPSF(fwhm_angstrom=1e-4, oversample=3)
+    observed = torch.linspace(6302.5000, 6302.5004, 5, dtype=torch.float64)
+    synthesis = operator.synthesis_grid(observed)
+    operator.prepare(synthesis, observed)
+    profile = torch.exp(-((synthesis - 6302.5002) / 1e-4).square())
+    stokes = profile.expand(1, 4, -1).clone()
+    expected = operator(stokes, synthesis, observed)
+    operator.float()
+    actual = operator(stokes.float(), synthesis, observed)
+    torch.testing.assert_close(actual.double(), expected, rtol=1e-6, atol=1e-8)
+    operator.double()
+    torch.testing.assert_close(operator(stokes, synthesis, observed), expected, rtol=0, atol=0)

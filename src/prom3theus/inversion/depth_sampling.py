@@ -6,12 +6,20 @@ from dataclasses import dataclass
 
 import torch
 
+from prom3theus.core.validation import require_tensor
 
-def reference_height_grid(atmosphere_model, reference_log_tau500, bounds=(-5.0, 1.0)):
+
+def reference_height_grid(
+    atmosphere_model, reference_log_tau500, bounds=(-5.0, 1.0), *,
+    height_sampling="reference",
+):
     """Map Stokes reference coordinates to physical heights in the line shell.
 
-    FALC optical depth shapes quadrature placement only. The learned atmosphere
-    and ray tracer consume metres; their optical depth is computed from opacity.
+    The reference coordinate labels quadrature placement only, not the learned
+    optical depth. "reference" uses the FALC-shaped distribution; "uniform"
+    distributes the same coordinate grid uniformly in physical height, giving
+    depressed photospheric layers coverage even before their opacity is learned.
+    The atmosphere and ray tracer consume metres in both modes.
     """
     q = torch.as_tensor(reference_log_tau500).to(atmosphere_model.solar_radius_m)
     lower, upper = bounds
@@ -26,13 +34,18 @@ def reference_height_grid(atmosphere_model, reference_log_tau500, bounds=(-5.0, 
         raise ValueError(
             "Stokes reference coordinates must stay inside the sampling bounds."
         )
-    reference = atmosphere_model.reference_atmosphere
-    endpoints = reference.height_from_log_tau(q.new_tensor(bounds))
-    outer, inner = atmosphere_model.line_formation_height_bounds_Mm
+    outer, inner = atmosphere_model.line_formation_height_bounds_megameter
     if not outer > 0 > inner:
         raise ValueError(
-            "FALC-shaped Stokes sampling requires line-formation heights straddling zero."
+            "Stokes sampling requires line-formation heights straddling zero."
         )
+    if height_sampling == "uniform":
+        fraction = (q - lower) / (upper - lower)
+        return (outer + (inner - outer) * fraction) * 1e6
+    if height_sampling != "reference":
+        raise ValueError("height_sampling must be 'reference' or 'uniform'.")
+    reference = atmosphere_model.reference_atmosphere
+    endpoints = reference.height_from_log_tau(q.new_tensor(bounds))
     height = reference.height_from_log_tau(q)
     return torch.where(
         q <= 0,
@@ -166,19 +179,36 @@ def importance_fine_distances(
         dim=-1,
     )
     # The attenuation integrated over an interval is the transmittance drop.
-    # This form is both more accurate than a midpoint approximation and stays
-    # finite when a physically opaque interval has very large optical depth.
+    # Factor it instead of subtracting two exponentials: in an optically thin
+    # ray both exponentials round to one in float32, silently discarding the
+    # opacity proposal and falling back to a uniform interval distribution.
+    # exp(-inf) and expm1(-inf) also retain finite weights for opaque layers.
     contribution = (
-        torch.exp(-tau_edge[..., :-1].clamp_max(80.0))
-        - torch.exp(-tau_edge[..., 1:].clamp_max(80.0))
+        torch.exp(-tau_edge[..., :-1]) * (-torch.expm1(-delta_tau))
     ).detach()
     # Each channel carries unit mass before averaging.  Without this an
     # optically thin channel would be outvoted by an opaque one purely through
     # its smaller total transmittance drop rather than its sampling relevance.
     mixed = _unit_mass(contribution).mean(dim=-2)
     return contribution_fine_distances(
-        mixed, distance_m, fine_sample_count, uniform_weight_floor
+        mixed, distance_m, fine_sample_count, uniform_weight_floor, randomize=False
     )
+
+
+@torch.no_grad()
+def stokes_interval_proposal(propagation, intervals):
+    """Sum normalized scalar attenuation masses over detector wavelengths.
+
+    Eta_I includes continuum and Doppler/Zeeman-shifted line extinction. Each
+    wavelength contributes equally to the proposal so continuum and line-core
+    formation regions both receive samples. Polarized transfer still uses full K.
+    """
+    extinction = propagation[..., 0, 0].transpose(-1, -2)
+    delta_tau = (0.5 * extinction[..., :-1] + 0.5 * extinction[..., 1:]) * intervals[..., None, :]
+    tau_before = torch.cat((torch.zeros_like(delta_tau[..., :1]),
+                            delta_tau[..., :-1].cumsum(dim=-1)), dim=-1)
+    masses = torch.exp(-tau_before) * (-torch.expm1(-delta_tau))
+    return _unit_mass(masses).sum(dim=-2)
 
 
 @torch.no_grad()
@@ -189,8 +219,14 @@ def contribution_fine_distances(
     uniform_weight_floor,
     *,
     randomize=False,
+    minimum_separation=None,
 ):
-    """Sample detached interval masses at fixed or stratified-random quantiles."""
+    """Sample detached interval masses at fixed or stratified-random quantiles.
+
+    Optional minimum_separation reserves space between fine samples as well as
+    coarse edges; callers must supply coarse intervals wide enough to hold all
+    requested fine points at that separation.
+    """
     if contribution.shape != (*distance_m.shape[:-1], distance_m.shape[-1] - 1):
         raise ValueError("Contribution weights must describe each ray interval.")
     if (
@@ -199,12 +235,10 @@ def contribution_fine_distances(
         or not 0 <= uniform_weight_floor <= 1
     ):
         raise ValueError("Invalid fine sample count or proposal floor.")
-    if not torch.isfinite(contribution).all() or torch.any(contribution < 0):
-        raise ValueError("Contribution weights must be finite and nonnegative.")
-    if not torch.isfinite(distance_m).all() or torch.any(
-        torch.diff(distance_m, dim=-1) <= 0
-    ):
-        raise ValueError("Proposal distances must be finite and strictly increasing.")
+    require_tensor(torch.isfinite(contribution).all() & (contribution >= 0).all(),
+                   "Contribution weights must be finite and nonnegative.")
+    require_tensor(torch.isfinite(distance_m).all() & (distance_m.diff(dim=-1) > 0).all(),
+                   "Proposal distances must be finite and strictly increasing.")
     interval_count = contribution.shape[-1]
     normalized = _unit_mass(contribution)
     probability = (
@@ -232,6 +266,15 @@ def contribution_fine_distances(
     )
     lower = torch.gather(distance_m[..., :-1], -1, interval)
     upper = torch.gather(distance_m[..., 1:], -1, interval)
+    if minimum_separation is not None:
+        # Quantiles, hence interval IDs, are sorted. Reserve a gap for each
+        # fine point and both coarse endpoints, including coincident quantiles.
+        # The caller's coarse jitter must reserve room for these gaps.
+        left = torch.searchsorted(interval.contiguous(), interval.contiguous(), right=False)
+        right = torch.searchsorted(interval.contiguous(), interval.contiguous(), right=True)
+        rank = strata - left + 1
+        gap = minimum_separation / (upper - lower)
+        fraction = fraction.clamp(0, 1) * (1 - (right - left + 1) * gap) + rank * gap
     fine = lower + fraction * (upper - lower)
     # Rounded CDF values can make a quantile coincide exactly with an interval
     # edge in float32.  A fine point on that edge duplicates a coarse point and
@@ -248,15 +291,12 @@ def merge_depth_samples(
     fine: torch.Tensor,
     order: torch.Tensor,
 ) -> torch.Tensor:
-    """Merge scalar or vector samples along their depth dimension."""
-
-    if coarse.ndim == order.ndim:
-        return torch.gather(torch.cat((coarse, fine), dim=-1), -1, order)
-    if coarse.ndim == order.ndim + 1:
-        combined = torch.cat((coarse, fine), dim=-2)
-        index = order[..., None].expand(*order.shape, combined.shape[-1])
-        return torch.gather(combined, -2, index)
-    raise ValueError("Depth samples must be scalar or vector valued.")
+    """Merge depth samples with arbitrary trailing physical/spectral axes."""
+    depth_axis = order.ndim - 1
+    combined = torch.cat((coarse, fine), dim=depth_axis)
+    trailing = combined.shape[order.ndim:]
+    index = order.reshape(*order.shape, *((1,) * len(trailing))).expand(*order.shape, *trailing)
+    return torch.gather(combined, depth_axis, index)
 
 
 __all__ = [
@@ -265,4 +305,5 @@ __all__ = [
     "importance_fine_distances",
     "jitter_depth_grid",
     "merge_depth_samples",
+    "stokes_interval_proposal",
 ]

@@ -44,7 +44,7 @@ class ProgressivePotentialBoundary(SharedObjectiveTerm):
         self.radius = float(domain.solar_radius_m)
         if options["source_height_megameter"] != 0:
             raise ValueError("Potential source must be at the photosphere (height 0)")
-        if domain.height_bounds_Mm[1] <= 0:
+        if domain.height_bounds_megameter[1] <= 0:
             raise ValueError(
                 "Potential boundaries require a domain above the photosphere"
             )
@@ -75,13 +75,13 @@ class ProgressivePotentialBoundary(SharedObjectiveTerm):
         xy = centres(n)
         add(
             "top",
-            torch.tensor(domain.height_bounds_Mm[1], dtype=torch.float64),
+            torch.tensor(domain.height_bounds_megameter[1], dtype=torch.float64),
             xy[:, None],
             xy[None, :],
             (n, n),
         )
         nh, nz = options["side_horizontal_points"], options["side_height_points"]
-        h = centres(nz)[:, None] * domain.height_bounds_Mm[1]
+        h = centres(nz)[:, None] * domain.height_bounds_megameter[1]
         edge = centres(nh)[None, :]
         for name, lon, lat in (
             ("west", torch.tensor(1.0), edge),
@@ -434,10 +434,10 @@ class ProgressivePotentialBoundary(SharedObjectiveTerm):
         if name in ("top", "photosphere"):
             lon, lat = uv.unbind(-1)
             height = torch.full_like(
-                lon, 0.0 if name == "photosphere" else domain.height_bounds_Mm[1]
+                lon, 0.0 if name == "photosphere" else domain.height_bounds_megameter[1]
             )
         else:
-            height = uv[:, 0] * domain.height_bounds_Mm[1]
+            height = uv[:, 0] * domain.height_bounds_megameter[1]
             edge = uv[:, 1]
             if name in ("west", "east"):
                 lon, lat = torch.full_like(edge, float(name == "west")), edge
@@ -548,7 +548,6 @@ class ProgressivePotentialBoundary(SharedObjectiveTerm):
             "photosphere_weight": zero + photo_weight,
             "updates": zero + self.update_count,
             "frozen": zero + int(self.frozen),
-            "time_anchors": zero + len(self.times),
             "last_update": zero + self.last_update,
             "target_relative_change": self.last_relative_change.detach(),
         }

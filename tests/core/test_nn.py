@@ -123,3 +123,29 @@ def test_integral_radial_warp_is_monotonic_with_envelope_derivative():
 
     assert torch.all(warped[1:] > warped[:-1])
     torch.testing.assert_close(derivative, weighting.envelope(coordinates))
+
+
+def test_per_input_siren_frequency_changes_only_selected_coordinate_sensitivity():
+    torch.manual_seed(23)
+    spatial = SIRENModel(2, 1, dim=16, n_layers=3, first_omega_0=5.,
+                         input_omega_0=(5., 5.)).double()
+    torch.manual_seed(23)
+    spectral = SIRENModel(2, 1, dim=16, n_layers=3, first_omega_0=5.,
+                          input_omega_0=(5., 1.)).double()
+    # At zero spectral offset, only the derivative along wavelength changes.
+    point = torch.tensor([[.2, 0.]], dtype=torch.float64, requires_grad=True)
+    a, b = spatial(point), spectral(point)
+    torch.testing.assert_close(a, b)
+    ga, = torch.autograd.grad(a.sum(), point)
+    gb, = torch.autograd.grad(b.sum(), point, create_graph=True)
+    torch.testing.assert_close(gb[:, 0], ga[:, 0])
+    torch.testing.assert_close(gb[:, 1], ga[:, 1] / 5.)
+    gb.square().sum().backward()
+    assert torch.isfinite(spectral.in_layer.weight.grad).all()
+    assert spectral.in_layer.weight.grad.abs().max() > 0
+
+
+@pytest.mark.parametrize('frequencies', [(1.,), (1., 0.), (1., -1.), (1., float('nan'))])
+def test_per_input_siren_rejects_invalid_frequency_vectors(frequencies):
+    with pytest.raises(ValueError):
+        SIRENModel(2, 1, input_omega_0=frequencies)

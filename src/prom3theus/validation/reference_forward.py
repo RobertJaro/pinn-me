@@ -1,0 +1,718 @@
+"""Development-only depth-marching composition for numerical reference data.
+
+This independently retained baseline connects atmosphere, ray geometry and
+instrument response for fixture generation and scientific comparisons. It must
+never be assembled by production training, evaluation or artifact loading.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, runtime_checkable
+
+import torch
+
+from prom3theus.core import (
+    SPEED_OF_LIGHT,
+    carrington_rotation_velocity_cartesian,
+    cartesian_to_spherical,
+    project_cartesian_to_spherical,
+)
+from prom3theus.inversion.depth_sampling import (
+    DepthRefinement,
+    reference_height_grid,
+    importance_fine_distances,
+    jitter_depth_grid,
+    merge_depth_samples,
+)
+from prom3theus.observations.contracts import (
+    CARRINGTON_OBSERVER_RELATIVE_VELOCITY,
+    CARRINGTON_REGISTERED_RELATIVE_VELOCITY,
+    resolve_velocity_synthesis_mode,
+)
+from prom3theus.rt.geometry import radial_height_along_ray
+from prom3theus.rt import (
+    RayTraceResult,
+    StratifiedAtmosphere,
+    project_vectors_to_stokes,
+)
+from .reference_transfer import RayDistancePath, TransferPath
+
+
+@runtime_checkable
+class ForwardSynthesisBackend(Protocol):
+    """Solver-neutral spectral backend required by forward composition.
+
+    A future NLTE backend may maintain very different internal state, but it
+    must accept a sampled atmosphere and an explicit transfer path and return
+    emergent, high-resolution Stokes profiles.  The reference-extinction method
+    supplies only an opacity-guided sampling proposal; its result is detached
+    before selecting fine ray points.
+
+    A backend may additionally offer an optional, duck-typed
+    ``refinement_extinction(atmosphere)`` returning
+    ``(reference_extinction, line_centre_extinction)``, which lets refinement
+    resolve the line-core forming layers as well as the continuum.  It stays
+    off this protocol deliberately: a backend without it remains a valid
+    implementation and simply refines on the continuum alone.
+    """
+
+    @property
+    def uses_prepared_wavelength(self) -> bool:
+        """Whether synthesis uses backend-prepared wavelength state."""
+
+    def prepare_wavelength_grid(self, wavelength_angstrom: torch.Tensor) -> None:
+        """Prepare immutable state for a synthesis wavelength grid."""
+
+    def reference_extinction(
+        self,
+        atmosphere: StratifiedAtmosphere,
+    ) -> torch.Tensor:
+        """Return a positive reference extinction for sampling refinement."""
+
+    def synthesize(
+        self,
+        atmosphere: StratifiedAtmosphere,
+        wavelength_angstrom: torch.Tensor,
+        *,
+        radiance_scale: torch.Tensor | float,
+        path: TransferPath,
+    ) -> torch.Tensor:
+        """Return high-resolution emergent Stokes profiles."""
+
+
+class LTESynthesisBackend:
+    """Adapt the package LTE synthesizer to :class:`ForwardSynthesisBackend`."""
+
+    def __init__(self, synthesizer: Any):
+        self.synthesizer = synthesizer
+        self._uses_prepared_wavelength = False
+
+    @property
+    def uses_prepared_wavelength(self) -> bool:
+        return self._uses_prepared_wavelength
+
+    def prepare_wavelength_grid(self, wavelength_angstrom: torch.Tensor) -> None:
+        prepare = getattr(self.synthesizer, "prepare_wavelength_grid", None)
+        self._uses_prepared_wavelength = callable(prepare)
+        if self._uses_prepared_wavelength:
+            prepare(wavelength_angstrom)
+
+    def reference_extinction(
+        self,
+        atmosphere: StratifiedAtmosphere,
+    ) -> torch.Tensor:
+        if atmosphere.gas_pressure is None:
+            raise ValueError("LTE refinement requires atmospheric gas pressure.")
+        return self.synthesizer.continuum_opacity.volume_extinction_at_5000(
+            atmosphere.temperature,
+            atmosphere.gas_pressure,
+        )
+
+    def refinement_extinction(
+        self,
+        atmosphere: StratifiedAtmosphere,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if atmosphere.gas_pressure is None:
+            raise ValueError("LTE refinement requires atmospheric gas pressure.")
+        return self.synthesizer.refinement_extinction(atmosphere)
+
+    def synthesize(
+        self,
+        atmosphere: StratifiedAtmosphere,
+        wavelength_angstrom: torch.Tensor,
+        *,
+        radiance_scale: torch.Tensor | float,
+        path: TransferPath,
+    ) -> torch.Tensor:
+        return self.synthesizer(
+            atmosphere,
+            None if self.uses_prepared_wavelength else wavelength_angstrom,
+            radiance_scale=radiance_scale,
+            path=path,
+        )
+
+
+def rotate_transverse_stokes_field(
+    magnetic_field_observer: torch.Tensor,
+    phase_rad: torch.Tensor | float,
+) -> torch.Tensor:
+    """Rotate the observer-frame transverse field while preserving LOS field.
+
+    ``phase_rad`` may be specified for every sampled point or for the leading
+    ray dimensions.  A phase whose shape is a prefix of the field's leading
+    dimensions is broadcast over the remaining dimensions, which keeps one
+    observer-pixel phase constant through all of that ray's depth samples.
+    """
+
+    if magnetic_field_observer.ndim < 1 or magnetic_field_observer.shape[-1] != 3:
+        raise ValueError("magnetic_field_observer must end in three components")
+    phase = torch.as_tensor(
+        phase_rad,
+        dtype=magnetic_field_observer.dtype,
+        device=magnetic_field_observer.device,
+    )
+    leading_shape = magnetic_field_observer.shape[:-1]
+    if phase.ndim > len(leading_shape):
+        raise ValueError(
+            "phase_rad cannot have more dimensions than the magnetic field leading shape"
+        )
+    if phase.ndim < len(leading_shape) and tuple(phase.shape) == tuple(
+        leading_shape[: phase.ndim]
+    ):
+        phase = phase.reshape(*phase.shape, *([1] * (len(leading_shape) - phase.ndim)))
+    try:
+        phase = torch.broadcast_to(phase, leading_shape)
+    except RuntimeError as error:
+        raise ValueError(
+            f"phase_rad shape {tuple(phase.shape)} is not broadcastable to "
+            f"{tuple(leading_shape)}"
+        ) from error
+    if not torch.isfinite(phase).all():
+        raise FloatingPointError("The magnetic azimuth phase must be finite")
+    cosine = torch.cos(phase)
+    sine = torch.sin(phase)
+    transverse = magnetic_field_observer[..., :2]
+    rotated = torch.stack(
+        (
+            cosine * transverse[..., 0] - sine * transverse[..., 1],
+            sine * transverse[..., 0] + cosine * transverse[..., 1],
+        ),
+        dim=-1,
+    )
+    return torch.cat((rotated, magnetic_field_observer[..., 2:]), dim=-1)
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardRuntime:
+    """Current registered tensors supplied by the owning inversion module."""
+
+    coarse_depth_grid: torch.Tensor
+    observed_wavelength_angstrom: torch.Tensor
+    synthesis_wavelength_angstrom: torch.Tensor
+    radiance_scale: torch.Tensor | float
+    carrington_angular_velocity_rad_per_s: torch.Tensor | float
+    instrument_line_of_sight_velocity_correction_m_per_s: torch.Tensor | float
+
+
+class LTEForwardComposition:
+    """Compose atmosphere sampling, LTE synthesis, and observation response.
+
+    This is intentionally not an ``nn.Module``.  The owning inversion module
+    registers the atmosphere, LTE synthesizer, instrument, parameters, and
+    buffers under their established names.  Holding references here therefore
+    adds no state-dict prefixes and preserves existing artifact weights exactly.
+    """
+
+    def __init__(
+        self,
+        *,
+        atmosphere_model: Any,
+        backend: ForwardSynthesisBackend,
+        instrument: Any,
+        velocity_synthesis_mode: str,
+        depth_refinement: DepthRefinement,
+        reference_log_tau500_bounds: tuple[float, float] = (-5.0, 1.0),
+        height_sampling: str = "reference",
+    ):
+        if not isinstance(backend, ForwardSynthesisBackend):
+            raise TypeError("backend must implement ForwardSynthesisBackend.")
+        self.atmosphere_model = atmosphere_model
+        self.backend = backend
+        self.instrument = instrument
+        self.velocity_synthesis_mode = resolve_velocity_synthesis_mode(
+            velocity_synthesis_mode
+        )
+        self.depth_refinement = depth_refinement
+        self.reference_log_tau500_bounds = reference_log_tau500_bounds
+        if height_sampling not in ("reference", "uniform"):
+            raise ValueError("height_sampling must be 'reference' or 'uniform'.")
+        self.height_sampling = height_sampling
+
+    def prepare_wavelength_grid(
+        self,
+        observed_wavelength_angstrom: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prepare backend/operator state and return their synthesis grid."""
+
+        synthesis_wavelength = self.instrument.synthesis_grid(
+            observed_wavelength_angstrom
+        )
+        self.backend.prepare_wavelength_grid(synthesis_wavelength)
+        prepare_instrument = getattr(self.instrument, "prepare", None)
+        if callable(prepare_instrument):
+            prepare_instrument(
+                synthesis_wavelength,
+                observed_wavelength_angstrom,
+            )
+        return synthesis_wavelength
+
+    @staticmethod
+    def sample_depth_grid(
+        coarse_depth_grid: torch.Tensor,
+        *,
+        randomize: bool,
+    ) -> torch.Tensor:
+        return jitter_depth_grid(coarse_depth_grid, randomize=randomize)
+
+    def _refine_ray_sampling(
+        self,
+        coordinates: torch.Tensor,
+        ray_direction: torch.Tensor,
+        coarse_atmosphere: StratifiedAtmosphere,
+        coarse_trace: RayTraceResult,
+    ) -> tuple[StratifiedAtmosphere, RayTraceResult]:
+        """Add fine points while preserving both differentiable field paths."""
+
+        refinement = self.depth_refinement
+        with torch.no_grad():
+            # Refine on the continuum and the line cores together where the
+            # backend can supply both; a core forms far above the tau500=1
+            # layer and would otherwise carry almost no proposal mass.
+            combined = getattr(self.backend, "refinement_extinction", None)
+            if callable(combined):
+                alpha500, line_extinction = combined(coarse_atmosphere)
+            else:
+                alpha500 = self.backend.reference_extinction(coarse_atmosphere)
+                line_extinction = None
+            fine_distance_m = importance_fine_distances(
+                alpha500,
+                coarse_trace.distance_m,
+                refinement.sample_count,
+                refinement.uniform_weight_floor,
+                line_extinction=line_extinction,
+            )
+            direction = ray_direction.to(fine_distance_m)
+            direction = direction / torch.linalg.vector_norm(
+                direction,
+                dim=-1,
+                keepdim=True,
+            )
+            outer_position_rsun = (
+                coarse_trace.position_m[..., 0, :]
+                / self.atmosphere_model.solar_radius_m
+            )
+            fine_position_rsun = (
+                outer_position_rsun[..., None, :]
+                + (fine_distance_m / self.atmosphere_model.solar_radius_m)[..., None]
+                * direction[..., None, :]
+            )
+            (
+                fine_chart_xy_megameter,
+                fine_geometric_height_m,
+            ) = self.atmosphere_model._position_chart_height(fine_position_rsun)
+            outer_unit = outer_position_rsun / torch.linalg.vector_norm(
+                outer_position_rsun, dim=-1, keepdim=True
+            )
+            fine_geometric_height_m = radial_height_along_ray(
+                outer_unit,
+                coarse_trace.geometric_height_m[..., 0],
+                direction,
+                fine_distance_m,
+                self.atmosphere_model.solar_radius_m,
+            )
+            fine_position_m = fine_position_rsun * self.atmosphere_model.solar_radius_m
+            combined_distance_m = torch.cat(
+                (coarse_trace.distance_m, fine_distance_m),
+                dim=-1,
+            )
+            order = torch.argsort(combined_distance_m, dim=-1)
+            distance_m = torch.gather(combined_distance_m, -1, order)
+            position_m = merge_depth_samples(
+                coarse_trace.position_m,
+                fine_position_m,
+                order,
+            )
+            chart_xy_megameter = merge_depth_samples(
+                coarse_trace.chart_xy_megameter,
+                fine_chart_xy_megameter,
+                order,
+            )
+            geometric_height_m = merge_depth_samples(
+                coarse_trace.geometric_height_m,
+                fine_geometric_height_m,
+                order,
+            )
+            depth_grid = torch.arange(
+                distance_m.shape[-1],
+                dtype=distance_m.dtype,
+                device=distance_m.device,
+            )
+            ray_time = (
+                coordinates.to(fine_position_rsun)[..., 2]
+                .unsqueeze(-1)
+                .expand(fine_position_rsun.shape[:-1])
+            )
+            fine_evaluation_coordinates = torch.cat(
+                (fine_chart_xy_megameter, ray_time[..., None]),
+                dim=-1,
+            )
+        fine_fields = self.atmosphere_model.evaluate_chart_height_points(
+            fine_evaluation_coordinates,
+            fine_geometric_height_m,
+        )
+        field_names = [
+            "temperature",
+            "velocity_field",
+            "microturbulence",
+            "magnetic_field",
+            "gas_pressure",
+        ]
+        if coarse_atmosphere.vector_potential is not None:
+            field_names.append("vector_potential")
+        fields = {
+            name: merge_depth_samples(
+                getattr(coarse_atmosphere, name),
+                fine_fields[name],
+                order,
+            )
+            for name in field_names
+        }
+        atmosphere = replace(
+            coarse_atmosphere,
+            depth_coordinate=depth_grid,
+            geometric_height_m=geometric_height_m,
+            **fields,
+        )
+        trace = RayTraceResult(
+            position_m=position_m,
+            distance_m=distance_m,
+            chart_xy_megameter=chart_xy_megameter,
+            geometric_height_m=geometric_height_m,
+        )
+        return atmosphere, trace
+
+    def sampling_heights(self, depth_grid: torch.Tensor) -> torch.Tensor:
+        return reference_height_grid(
+            self.atmosphere_model, depth_grid, self.reference_log_tau500_bounds,
+            height_sampling=self.height_sampling,
+        )
+
+    def trace_atmosphere(
+        self,
+        coordinates: torch.Tensor,
+        ray_direction: torch.Tensor,
+        depth_grid: torch.Tensor,
+    ) -> tuple[StratifiedAtmosphere, RayTraceResult]:
+        """Trace and optionally refine one batch of atmosphere rays."""
+
+        atmosphere, trace = self.atmosphere_model.trace_rays(
+            coordinates,
+            ray_direction,
+            self.sampling_heights(depth_grid),
+        )
+        if self.depth_refinement.enabled:
+            atmosphere, trace = self._refine_ray_sampling(
+                coordinates,
+                ray_direction,
+                atmosphere,
+                trace,
+            )
+        return atmosphere, trace
+
+    def apply_instrument(
+        self,
+        high_resolution_stokes: torch.Tensor,
+        synthesis_wavelength_angstrom: torch.Tensor,
+        observed_wavelength_angstrom: torch.Tensor,
+        instrument_response: Mapping[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Apply the configured observation operator to synthesized Stokes."""
+
+        if instrument_response is not None and not isinstance(
+            instrument_response,
+            Mapping,
+        ):
+            raise TypeError("instrument_response must be a mapping of keyword tensors.")
+        return self.instrument(
+            high_resolution_stokes,
+            synthesis_wavelength_angstrom,
+            observed_wavelength_angstrom,
+            **({} if instrument_response is None else instrument_response),
+        )
+
+    @staticmethod
+    def _line_of_sight_offset(
+        velocity_field_observer: torch.Tensor,
+        value: torch.Tensor | float,
+        coordinates: torch.Tensor,
+        *,
+        sign: float,
+        name: str,
+    ) -> torch.Tensor:
+        offset = torch.as_tensor(
+            value,
+            dtype=velocity_field_observer.dtype,
+            device=velocity_field_observer.device,
+        )
+        expected_shape = coordinates.shape[:-1]
+        if offset.shape == (*expected_shape, 1):
+            offset = offset.squeeze(-1)
+        if offset.shape != expected_shape:
+            raise ValueError(
+                f"{name} must match the leading coordinate shape {expected_shape}."
+            )
+        if not torch.isfinite(offset).all() or torch.any(
+            offset.abs() >= SPEED_OF_LIGHT
+        ):
+            raise ValueError(f"{name} must be finite and subluminal.")
+        return torch.cat(
+            (
+                velocity_field_observer[..., :2],
+                velocity_field_observer[..., 2:] + sign * offset[..., None, None],
+            ),
+            dim=-1,
+        )
+
+    def _validate_velocity_inputs(
+        self,
+        observer_los_velocity_m_per_s: torch.Tensor | None,
+        removed_solar_los_velocity_m_per_s: torch.Tensor | None,
+    ) -> tuple[bool, bool]:
+        uses_observer_gauge = (
+            self.velocity_synthesis_mode.value == CARRINGTON_OBSERVER_RELATIVE_VELOCITY
+        )
+        uses_registered_gauge = (
+            self.velocity_synthesis_mode.value
+            == CARRINGTON_REGISTERED_RELATIVE_VELOCITY
+        )
+        if uses_observer_gauge and observer_los_velocity_m_per_s is None:
+            raise ValueError(
+                "carrington_observer_relative synthesis requires "
+                "observer_los_velocity_m_per_s from the observation."
+            )
+        if not uses_observer_gauge and observer_los_velocity_m_per_s is not None:
+            raise ValueError(
+                "registered_relative synthesis must not apply a second "
+                "observer LOS velocity correction."
+            )
+        if uses_registered_gauge and removed_solar_los_velocity_m_per_s is None:
+            raise ValueError(
+                "carrington_registered_relative synthesis requires "
+                "removed_solar_los_velocity_m_per_s from the observation."
+            )
+        if not uses_registered_gauge and removed_solar_los_velocity_m_per_s is not None:
+            raise ValueError(
+                "Only carrington_registered_relative synthesis may apply the "
+                "Hinode spectral-registration velocity."
+            )
+        return uses_observer_gauge, uses_registered_gauge
+
+    def synthesize(
+        self,
+        coordinates: torch.Tensor,
+        *,
+        runtime: ForwardRuntime,
+        ray_direction: torch.Tensor | None = None,
+        stokes_basis: torch.Tensor | None = None,
+        observer_los_velocity_m_per_s: torch.Tensor | None = None,
+        removed_solar_los_velocity_m_per_s: torch.Tensor | None = None,
+        randomize_depth: bool = False,
+        depth_grid: torch.Tensor | None = None,
+        return_atmosphere: bool = False,
+        return_details: bool = False,
+        instrument_response: Mapping[str, torch.Tensor] | None = None,
+        magnetic_azimuth_phase_rad: torch.Tensor | float | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate the complete atmosphere-to-observed-Stokes graph."""
+
+        uses_observer_gauge, uses_registered_gauge = self._validate_velocity_inputs(
+            observer_los_velocity_m_per_s,
+            removed_solar_los_velocity_m_per_s,
+        )
+        if ray_direction is None or stokes_basis is None:
+            raise ValueError(
+                "The spherical LTE pipeline requires ray_direction and "
+                "stokes_basis for every synthesis."
+            )
+        if depth_grid is None:
+            depth_grid = self.sample_depth_grid(
+                runtime.coarse_depth_grid,
+                randomize=randomize_depth,
+            )
+        else:
+            depth_grid = torch.as_tensor(
+                depth_grid,
+                dtype=self.atmosphere_model.solar_radius_m.dtype,
+                device=self.atmosphere_model.solar_radius_m.device,
+            )
+            if (
+                depth_grid.ndim != 1
+                or depth_grid.numel() < 2
+                or not torch.all(depth_grid[1:] > depth_grid[:-1])
+            ):
+                raise ValueError(
+                    "An explicit synthesis depth_grid must be ordered and one-dimensional."
+                )
+        sampled_atmosphere, ray_trace = self.trace_atmosphere(
+            coordinates,
+            ray_direction,
+            depth_grid,
+        )
+        uses_carrington_frame = uses_observer_gauge or uses_registered_gauge
+        rotation_velocity_cartesian = (
+            carrington_rotation_velocity_cartesian(
+                ray_trace.position_m,
+                torch,
+                runtime.carrington_angular_velocity_rad_per_s,
+            )
+            if uses_carrington_frame
+            else torch.zeros_like(sampled_atmosphere.velocity_field)
+        )
+        velocity_field_inertial_cartesian = (
+            sampled_atmosphere.velocity_field + rotation_velocity_cartesian
+        )
+        line_of_sight_velocity_correction = torch.as_tensor(
+            runtime.instrument_line_of_sight_velocity_correction_m_per_s
+        ).to(sampled_atmosphere.velocity_field)
+        if line_of_sight_velocity_correction.numel() != 1:
+            raise ValueError(
+                "instrument_line_of_sight_velocity_correction_m_per_s must be scalar."
+            )
+        if not torch.isfinite(line_of_sight_velocity_correction).all() or torch.any(
+            line_of_sight_velocity_correction.abs() >= SPEED_OF_LIGHT
+        ):
+            raise ValueError(
+                "instrument_line_of_sight_velocity_correction_m_per_s must be finite "
+                "and subluminal."
+            )
+        magnetic_field_observer = project_vectors_to_stokes(
+            sampled_atmosphere.magnetic_field,
+            stokes_basis,
+        )
+        magnetic_field_phase_observer = magnetic_field_observer
+        if magnetic_azimuth_phase_rad is not None:
+            magnetic_field_phase_observer = rotate_transverse_stokes_field(
+                magnetic_field_observer,
+                magnetic_azimuth_phase_rad,
+            )
+        magnetic_field_synthesis_observer = (
+            self.instrument.polarization_convention.to_synthesis_frame(
+                magnetic_field_phase_observer
+            )
+        )
+        velocity_field_corotating_observer = project_vectors_to_stokes(
+            sampled_atmosphere.velocity_field,
+            stokes_basis,
+        )
+        velocity_field_inertial_observer = project_vectors_to_stokes(
+            velocity_field_inertial_cartesian,
+            stokes_basis,
+        )
+        # This fitted zero point is positive-redshift LOS velocity.  The third
+        # Stokes-basis component points toward the observer, so apply it with
+        # the opposite sign after projection.  It must never be interpreted as
+        # a radial Cartesian flow or acquire a center-to-limb mu factor.
+        velocity_field_synthesis_observer = torch.cat(
+            (
+                velocity_field_inertial_observer[..., :2],
+                velocity_field_inertial_observer[..., 2:]
+                - line_of_sight_velocity_correction,
+            ),
+            dim=-1,
+        )
+        velocity_field_observer = velocity_field_synthesis_observer
+        if observer_los_velocity_m_per_s is not None:
+            velocity_field_observer = self._line_of_sight_offset(
+                velocity_field_observer,
+                observer_los_velocity_m_per_s,
+                coordinates,
+                sign=-1.0,
+                name="observer_los_velocity_m_per_s",
+            )
+        if removed_solar_los_velocity_m_per_s is not None:
+            velocity_field_observer = self._line_of_sight_offset(
+                velocity_field_observer,
+                removed_solar_los_velocity_m_per_s,
+                coordinates,
+                # Hinode Level-1 registration removed this solar LOS shift.
+                # Reproduce that registered wavelength gauge by subtracting it
+                # from the synthesized toward-observer velocity component.
+                sign=-1.0,
+                name="removed_solar_los_velocity_m_per_s",
+            )
+        if not torch.isfinite(velocity_field_observer).all() or torch.any(
+            velocity_field_observer[..., 2].abs() >= SPEED_OF_LIGHT
+        ):
+            raise FloatingPointError(
+                "The synthesized LOS velocity must remain finite and subluminal."
+            )
+        synthesis_atmosphere = replace(
+            sampled_atmosphere,
+            velocity_field=velocity_field_observer,
+            magnetic_field=magnetic_field_synthesis_observer,
+        )
+        transfer_path = RayDistancePath(ray_trace.distance_m)
+        high_resolution_stokes = self.backend.synthesize(
+            synthesis_atmosphere,
+            runtime.synthesis_wavelength_angstrom,
+            radiance_scale=runtime.radiance_scale,
+            path=transfer_path,
+        )
+        sampled_stokes = self.apply_instrument(
+            high_resolution_stokes,
+            runtime.synthesis_wavelength_angstrom,
+            runtime.observed_wavelength_angstrom,
+            instrument_response,
+        )
+        result: dict[str, Any] = {"stokes": sampled_stokes}
+        if return_atmosphere:
+            result["atmosphere"] = sampled_atmosphere
+        if not return_details:
+            return result
+        spherical_coordinates = cartesian_to_spherical(
+            ray_trace.position_m,
+            torch,
+        )
+        magnetic_field_spherical = project_cartesian_to_spherical(
+            sampled_atmosphere.magnetic_field,
+            spherical_coordinates,
+            torch,
+        )
+        velocity_field_inertial_spherical = project_cartesian_to_spherical(
+            velocity_field_inertial_cartesian,
+            spherical_coordinates,
+            torch,
+        )
+        result.update(
+            {
+                "atmosphere": sampled_atmosphere,
+                "ray_trace": ray_trace,
+                "spherical_coordinates": spherical_coordinates,
+                "magnetic_field_spherical": magnetic_field_spherical,
+                "rotation_velocity_cartesian": rotation_velocity_cartesian,
+                "velocity_field_inertial_cartesian": (
+                    velocity_field_inertial_cartesian
+                ),
+                "velocity_field_inertial_spherical": (
+                    velocity_field_inertial_spherical
+                ),
+                "instrument_line_of_sight_velocity_correction_m_per_s": (
+                    runtime.instrument_line_of_sight_velocity_correction_m_per_s
+                ),
+                "magnetic_field_observer": magnetic_field_observer,
+                "magnetic_field_phase_observer": magnetic_field_phase_observer,
+                "magnetic_field_synthesis_observer": (
+                    magnetic_field_synthesis_observer
+                ),
+                "velocity_field_corotating_observer": (
+                    velocity_field_corotating_observer
+                ),
+                "velocity_field_inertial_observer": (velocity_field_inertial_observer),
+                "velocity_field_synthesis_observer": (
+                    velocity_field_synthesis_observer
+                ),
+                "velocity_field_observer": velocity_field_observer,
+            }
+        )
+        return result
+
+
+__all__ = [
+    "ForwardRuntime",
+    "ForwardSynthesisBackend",
+    "LTEForwardComposition",
+    "LTESynthesisBackend",
+    "rotate_transverse_stokes_field",
+]

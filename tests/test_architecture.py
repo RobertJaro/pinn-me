@@ -20,13 +20,16 @@ def test_repository_contains_only_the_public_yaml_runs():
         for path in PROJECT_ROOT.rglob(pattern)
         if not runtime_roots.intersection(path.relative_to(PROJECT_ROOT).parts)
     )
-    assert yaml_paths == [
-        "configs/hinode_lte_mhs.yaml",
-        "configs/hinode_lte_mhs_extrapolation.yaml",
-        "configs/hmi_aia_dynamic.yaml",
-        "configs/hmi_lte_dynamic.yaml",
-        "configs/hmi_lte_mhs.yaml",
-    ]
+    import yaml
+
+    assert yaml_paths
+    assert all(name.startswith("configs/") for name in yaml_paths)
+    for name in yaml_paths:
+        document = yaml.safe_load((PROJECT_ROOT / name).read_text())
+        if name == "configs/muram/hinode/synthesis.yaml":
+            assert "instrument" in document  # explicit numerical fixture config
+        else:
+            assert document["schema_version"] == 5, name
 
 
 def test_source_tree_contains_only_the_current_package():
@@ -39,7 +42,12 @@ def test_source_tree_contains_only_the_current_package():
 
 
 def test_preprocessing_lives_in_the_installed_package():
-    assert not list((PROJECT_ROOT / "scripts").rglob("*.py"))
+    # Offline profiling/check scripts are explicit developer tools. Production
+    # download and preprocessing remain importable installed-package functions.
+    for script in (PROJECT_ROOT / "scripts").rglob("*.py"):
+        assert script.relative_to(PROJECT_ROOT / "scripts").parts[0] in {
+            "diagnostics", "muram_hinode", "hmi",
+        }
     for name in ("hmi", "aia"):
         module = SOURCE_ROOT / "preprocess" / f"{name}.py"
         assert module.is_file()
@@ -91,6 +99,7 @@ def test_radiative_transfer_has_no_application_layer_dependencies():
             "prom3theus.instruments",
             "prom3theus.observations",
             "prom3theus.training",
+            "prom3theus.validation",
             "pytorch_lightning",
             "astropy",
             "sunpy",
@@ -110,6 +119,7 @@ def test_inversion_has_no_training_or_application_dependencies():
             "prom3theus.config",
             "prom3theus.diagnostics",
             "prom3theus.training",
+            "prom3theus.validation",
             "pytorch_lightning",
         },
     )
@@ -134,16 +144,17 @@ def test_packaging_exposes_one_new_command_and_only_the_new_namespace():
             "data/hinode_sp/*.json",
             "data/hmi_stokes/*.json",
             "sets/euv/aia_euv_v1/*.json",
+            "sets/plasma/plasma_v1/*.json",
         ]
     }
-    assert project["tool"]["setuptools"]["data-files"] == {
-        "share/prom3theus/configs": [
-            "configs/hinode_lte_mhs.yaml",
-            "configs/hinode_lte_mhs_extrapolation.yaml",
-            "configs/hmi_lte_mhs.yaml",
-            "configs/hmi_lte_dynamic.yaml",
-            "configs/hmi_aia_dynamic.yaml",
-        ]
+    config_files = project["tool"]["setuptools"]["data-files"]
+    assert set(config_files) == {
+        "share/prom3theus/configs/hinode", "share/prom3theus/configs/sdo",
+        "share/prom3theus/configs/muram/hinode", "share/prom3theus/configs/muram/sdo",
+    }
+    assert {name for names in config_files.values() for name in names} == {
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in (PROJECT_ROOT / "configs").rglob("*.yaml")
     }
     assert (
         "sunpy[map]>=5" in project["project"]["optional-dependencies"]["observations"]
@@ -187,11 +198,29 @@ def test_retired_lifecycle_modules_cannot_return():
         "training/multimodal_callbacks.py",
         "training/batch.py",
         "artifacts/model.py",
+        "rt/synthesis.py",
+        "rt/transfer.py",
+        "inversion/forward.py",
+        "inversion/radiation.py",
+        "inversion/rt_collocation.py",
+        "rt/radiation_field.py",
+        "rt/radiation_geometry.py",
+        "training/radiation.py",
+        "application/radiation_support.py",
+        "config/radiation_schema.py",
+        "diagnostics/radiation.py",
     )
     assert all(not (SOURCE_ROOT / name).exists() for name in retired)
     forbidden = {"prom3theus." + name[:-3].replace("/", ".") for name in retired}
     for package in ("application", "training", "artifacts", "cli"):
         _assert_dependency_boundary(package, forbidden)
+
+
+def test_reference_solvers_are_explicit_offline_validation_tools():
+    for module in ("reference_synthesis", "reference_transfer", "reference_forward"):
+        assert (SOURCE_ROOT / "validation" / f"{module}.py").is_file()
+    for package in ("rt", "inversion", "training", "components", "artifacts"):
+        _assert_dependency_boundary(package, {"prom3theus.validation"})
 
 
 def test_aia_preparation_is_independent_of_optimization():

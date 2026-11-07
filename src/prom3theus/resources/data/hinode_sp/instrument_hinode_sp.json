@@ -43,6 +43,6 @@
   },
   "excluded_effects": {
     "undispersed_stray_light": "Not modeled; Lites et al. report an observational upper limit of approximately 3-4 percent of continuum, not a measured kernel or fixed fraction",
-    "spatial_psf": "Not modeled. No web-verifiable Hinode/SP spatial kernel is bundled, and physical Solar-X/Solar-Y convolution requires a per-pixel detector-to-Mm basis with explicit boundary handling."
+    "spatial_psf": "Not modeled. No web-verifiable Hinode/SP spatial kernel is bundled, and physical Solar-X/Solar-Y convolution requires a per-pixel detector-to-megameter basis with explicit boundary handling."
   }
 }

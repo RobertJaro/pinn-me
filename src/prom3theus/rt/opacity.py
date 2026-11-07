@@ -25,6 +25,7 @@ from prom3theus.core import (
     SPEED_OF_LIGHT,
 )
 from prom3theus.resources import verify_manifest_resource
+from prom3theus.core.validation import require_tensor
 from ._interpolation import clamped_catmull_rom, uniform_axis_coordinate
 from .atomic import AtomicDatabase, SpectralLine
 from .wavelength import air_to_vacuum_angstrom
@@ -336,15 +337,9 @@ class ContinuumOpacity(nn.Module):
                 "temperature and gas_pressure must use one dtype and device"
             )
         temperature, gas_pressure = torch.broadcast_tensors(temperature, gas_pressure)
-        if (
-            not torch.isfinite(temperature).all()
-            or not torch.isfinite(gas_pressure).all()
-            or torch.any(temperature <= 0)
-            or torch.any(gas_pressure <= 0)
-        ):
-            raise ValueError(
-                "temperature and gas_pressure must be finite and strictly positive"
-            )
+        require_tensor(torch.isfinite(temperature).all() & torch.isfinite(gas_pressure).all()
+                       & (temperature > 0).all() & (gas_pressure > 0).all(),
+                       "temperature and gas_pressure must be finite and strictly positive")
         log_temperature = torch.log10(temperature)
         log_pressure = torch.log10(gas_pressure)
         t_axis = self.stic_log_temperature.to(temperature)
@@ -451,21 +446,12 @@ class ContinuumOpacity(nn.Module):
                 (wavelength >= wavelength.new_tensor(lower) - tolerance)
                 & (wavelength <= wavelength.new_tensor(upper) + tolerance)
             )
-        if not torch.all(valid):
-            invalid = wavelength[~valid].detach().cpu().tolist()
-            domains = ", ".join(
-                (
-                    f"{lower:g} Angstrom"
-                    if lower == upper
-                    else f"{lower:g}--{upper:g} Angstrom"
-                )
-                for lower, upper in self.validated_wavelength_domains_angstrom
-            )
-            raise ValueError(
-                f"STiC total continuum is only validated within {domains}; "
-                f"invalid values: {invalid}. Supply a checksum-verified STiC "
-                "resource generated for the requested spectral window."
-            )
+        domains = ", ".join(
+            f"{lower:g} Angstrom" if lower == upper else f"{lower:g}--{upper:g} Angstrom"
+            for lower, upper in self.validated_wavelength_domains_angstrom)
+        require_tensor(valid.all(),
+            f"STiC total continuum is only validated within {domains}. Supply a "
+            "checksum-verified STiC resource generated for the requested spectral window.")
 
     def _stic_component(
         self,
@@ -899,6 +885,7 @@ def planck_lambda(
     wavelength_vacuum_angstrom,
     *,
     radiance_scale: torch.Tensor | float | None = None,
+    paired_wavelengths: bool = False,
 ) -> torch.Tensor:
     """Planck radiance, optionally normalized directly in log space.
 
@@ -906,37 +893,41 @@ def planck_lambda(
     W m^-3 sr^-1. With a positive scalar scale, return the dimensionless ratio
     ``B_lambda / radiance_scale`` without ever materializing the large physical
     radiance in the autograd graph. The result has shape
-    ``temperature.shape + (W,)``.
+    ``temperature.shape + (W,)``. With ``paired_wavelengths=True``, wavelengths
+    must have exactly the temperature shape and the result has that same shape.
     """
 
     if temperature.dtype not in (torch.float32, torch.float64):
         raise TypeError("Planck radiance supports float32 and float64 tensors only")
-    if not torch.isfinite(temperature).all() or torch.any(temperature <= 0):
-        raise ValueError("temperature must be finite and strictly positive")
+    require_tensor(torch.isfinite(temperature).all() & (temperature > 0).all(),
+                   "temperature must be finite and strictly positive")
     wavelength = torch.as_tensor(
         wavelength_vacuum_angstrom,
         dtype=temperature.dtype,
         device=temperature.device,
     )
-    if wavelength.ndim == 0:
+    if wavelength.ndim == 0 and not paired_wavelengths:
         wavelength = wavelength[None]
-    if (
-        wavelength.ndim != 1
-        or not torch.isfinite(wavelength).all()
-        or torch.any(wavelength <= 0)
-    ):
+    if (wavelength.shape != temperature.shape if paired_wavelengths else wavelength.ndim != 1):
         raise ValueError(
-            "wavelength_vacuum_angstrom must be finite, positive, and one-dimensional"
+            "wavelength_vacuum_angstrom must be finite, positive, and "
+            "match temperature for paired queries or be one-dimensional for blocks"
         )
-    wavelength_m = wavelength * 1.0e-10
-    exponent = HC_OVER_K / temperature[..., None] / wavelength_m
+    require_tensor(torch.isfinite(wavelength).all() & (wavelength > 0).all(),
+                   "wavelength_vacuum_angstrom must be finite and positive")
+    # Micrometres and a photospheric radiance unit keep the logarithms O(1).
+    # SI wavelengths would cancel terms ~70 and ~-36 before normalizing,
+    # needlessly losing several float32 digits in both spectra and gradients.
+    wavelength_um = wavelength * 1.0e-4
+    temperature_for_query = temperature if paired_wavelengths else temperature[..., None]
+    exponent = (HC_OVER_K * 1.0e6) / temperature_for_query / wavelength_um
     # Evaluate the lambda^-5 prefactor and Bose denominator in log space.
     # Direct float32 division by lambda^5 has a finite forward value near
     # 630 nm but an overflowing backward pass because lambda^10 underflows.
     log_expm1 = exponent + torch.log(-torch.expm1(-exponent))
     log_radiance = (
-        temperature.new_tensor(math.log(2.0 * H_PLANCK * SPEED_OF_LIGHT**2))
-        - 5.0 * torch.log(wavelength_m)
+        temperature.new_tensor(math.log(2.0 * H_PLANCK * SPEED_OF_LIGHT**2 * 1.0e17))
+        - 5.0 * torch.log(wavelength_um)
         - log_expm1
     )
     if radiance_scale is not None:
@@ -951,10 +942,17 @@ def planck_lambda(
         )
         if scale.numel() != 1:
             raise ValueError("radiance_scale must be one finite positive scalar")
-        if not torch.isfinite(scale).all() or torch.any(scale <= 0):
-            raise ValueError("radiance_scale must be one finite positive scalar")
-        log_radiance = log_radiance - torch.log(scale)
-    return torch.exp(log_radiance)
+        require_tensor(torch.isfinite(scale).all() & (scale > 0).all(),
+                       "radiance_scale must be one finite positive scalar")
+        relative_scale = scale / 1.0e13
+        # Preserve the public positive-scale domain even if the conversion to
+        # reference units underflows for an unusually small requested scale.
+        usable_relative = relative_scale > 0
+        safe_relative = torch.where(usable_relative, relative_scale, torch.ones_like(relative_scale))
+        log_scale = torch.where(usable_relative, torch.log(safe_relative),
+                                torch.log(scale) - math.log(1.0e13))
+        return torch.exp(log_radiance - log_scale)
+    return torch.exp(log_radiance + math.log(1.0e13))
 
 
 def integrated_line_opacity(
@@ -982,16 +980,10 @@ def integrated_line_opacity(
     lower_population, temperature = torch.broadcast_tensors(
         lower_population, temperature
     )
-    if (
-        not torch.isfinite(temperature).all()
-        or not torch.isfinite(lower_population).all()
-        or torch.any(temperature <= 0)
-        or torch.any(lower_population < 0)
-    ):
-        raise ValueError(
-            "temperature must be finite and positive and lower_population must "
-            "be finite and non-negative"
-        )
+    require_tensor(torch.isfinite(temperature).all() & torch.isfinite(lower_population).all()
+                   & (temperature > 0).all() & (lower_population >= 0).all(),
+                   "temperature must be finite and positive and lower_population must "
+                   "be finite and non-negative")
     if rest_frequency_hz is None:
         wavelength_air = temperature.new_tensor(line.wavelength_air_angstrom)
         wavelength_vacuum = air_to_vacuum_angstrom(wavelength_air)
@@ -1002,12 +994,10 @@ def integrated_line_opacity(
             dtype=temperature.dtype,
             device=temperature.device,
         )
-    if (
-        rest_frequency.numel() != 1
-        or not torch.isfinite(rest_frequency).all()
-        or torch.any(rest_frequency <= 0)
-    ):
+    if rest_frequency.numel() != 1:
         raise ValueError("rest_frequency_hz must be one finite positive scalar")
+    require_tensor(torch.isfinite(rest_frequency).all() & (rest_frequency > 0).all(),
+                   "rest_frequency_hz must be one finite positive scalar")
     photon_temperature = H_PLANCK * rest_frequency / K_BOLTZMANN
     stimulated_emission = -torch.expm1(-photon_temperature / temperature)
     coefficient = ELEMENTARY_CHARGE**2 / (4.0 * EPSILON_0 * M_ELECTRON * SPEED_OF_LIGHT)
@@ -1036,16 +1026,10 @@ def doppler_velocity(
         )
     if not math.isfinite(float(atomic_mass_u)) or atomic_mass_u <= 0:
         raise ValueError("atomic_mass_u must be finite and positive")
-    if (
-        not torch.isfinite(temperature).all()
-        or not torch.isfinite(microturbulence_m_s).all()
-        or torch.any(temperature <= 0)
-        or torch.any(microturbulence_m_s < 0)
-    ):
-        raise ValueError(
-            "temperature must be finite and positive and microturbulence must "
-            "be finite and non-negative"
-        )
+    require_tensor(torch.isfinite(temperature).all() & torch.isfinite(microturbulence_m_s).all()
+                   & (temperature > 0).all() & (microturbulence_m_s >= 0).all(),
+                   "temperature must be finite and positive and microturbulence must "
+                   "be finite and non-negative")
     mass = temperature.new_tensor(atomic_mass_u * ATOMIC_MASS_UNIT)
     return torch.sqrt(
         2.0 * K_BOLTZMANN * temperature / mass + microturbulence_m_s.square()
@@ -1095,18 +1079,11 @@ def damping_rate(
         raise TypeError(
             "temperature and perturber densities must use one dtype and device"
         )
-    if (
-        not torch.isfinite(temperature).all()
-        or not torch.isfinite(electron_density).all()
-        or not torch.isfinite(hydrogen_neutral).all()
-        or torch.any(temperature <= 0)
-        or torch.any(electron_density < 0)
-        or torch.any(hydrogen_neutral < 0)
-    ):
-        raise ValueError(
-            "temperature must be finite and positive and number densities must "
-            "be finite and non-negative"
-        )
+    require_tensor(torch.isfinite(temperature).all() & torch.isfinite(electron_density).all()
+                   & torch.isfinite(hydrogen_neutral).all() & (temperature > 0).all()
+                   & (electron_density >= 0).all() & (hydrogen_neutral >= 0).all(),
+                   "temperature must be finite and positive and number densities must "
+                   "be finite and non-negative")
     if line.element != "Fe":
         raise ValueError(
             "The current ABO damping implementation supports Fe lines only"

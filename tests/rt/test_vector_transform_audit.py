@@ -35,7 +35,7 @@ class AnalyticCartesianHead(nn.Module):
         )
 
     def forward(self, inputs):
-        # Tests use a common spatial scale of 10 Mm, centre [2,-3] Mm,
+        # Tests use a common spatial scale of 10 megameter, centre [2,-3] megameter,
         # and time centre 5 h with scale 2 h.
         xy = inputs[:, :2] * 10 + inputs.new_tensor([2.0, -3.0])
         local = torch.cat((xy / 696, torch.ones_like(xy[:, :1])), -1)
@@ -61,11 +61,11 @@ def model():
         )
     )
     model = StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(50.0, -0.1),
+        shell_height_bounds_megameter=(50.0, -0.1),
         time_dependent=True,
         uniform_spatial_scaling=True,
         height_input_scale_m=1e7,
-        spatial_coordinate_center_mm=(2.0, -3.0),
+        spatial_coordinate_center_megameter=(2.0, -3.0),
         time_coordinate_center_hours=5.0,
         time_coordinate_scale_hours=2.0,
         scene_geometry_config={"solar_radius_m": 696e6, "scene_basis": basis},

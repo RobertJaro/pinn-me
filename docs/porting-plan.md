@@ -37,12 +37,11 @@ never pickles Python classes.
 
 ## Configuration reset
 
-Ship four explicit LTE workflows:
+The LTE workflows are grouped by observation source:
 
-- `configs/hinode_lte_mhs.yaml`
-- `configs/hinode_lte_mhs_extrapolation.yaml`
-- `configs/hmi_lte_mhs.yaml`
-- `configs/hmi_lte_dynamic.yaml`
+- `configs/hinode/mhs.yaml`
+- `configs/hinode/mhs_extrapolation.yaml`
+- `configs/sdo/hmi_dynamic.yaml`
 
 The Hinode file preserves the full-resolution static MHS run for raster
 `20110214_000004`, translated from its earlier operational configuration. The

@@ -5,7 +5,7 @@
     "hinode_sp",
     "hmi_stokes"
   ],
-  "source_manifest_sha256": "f4246dc138bd5be5b273e591091fe2d2773e85340cb78b5ab35056ef6f908c9a",
+  "source_manifest_sha256": "34ff52e0e226017e306c5d46f14d116f993652530bfec82d1e8b42cf75fe99dc",
   "runtime_files": [
     "common/abundances.json",
     "common/chianti_thermodynamic_table.json",

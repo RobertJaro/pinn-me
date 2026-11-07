@@ -19,7 +19,7 @@ def _model(reference=_OMITTED, *, dynamic=False, warp=False):
     options = {} if reference is _OMITTED else {"magnetic_reference_height_megameter": reference}
     torch.manual_seed(73)
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(1.5, -0.1),
         time_dependent=dynamic,
         scene_geometry_config={"solar_radius_m": 695_700_000.0, "scene_basis": torch.eye(3)},
         model_config={"type": "siren", "dim": 12, "n_layers": 2,
@@ -71,7 +71,7 @@ def test_all_query_paths_use_the_same_magnetic_reference():
     # still equal reference-height queries at its actual angular coordinates.
     oblique_ray = radial_ray + torch.tensor([.08, -.02, 0.], dtype=coords.dtype)
     oblique, geometry = model.trace_rays(coords, oblique_ray, heights)
-    query = torch.cat((geometry.chart_xy_mm, coords[:, None, 2:3].expand(-1, 4, -1)), -1)
+    query = torch.cat((geometry.chart_xy_megameter, coords[:, None, 2:3].expand(-1, 4, -1)), -1)
     expected = model.evaluate_chart_height_points(query, torch.full((2, 4), .15e6, dtype=coords.dtype))
     torch.testing.assert_close(oblique.magnetic_field, expected["magnetic_field"], atol=1e-10, rtol=1e-10)
 
@@ -117,10 +117,12 @@ def test_constructor_rejects_invalid_magnetic_reference(value, error):
         _model(value)
 
 
-def test_config_wires_reference_and_keeps_legacy_constructor_options_unchanged():
-    config = load_config(ROOT / "configs/hmi_local_minimal.yaml")
+def test_config_wires_reference_and_preserves_default_atmosphere_options():
+    config = load_config(ROOT / "configs/sdo/hmi_dynamic.yaml")
     document = config.to_dict()
     magnetic = document["atmosphere"]["parameters"]["magnetic_field"]
+    magnetic["representation"] = "direct"
+    document["physics"]["equations"]["vector_potential_gauge"].update(enabled=False, weight=0.)
     magnetic.pop("reference_height_megameter", None)
     absent = atmosphere_options(parse_config(document, base_directory=ROOT).atmosphere)
     magnetic["reference_height_megameter"] = None
@@ -131,7 +133,7 @@ def test_config_wires_reference_and_keeps_legacy_constructor_options_unchanged()
     fixed = parse_config(document, base_directory=ROOT)
     assert atmosphere_options(fixed.atmosphere)["magnetic_reference_height_megameter"] == .15
     assert fixed.to_dict()["atmosphere"]["parameters"]["magnetic_field"]["reference_height_megameter"] == .15
-    magnetic["reference_height_megameter"] = 1.6
+    magnetic["reference_height_megameter"] = config.atmosphere.geometry.outer_height_megameter + 1.
     with pytest.raises(ConfigError, match="reference_height_megameter.*shell"):
         parse_config(document, base_directory=ROOT)
 

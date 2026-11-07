@@ -872,7 +872,7 @@ def _generate_stic_table(payloads: dict[str, bytes]) -> dict:
     # logit margin peaks at log10(T) = 4.00 and turns negative by 4.10; a
     # higher ceiling makes the hybrid EoS unconstructible.  The pressure
     # ceiling carries no such coupling -- raising it only extends the cool,
-    # dense corner -- so it reaches 10 MPa to cover a shell floor near -2 Mm
+    # dense corner -- so it reaches 10 MPa to cover a shell floor near -2 megameter
     # without relying on the bounded pressure continuation.
     log_temperature = np.linspace(3.4, 4.0, 129, dtype=np.float64)
     log_pressure = np.linspace(-1.5, 7.0, 196, dtype=np.float64)

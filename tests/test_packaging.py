@@ -15,11 +15,19 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_CONFIGS = {
-    "hmi_aia_dynamic.yaml",
-    "hinode_lte_mhs.yaml",
-    "hinode_lte_mhs_extrapolation.yaml",
-    "hmi_lte_mhs.yaml",
-    "hmi_lte_dynamic.yaml",
+    "sdo/hmi_aia_dynamic.yaml",
+    "hinode/mhs.yaml",
+    "hinode/mhs_extrapolation.yaml",
+    "sdo/hmi_dynamic.yaml",
+    "sdo/hmi_aia_dynamic_energy.yaml",
+    "sdo/hmi_aia_potential.yaml",
+    "sdo/hmi_aia_vector_potential.yaml",
+    "muram/sdo/stokes_only.yaml",
+    "muram/sdo/joint.yaml",
+    "muram/sdo/mhs.yaml",
+    "muram/hinode/mhs.yaml",
+    "muram/hinode/stokes_only.yaml",
+    "muram/hinode/synthesis.yaml",
 }
 RESOURCE_FILES = {
     "bundle.json",
@@ -41,6 +49,7 @@ AIA_RESOURCE_FILES = {
     "manifest.json",
     "sources.json",
 }
+PLASMA_RESOURCE_FILES = {"coronal_cooling_v1.json", "manifest.json", "sources.json"}
 
 
 @pytest.fixture(scope="module")
@@ -60,12 +69,9 @@ def built_distributions(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path,
     subprocess.run(
         [
             sys.executable,
-            "-m",
-            "build",
-            "--no-isolation",
-            "--sdist",
-            "--wheel",
-            "--outdir",
+            "-c",
+            "import sys; from setuptools.build_meta import build_sdist, build_wheel; "
+            "output = sys.argv[1]; build_sdist(output); build_wheel(output)",
             str(output),
         ],
         cwd=root,
@@ -109,6 +115,12 @@ def test_wheel_contains_only_the_public_package_configs_and_metadata(
         for path in (PROJECT_ROOT / "src" / "prom3theus").rglob("*.py")
     }
     assert python_members == source_python
+    assert "rt/local_coefficients.py" in python_members
+    assert "rt/formal_transfer.py" in python_members
+    assert "inversion/lte.py" in python_members
+    assert "validation/reference_synthesis.py" in python_members
+    assert "validation/reference_transfer.py" in python_members
+    assert not {"rt/synthesis.py", "rt/transfer.py", "inversion/forward.py"} & python_members
 
     resource_prefix = "prom3theus/resources/data/"
     resource_members = {
@@ -126,8 +138,11 @@ def test_wheel_contains_only_the_public_package_configs_and_metadata(
     }
     assert aia_resource_members == AIA_RESOURCE_FILES
 
+    plasma_prefix = "prom3theus/resources/sets/plasma/plasma_v1/"
+    assert {name.removeprefix(plasma_prefix) for name in names if name.startswith(plasma_prefix)} == PLASMA_RESOURCE_FILES
+
     config_members = {
-        Path(name).name
+        name.split(".data/data/share/prom3theus/configs/", 1)[1]
         for name in names
         if ".data/data/share/prom3theus/configs/" in name
     }
@@ -175,27 +190,18 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         name.removeprefix("docs/")
         for name in members
         if name.startswith("docs/") and name.endswith(".md")
-    } == {path.name for path in (PROJECT_ROOT / "docs").glob("*.md")}
+    } == {path.relative_to(PROJECT_ROOT / "docs").as_posix()
+          for path in (PROJECT_ROOT / "docs").rglob("*.md")}
     assert {
         name.removeprefix("scripts/")
         for name in members
         if name.startswith("scripts/") and name.endswith(".sh")
-    } == {
-        "hinode/load_resources.sh",
-        "hinode/run.sh",
-        "hmi/download.sh",
-        "hmi/prepare.sh",
-        "hmi/run.sh",
-        "resources/rebuild.sh",
-        "sdo/download.sh",
-        "sdo/prepare.sh",
-        "sdo/run.sh",
-    }
+    } == {path.relative_to(PROJECT_ROOT / "scripts").as_posix() for path in (PROJECT_ROOT / "scripts").rglob("*.sh")}
     assert {
         name.removeprefix("scripts/")
         for name in members
         if name.startswith("scripts/") and name.endswith(".py")
-    } == set()
+    } == {path.relative_to(PROJECT_ROOT / "scripts").as_posix() for path in (PROJECT_ROOT / "scripts").rglob("*.py")}
     assert not any(
         name.startswith("scripts/") and name.endswith(".json") for name in members
     )
@@ -237,6 +243,11 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         if name.startswith("src/prom3theus/resources/sets/euv/aia_euv_v1/")
         and name.endswith(".json")
     } == AIA_RESOURCE_FILES
+    assert {
+        name.removeprefix("src/prom3theus/resources/sets/plasma/plasma_v1/")
+        for name in members
+        if name.startswith("src/prom3theus/resources/sets/plasma/plasma_v1/") and name.endswith(".json")
+    } == PLASMA_RESOURCE_FILES
 
 
 def test_wheel_runs_from_an_isolated_installation(
@@ -285,16 +296,30 @@ for module in [prom3theus, *modules]:
     assert Path(module.__file__).resolve().is_relative_to(installation)
     assert all(hasattr(module, name) for name in getattr(module, "__all__", ()))
 configs = installation / "share" / "prom3theus" / "configs"
-assert {path.name for path in configs.glob("*.yaml")} == {
-    "hinode_lte_mhs.yaml",
-    "hinode_lte_mhs_extrapolation.yaml",
-    "hmi_aia_dynamic.yaml",
-    "hmi_lte_mhs.yaml",
-    "hmi_lte_dynamic.yaml",
+assert {path.relative_to(configs).as_posix() for path in configs.rglob("*.yaml")} == {
+    "hinode/mhs.yaml",
+    "hinode/mhs_extrapolation.yaml",
+    "sdo/hmi_aia_dynamic.yaml",
+    "sdo/hmi_dynamic.yaml",
+    "sdo/hmi_aia_dynamic_energy.yaml",
+    "sdo/hmi_aia_potential.yaml",
+    "sdo/hmi_aia_vector_potential.yaml",
+    "muram/sdo/stokes_only.yaml",
+    "muram/sdo/joint.yaml",
+    "muram/sdo/mhs.yaml",
+    "muram/hinode/mhs.yaml",
+    "muram/hinode/stokes_only.yaml",
+    "muram/hinode/synthesis.yaml",
 }
-assert {load_config(path).solver.kind for path in configs.glob("*.yaml")} == {
-    "joint",
-}
+from prom3theus.muram import config as muram_config_registration
+for path in configs.rglob("*.yaml"):
+    if path.name == "synthesis.yaml":
+        continue
+    config = load_config(path)
+    assert config.schema_version == 5 and config.solver.kind == "joint"
+import prom3theus.rt as rt
+assert not hasattr(rt, "LTESynthesizer")
+from prom3theus.validation.reference_synthesis import LTESynthesizer
 resources = validate_resource_bundle()
 assert resources["supported_instruments"] == ["hinode_sp", "hmi_stokes"]
 print(prom3theus.__version__)

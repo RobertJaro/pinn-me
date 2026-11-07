@@ -4,6 +4,18 @@ from unittest.mock import Mock
 from prom3theus.application.joint_training import JointTrainingDiagnostics
 
 
+def test_fixed_epoch_validation_runs_only_at_epoch_end():
+    callback = JointTrainingDiagnostics(None)
+    callback._evaluate = Mock()
+    trainer = SimpleNamespace(global_step=1000)
+    module = SimpleNamespace(settings=SimpleNamespace(
+        steps_per_epoch=1000, validation_every_n_steps=10))
+    callback.on_train_batch_end(trainer, module, None, None, 999)
+    callback._evaluate.assert_not_called()
+    callback.on_train_epoch_end(trainer, module)
+    callback._evaluate.assert_called_once_with(trainer, module)
+
+
 def test_diagnostics_skip_startup_and_keep_interval_and_final_evaluation():
     callback = JointTrainingDiagnostics(None)
     callback._evaluate = Mock()

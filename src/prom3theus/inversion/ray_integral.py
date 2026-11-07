@@ -149,11 +149,11 @@ class RayIntegralForwardComposition:
     def _outer_height_m(self) -> float:
         try:
             bounds = tuple(
-                float(value) for value in self.atmosphere_model.shell_height_bounds_Mm
+                float(value) for value in self.atmosphere_model.shell_height_bounds_megameter
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError(
-                "atmosphere_model must declare shell_height_bounds_Mm=[outer, inner]."
+                "atmosphere_model must declare shell_height_bounds_megameter=[outer, inner]."
             ) from error
         if (
             len(bounds) != 2
@@ -161,7 +161,7 @@ class RayIntegralForwardComposition:
             or not bounds[0] > 0 > bounds[1]
         ):
             raise ValueError(
-                "shell_height_bounds_Mm must contain finite [outer, inner] bounds "
+                "shell_height_bounds_megameter must contain finite [outer, inner] bounds "
                 "that straddle the photosphere."
             )
         outer_height_m = bounds[0] * 1.0e6

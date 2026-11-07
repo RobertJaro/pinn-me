@@ -243,7 +243,11 @@ def _publication_path(path):
 def restore_or_create_data_module(
     path, build, *, rebuild=False, timeout=1800, finalize=None
 ):
-    """Reuse existing data; optional finalize prepares only missing derived pools."""
+    """Rank zero builds/finalizes once; workers reload its published snapshot.
+
+    The status broadcast completes only after the atomic snapshot publication.
+    Worker ranks never call either callback, including during explicit rebuilds.
+    """
     path = Path(path).resolve()
     distributed = (
         torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -268,15 +272,18 @@ def restore_or_create_data_module(
             with path.with_suffix(".lock").open("w") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 if rebuild or not path.is_file():
+                    print(f"Data module [rank 0]: constructing and publishing {path}", flush=True)
                     module = build()
                     if finalize is not None:
                         finalize(module)
                     save_data_module(module, path)
+                    module = load_data_module(path)
                 else:
+                    print(f"Data module [rank 0]: restoring {path}", flush=True)
                     module = load_data_module(path)
                     if finalize is not None and finalize(module):
                         save_data_module(module, path)
-                module = load_data_module(path)
+                        module = load_data_module(path)
             status = {"generation": module.generation, "error": None}
         except BaseException as error:
             status = {"generation": None, "error": f"{type(error).__name__}: {error}"}
@@ -291,6 +298,7 @@ def restore_or_create_data_module(
             _publish_status(status_path, status)
         return module
     if distributed:
+        print(f"Data module [rank {rank}]: waiting for rank 0 publication", flush=True)
         message = [None]
         torch.distributed.broadcast_object_list(message, src=0)
         status = message[0]
@@ -307,6 +315,7 @@ def restore_or_create_data_module(
             time.sleep(0.1)
     if status is not None and status["error"]:
         raise RuntimeError(f"Data preparation failed on rank zero: {status['error']}")
+    print(f"Data module [rank {rank}]: reloading rank 0 snapshot from {path}", flush=True)
     module = load_data_module(path)
     if status is not None and module.generation != status["generation"]:
         raise RuntimeError("Data generation changed during distributed startup")

@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 import math
 from numbers import Integral, Real
 
 import torch
 from torch import nn
+
+
+@contextmanager
+def temporary_eval_mode(*modules: nn.Module | None):
+    """Evaluate owned and explicitly shared modules, restoring every prior mode."""
+    roots = tuple(module for module in modules if module is not None)
+    states = {child: child.training for root in roots for child in root.modules()}
+    try:
+        for root in roots:
+            root.eval()
+        yield
+    finally:
+        for child, training in states.items():
+            child.training = training
 
 
 def _per_dimension(value, in_dim: int, name: str, cast):
@@ -126,8 +141,76 @@ class FourierEncoding(nn.Module):
         return torch.cat(features, dim=-1)
 
 
+class IsotropicPositionalEncoding(nn.Module):
+    """Fixed random spatial directions with logarithmically spaced frequencies.
+
+    SPINNME/SuNeRF convention: bounds are base-two exponents, phases include
+    pi, and nonspatial coordinates have separate frequency ladders. Pack all
+    blocks into one projection so forward has no coordinate/frequency loop.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        num_frequencies=32,
+        min_frequencies=0.,
+        max_frequencies=8.,
+        spatial_dim: int = 3,
+        include_input: bool = False,
+        seed: int = 0,
+    ):
+        super().__init__()
+        if (type(in_dim) is not int or type(spatial_dim) is not int
+                or not 1 <= spatial_dim <= in_dim):
+            raise ValueError("spatial_dim must be an integer between 1 and in_dim")
+        if type(include_input) is not bool or type(seed) is not int:
+            raise TypeError("include_input must be boolean and seed must be an integer")
+        blocks = 1 + in_dim - spatial_dim
+        counts = _per_dimension(num_frequencies, blocks, "num_frequencies", _frequency_count)
+        minima = _per_dimension(min_frequencies, blocks, "min_frequencies", _finite_frequency)
+        maxima = _per_dimension(max_frequencies, blocks, "max_frequencies", _finite_frequency)
+        if any(count < 1 for count in counts) or any(hi < lo for lo, hi in zip(minima, maxima)):
+            raise ValueError("Frequency counts must be positive and exponent bounds increasing")
+        ladders = [
+            torch.pi * 2 ** torch.linspace(lo, hi, count, dtype=torch.float32)
+            for count, lo, hi in zip(counts, minima, maxima)
+        ]
+        directions = torch.nn.functional.normalize(
+            torch.randn(counts[0], spatial_dim, dtype=torch.float32,
+                        generator=torch.Generator().manual_seed(seed)),
+            dim=-1,
+        )
+        projection = torch.zeros(sum(counts), in_dim, dtype=torch.float32)
+        projection[:counts[0], :spatial_dim] = ladders[0][:, None] * directions
+        start = counts[0]
+        for axis, ladder in enumerate(ladders[1:], spatial_dim):
+            projection[start:start + len(ladder), axis] = ladder
+            start += len(ladder)
+        if not torch.isfinite(projection).all():
+            raise ValueError("Frequency exponents exceed the supported floating-point range")
+        self.register_buffer("B", projection)
+        self.in_dim = in_dim
+        self.include_input = include_input
+        self.out_dim = 2 * sum(counts) + (in_dim if include_input else 0)
+        # Interleave each block's sin/cos features, matching SPINNME exactly.
+        starts = torch.tensor([0, *counts[:-1]]).cumsum(0).tolist()
+        order = [
+            index
+            for start, count in zip(starts, counts)
+            for offset in (0, sum(counts))
+            for index in range(start + offset, start + offset + count)
+        ]
+        self.register_buffer("feature_order", torch.tensor(order), persistent=False)
+
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        phase = torch.nn.functional.linear(coordinates, self.B)
+        features = torch.cat((phase.sin(), phase.cos()), dim=-1)
+        features = features.index_select(-1, self.feature_order)
+        return torch.cat((coordinates, features), dim=-1) if self.include_input else features
+
+
 class MLPModel(nn.Module):
-    """Coordinate MLP with an explicit ``fourier`` or ``identity`` encoding."""
+    """Coordinate MLP with fixed positional features or identity inputs."""
 
     def __init__(
         self,
@@ -165,6 +248,9 @@ class MLPModel(nn.Module):
         if encoding_type == "fourier":
             self.encoding = FourierEncoding(in_dim, **config)
             encoded_dim = self.encoding.out_dim
+        elif encoding_type == "positional_isotropic":
+            self.encoding = IsotropicPositionalEncoding(in_dim, **config)
+            encoded_dim = self.encoding.out_dim
         elif encoding_type == "identity":
             if config:
                 raise TypeError(
@@ -174,7 +260,7 @@ class MLPModel(nn.Module):
             encoded_dim = in_dim
         else:
             raise ValueError(
-                f"Unknown MLP encoding {encoding_type!r}; expected 'fourier' or 'identity'."
+                f"Unknown MLP encoding {encoding_type!r}; expected 'fourier' or 'identity' or 'positional_isotropic'."
             )
 
         activations = {
@@ -334,7 +420,13 @@ class RadialCoordinateWeighting(nn.Module):
 
 
 class SIRENModel(nn.Module):
-    """Sinusoidal representation network with radius-dependent bandwidth."""
+    """SIREN with optional per-input initial frequencies and radial weighting.
+
+    ``input_omega_0`` accepts one positive frequency per coordinate (or a
+    scalar). It controls first-layer coordinate contributions, while
+    ``first_omega_0`` also sets the bias phase scale. Learned weights can
+    subsequently adapt the bandwidth; these are not hard frequency limits.
+    """
 
     def __init__(
         self,
@@ -345,6 +437,7 @@ class SIRENModel(nn.Module):
         first_omega_0: float = 30.0,
         hidden_omega_0: float = 1.0,
         radial_weighting_config: Mapping | None = None,
+        input_omega_0: float | Iterable[float] | None = None,
     ):
         super().__init__()
         dimensions = (in_dim, out_dim, dim, n_layers)
@@ -360,6 +453,13 @@ class SIRENModel(nn.Module):
         hidden_omega_0 = _finite_frequency(hidden_omega_0)
         if first_omega_0 <= 0.0 or hidden_omega_0 <= 0.0:
             raise ValueError("SIREN frequencies must be positive.")
+        frequencies = _per_dimension(
+            first_omega_0 if input_omega_0 is None else input_omega_0,
+            in_dim, "input_omega_0", _finite_frequency,
+        )
+        if any(value <= 0 for value in frequencies):
+            raise ValueError("input_omega_0 entries must be positive.")
+        self.register_buffer("input_omega_0", torch.tensor(frequencies, dtype=torch.get_default_dtype()))
         if radial_weighting_config is None:
             self.coordinate_weighting = nn.Identity()
         elif isinstance(radial_weighting_config, Mapping):
@@ -393,6 +493,9 @@ class SIRENModel(nn.Module):
 
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
         value = self.coordinate_weighting(coordinates)
+        # sin(W @ (omega_input * x) + omega_first * b). Dividing here
+        # preserves the ordinary scalar SIREN exactly when all weights match.
+        value = value * (self.input_omega_0.to(value) / self.activations[0].omega_0)
         value = self.activations[0](self.in_layer(value))
         for layer, activation in zip(self.hidden_layers, self.activations[1:]):
             value = activation(layer(value))
@@ -400,9 +503,11 @@ class SIRENModel(nn.Module):
 
 
 __all__ = [
+    "IsotropicPositionalEncoding",
     "FourierEncoding",
     "MLPModel",
     "RadialCoordinateWeighting",
     "SIRENModel",
     "Sine",
+    "temporary_eval_mode",
 ]

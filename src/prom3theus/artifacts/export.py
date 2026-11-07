@@ -14,7 +14,7 @@ from .archive import (
 )
 from .errors import ArtifactExportError
 from .evaluation import (
-    depth_grid,
+    photospheric_height_grid,
     evaluate_atmosphere,
     resolve_storage_dtype,
     select_export_device,
@@ -95,11 +95,11 @@ def _evaluate_export(
         include_stokes=include_stokes,
     )
     module = module.to(export_device).eval()
-    evaluation_depth = depth_grid(module, depth_samples)
+    evaluation_depth = photospheric_height_grid(module, depth_samples)
     arrays = evaluate_atmosphere(
         module,
         raster,
-        depth_grid=evaluation_depth,
+        height_grid_m=evaluation_depth,
         batch_size=batch_size,
         storage_dtype=storage_dtype,
     )

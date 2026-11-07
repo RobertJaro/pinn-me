@@ -17,12 +17,84 @@ from unittest.mock import patch
 import numpy as np
 
 
+RESOURCE_SET_ID = "plasma_v1"
+CHIANTI_ATOMIC_DATABASE_URL = "https://www.chiantidatabase.org/chianti_download.html"
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _write_json(path, document):
+    path.write_text(json.dumps(document, indent=2, allow_nan=False) + "\n")
+
+
+def _write_resource_set_manifest(output, document, database_path, abundance_path, ioneq_path):
+    """Write the sealed ``plasma_v1`` manifest/sources beside the table.
+
+    Mirrors ``resource_builder.aia_euv.build``'s pattern: the table itself is
+    the one runtime file, ``sources.json`` records the pinned upstream CHIANTI
+    inputs (derived from the same provenance already embedded in the table),
+    and ``manifest.json`` pins both file checksums so
+    ``prom3theus.resources.registry.validate_resource_set`` can verify the set
+    independently of training.
+    """
+
+    provenance = document["provenance"]
+    output_directory = output.parent
+    sources = {
+        "resource_set_id": RESOURCE_SET_ID,
+        "schema_version": 1,
+        "builder": {
+            "name": "resource_builder.coronal_cooling",
+            "algorithm_version": 1,
+            "operation": (
+                "bolometric CHIANTI radiative-loss curve computed with FIASCO, offline"
+            ),
+        },
+        "scientific_sources": {
+            "chianti_atomic_database": {
+                "filename": database_path.name,
+                "name": "CHIANTI",
+                "reference_url": CHIANTI_ATOMIC_DATABASE_URL,
+                "sha256": provenance["database_sha256"],
+                "size_bytes": database_path.stat().st_size,
+                "version": provenance["database_version"],
+            },
+            "chianti_abundance": {
+                "filename": abundance_path.name,
+                "name": provenance["abundance"],
+                "sha256": provenance["abundance_sha256"],
+                "size_bytes": abundance_path.stat().st_size,
+                "version": provenance["database_version"],
+            },
+            "chianti_ionization_equilibrium": {
+                "filename": ioneq_path.name,
+                "name": "chianti",
+                "sha256": provenance["ioneq_sha256"],
+                "size_bytes": ioneq_path.stat().st_size,
+                "version": provenance["database_version"],
+            },
+        },
+    }
+    _write_json(output_directory / "sources.json", sources)
+    resource_sha256 = {output.name: _sha256(output)}
+    manifest = {
+        "schema_version": 1,
+        "resource_set_type": "prom3theus-scientific-resource-set",
+        "resource_set_id": RESOURCE_SET_ID,
+        "training_contract": "offline-read-only; no downloads or table conversion",
+        "runtime_files": sorted([*resource_sha256, "sources.json"]),
+        "logical_resources": {"coronal_cooling": output.name},
+        "source_manifest_sha256": _sha256(output_directory / "sources.json"),
+        "resource_sha256": resource_sha256,
+        "compatibility": {"chianti_database_release": provenance["database_version"]},
+    }
+    _write_json(output_directory / "manifest.json", manifest)
 
 
 def _fiasco():
@@ -245,6 +317,9 @@ def build(
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(document, indent=2, allow_nan=False) + "\n")
+    _write_resource_set_manifest(
+        output, document, database, abundance_paths[0], ascii_root / "ioneq/chianti.ioneq"
+    )
     print(
         f"Wrote {output}: {len(rate)} temperatures, Lambda(1 MK)={rate[80]:.6g} W m^3"
     )
@@ -261,7 +336,9 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("src/prom3theus/resources/sets/plasma/coronal_cooling_v1.json"),
+        default=Path(
+            "src/prom3theus/resources/sets/plasma/plasma_v1/coronal_cooling_v1.json"
+        ),
     )
     parser.add_argument("--abundance", default="sun_coronal_2021_chianti")
     parser.add_argument("--electron-density-cm3", type=float, default=1.0e9)

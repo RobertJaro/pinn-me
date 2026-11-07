@@ -1,0 +1,146 @@
+import pytest
+import torch
+
+from prom3theus.core import SPEED_OF_LIGHT
+from prom3theus.validation.reference_synthesis import LTESynthesizer
+from prom3theus.validation.reference_transfer import GeometricHeightPath, OpticalDepthPath, RayDistancePath
+from prom3theus.rt import StratifiedAtmosphere, THOMSON_CROSS_SECTION_M2
+
+
+def test_lte_synthesizer_requires_an_explicit_line_selection():
+    with pytest.raises(ValueError, match="exactly one"):
+        LTESynthesizer(log_tau500=torch.tensor([-4.0, 0.0]))
+
+
+def test_optical_depth_diagnostic_uses_the_same_signed_path_as_transfer():
+    alpha = torch.tensor([[1.0, 2.0, 4.0]])
+    # The final interval folds outward. It must subtract optical depth in the
+    # diagnostic exactly as it does in the signed formal-solver path.
+    ray = RayDistancePath(torch.tensor([[0.0, 2.0, 1.0]]))
+    height = GeometricHeightPath(torch.tensor([[2.0, 1.0, 1.5]]), mu=0.5)
+    expected = torch.tensor([[0.0, 3.0, 0.0]])
+
+    torch.testing.assert_close(
+        LTESynthesizer._cumulative_tau500(alpha, path=ray), expected
+    )
+    torch.testing.assert_close(
+        LTESynthesizer._cumulative_tau500(alpha, path=height), expected
+    )
+
+
+def test_lte_synthesizer_runs_from_packaged_stic_resources():
+    grid = torch.tensor([-4.0, -2.0, 0.0])
+    atmosphere = StratifiedAtmosphere(
+        depth_coordinate=grid,
+        temperature=torch.full((1, 3), 5_500.0),
+        velocity_field=torch.zeros(1, 3, 3),
+        microturbulence=torch.full((1, 3), 1_000.0),
+        magnetic_field=torch.zeros(1, 3, 3),
+        gas_pressure=torch.logspace(1.0, 4.0, 3).reshape(1, 3),
+    )
+    synthesizer = LTESynthesizer(
+        log_tau500=grid,
+        line_ids=("FeI_6301.5008", "FeI_6302.4932"),
+    )
+    wavelength = torch.linspace(6301.3, 6302.7, 9)
+    stokes, diagnostics = synthesizer(
+        atmosphere,
+        wavelength,
+        path=OpticalDepthPath(mu=0.9),
+        return_diagnostics=True,
+    )
+    assert stokes.shape == (1, 4, 9)
+    assert torch.isfinite(stokes).all()
+    assert diagnostics.alpha500.shape == (1, 3)
+    assert diagnostics.cumulative_tau500_along_path is None
+
+
+def test_lte_synthesizer_uses_unrestricted_combined_plasma_state():
+    grid = torch.tensor([-4.0, -2.0, 0.0], dtype=torch.float64)
+    temperature = torch.tensor(
+        [[1.0e6, 2.0e4, 5_500.0]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    gas_pressure = torch.tensor(
+        [[1.0e-3, 1.0e2, 1.0e7]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    base = {
+        "depth_coordinate": grid,
+        "velocity_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+        "microturbulence": torch.full((1, 3), 1_000.0, dtype=torch.float64),
+        "magnetic_field": torch.zeros(1, 3, 3, dtype=torch.float64),
+    }
+    atmosphere = StratifiedAtmosphere(
+        temperature=temperature,
+        gas_pressure=gas_pressure,
+        **base,
+    )
+    synthesizer = LTESynthesizer(
+        log_tau500=grid,
+        line_ids=("FeI_6302.4932",),
+    ).to(dtype=torch.float64)
+    wavelength = torch.linspace(6302.3, 6302.7, 7, dtype=torch.float64)
+
+    stokes, diagnostics = synthesizer(
+        atmosphere,
+        wavelength,
+        path=OpticalDepthPath(),
+        return_diagnostics=True,
+    )
+    assert torch.isfinite(stokes).all()
+    assert torch.isfinite(diagnostics.alpha500).all()
+    assert torch.all(diagnostics.alpha500 > 0.0)
+    torch.testing.assert_close(diagnostics.model_temperature, temperature)
+    torch.testing.assert_close(diagnostics.gas_pressure, gas_pressure)
+    torch.testing.assert_close(diagnostics.lte_temperature, temperature)
+    torch.testing.assert_close(diagnostics.lte_gas_pressure, gas_pressure)
+
+    electron_density = diagnostics.reference_thermodynamics["electron_density"]
+    torch.testing.assert_close(
+        diagnostics.alpha500[0, 0],
+        electron_density[0, 0] * THOMSON_CROSS_SECTION_M2,
+    )
+
+    diagnostics.alpha500.sum().backward()
+    assert torch.isfinite(temperature.grad).all()
+    assert torch.isfinite(gas_pressure.grad).all()
+    assert torch.all(temperature.grad != 0.0)
+    assert torch.all(gas_pressure.grad != 0.0)
+
+
+def test_lte_synthesizer_rejects_unordered_wavelengths_and_superluminal_los():
+    grid = torch.tensor([-4.0, -2.0, 0.0])
+    base = {
+        "depth_coordinate": grid,
+        "temperature": torch.full((1, 3), 5_500.0),
+        "microturbulence": torch.full((1, 3), 1_000.0),
+        "magnetic_field": torch.zeros(1, 3, 3),
+        "gas_pressure": torch.logspace(1.0, 4.0, 3).reshape(1, 3),
+    }
+    synthesizer = LTESynthesizer(
+        log_tau500=grid,
+        line_ids=("FeI_6302.4932",),
+    )
+    atmosphere = StratifiedAtmosphere(
+        velocity_field=torch.zeros(1, 3, 3),
+        **base,
+    )
+    with pytest.raises(ValueError, match="strictly increasing"):
+        synthesizer(
+            atmosphere,
+            torch.tensor([6302.6, 6302.5]),
+            path=OpticalDepthPath(),
+        )
+
+    velocity = torch.zeros(1, 3, 3)
+    velocity[..., 2] = -1.01 * SPEED_OF_LIGHT
+    atmosphere = StratifiedAtmosphere(velocity_field=velocity, **base)
+    with pytest.raises(ValueError, match=r"\|v_los\| < c"):
+        synthesizer(
+            atmosphere,
+            torch.tensor([6302.4, 6302.6]),
+            path=OpticalDepthPath(),
+        )

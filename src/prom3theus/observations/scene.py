@@ -52,8 +52,8 @@ class SceneContract:
     scene_basis: torch.Tensor
     solar_radius_m: float
     reference_time_tai_seconds: float
-    spatial_coordinate_center_mm: tuple[float, float]
-    spatial_coordinate_scale_mm: tuple[float, float]
+    spatial_coordinate_center_megameter: tuple[float, float]
+    spatial_coordinate_scale_megameter: tuple[float, float]
     time_coordinate_center_hours: float
     time_coordinate_scale_hours: float
     height_bounds_m: tuple[float, float]
@@ -73,11 +73,11 @@ class SceneContract:
         if not math.isfinite(time_scale) or time_scale <= 0:
             raise ValueError("time_coordinate_scale_hours must be finite and positive.")
         spatial_center = _pair(
-            self.spatial_coordinate_center_mm, "spatial_coordinate_center_mm"
+            self.spatial_coordinate_center_megameter, "spatial_coordinate_center_megameter"
         )
         spatial_scale = _pair(
-            self.spatial_coordinate_scale_mm,
-            "spatial_coordinate_scale_mm",
+            self.spatial_coordinate_scale_megameter,
+            "spatial_coordinate_scale_megameter",
             positive=True,
         )
         height_bounds = _pair(self.height_bounds_m, "height_bounds_m")
@@ -89,8 +89,8 @@ class SceneContract:
         object.__setattr__(self, "scene_basis", basis)
         object.__setattr__(self, "solar_radius_m", radius)
         object.__setattr__(self, "reference_time_tai_seconds", reference_time)
-        object.__setattr__(self, "spatial_coordinate_center_mm", spatial_center)
-        object.__setattr__(self, "spatial_coordinate_scale_mm", spatial_scale)
+        object.__setattr__(self, "spatial_coordinate_center_megameter", spatial_center)
+        object.__setattr__(self, "spatial_coordinate_scale_megameter", spatial_scale)
         object.__setattr__(self, "time_coordinate_center_hours", time_center)
         object.__setattr__(self, "time_coordinate_scale_hours", time_scale)
         object.__setattr__(self, "height_bounds_m", height_bounds)
@@ -132,8 +132,8 @@ class SceneContract:
 
         return MappingProxyType(
             {
-                "spatial_coordinate_center_mm": list(self.spatial_coordinate_center_mm),
-                "spatial_coordinate_scale_mm": list(self.spatial_coordinate_scale_mm),
+                "spatial_coordinate_center_megameter": list(self.spatial_coordinate_center_megameter),
+                "spatial_coordinate_scale_megameter": list(self.spatial_coordinate_scale_megameter),
                 "time_coordinate_center_hours": self.time_coordinate_center_hours,
                 "time_coordinate_scale_hours": self.time_coordinate_scale_hours,
                 "scene_geometry_config": {
@@ -253,8 +253,8 @@ class SceneContract:
         return {
             "raster_count": len(rasters),
             "valid_ray_count": valid_ray_count,
-            "chart_x_mm": [float(chart_min[0]), float(chart_max[0])],
-            "chart_y_mm": [float(chart_min[1]), float(chart_max[1])],
+            "chart_x_megameter": [float(chart_min[0]), float(chart_max[0])],
+            "chart_y_megameter": [float(chart_min[1]), float(chart_max[1])],
             "time_hours": [time_min, time_max],
             "height_bounds_m": list(self.height_bounds_m),
             "outer_support_distance_m": [distance_min, distance_max],
@@ -343,8 +343,8 @@ def rebase_stokes_raster(raster, scene, *, output_path=None, chunk_pixels=262144
     updated["coordinates"]["time_scale"] = "tai"
     updated["coordinates"]["network_affine"] = {
         **coordinate["network_affine"],
-        "center_mm": list(scene.spatial_coordinate_center_mm),
-        "scale_mm": list(scene.spatial_coordinate_scale_mm),
+        "center_megameter": list(scene.spatial_coordinate_center_megameter),
+        "scale_megameter": list(scene.spatial_coordinate_scale_megameter),
     }
     updated["coordinates"]["time_affine"] = {
         **coordinate.get("time_affine", {}),

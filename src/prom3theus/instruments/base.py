@@ -7,6 +7,7 @@ import math
 from typing import Protocol, runtime_checkable
 
 import torch
+from prom3theus.core.validation import require_tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +32,8 @@ class MagneticAzimuthConvention:
             raise ValueError(
                 "physical_observer_field must be a floating tensor ending in three."
             )
-        if not torch.isfinite(field).all():
-            raise ValueError("physical_observer_field must contain only finite values.")
+        require_tensor(torch.isfinite(field).all(),
+                       "physical_observer_field must contain only finite values.")
         angle = math.radians(self.offset_deg)
         cosine = field.new_tensor(math.cos(angle))
         sine = field.new_tensor(math.sin(angle))

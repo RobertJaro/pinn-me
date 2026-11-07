@@ -2,8 +2,6 @@
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from collections.abc import Mapping
-from copy import deepcopy
-import logging
 import os
 import torch
 from torch import nn
@@ -13,7 +11,7 @@ from prom3theus.rt import StratifiedAtmosphereModel
 from .errors import ArtifactExportError
 
 P3S_FORMAT = "prom3theus.stream_state"
-P3S_VERSION = 1
+P3S_VERSION = 3
 
 
 def snapshot_value(value):
@@ -33,9 +31,10 @@ def snapshot_value(value):
 class EvaluationModel(nn.Module):
     """Shared atmosphere and arbitrary observation terms, without training state."""
 
-    def __init__(self, atmosphere, terms):
+    def __init__(self, atmosphere, terms, synthesis_windows):
         super().__init__()
         self.atmosphere_model = atmosphere
+        self.synthesis_windows = nn.ModuleDict(synthesis_windows)
         self.terms = nn.ModuleDict(terms)
 
 
@@ -46,6 +45,8 @@ def snapshot_context(runtime):
             "resources": runtime.resources,
             "scene": asdict(runtime.scene),
             "atmosphere": runtime.model.atmosphere_model.construction,
+            "synthesis_windows": {name: field.construction
+                                 for name, field in runtime.model.synthesis_windows.items()},
             "terms": {
                 name: term.construction for name, term in runtime.model.terms.items()
             },
@@ -88,7 +89,7 @@ def save_state(path, model, context, *, epoch, global_step):
     state = {
         name: value
         for name, value in model.state_dict().items()
-        if name.startswith(("atmosphere_model.", "terms."))
+        if name.startswith(("atmosphere_model.", "synthesis_windows.", "terms."))
     }
     state = snapshot_value(state)
     validate_tensors(state)
@@ -132,53 +133,6 @@ class ValidatedSaveState:
     global_step: int
 
 
-def _mse_evaluation_context(context):
-    """Translate legacy objective metadata for evaluation without altering weights."""
-    context = dict(context)
-    configuration = deepcopy(context["configuration"])
-    terms = deepcopy(context["terms"])
-    changed = False
-
-    def convert(objective):
-        nonlocal changed
-        replacements = {"huber": "mse", "asinh_huber": "asinh_mse"}
-        if objective.get("type") in replacements:
-            objective["type"] = replacements[objective["type"]]
-            objective.pop("huber_delta", None)
-            changed = True
-
-    def direct_weights(objective, weights):
-        nonlocal changed
-        if "stokes_sigmas" not in objective:
-            return
-        sigmas = objective.pop("stokes_sigmas")
-        total = sum(weights.values())
-        for name, value in list(weights.items()):
-            weights[name] = value / total / (sigmas[name] ** 2 if sigmas else 1.0)
-        changed = True
-
-    for stream in configuration.get("streams", []):
-        objective = stream.get("data_term", {}).get("objective", {})
-        convert(objective)
-        if stream.get("data_term", {}).get("type") == "lte_stokes":
-            direct_weights(objective, objective["stokes_weights"])
-    for contract in terms.values():
-        options = contract["options"]
-        if contract["type"] == "lte_stokes":
-            convert(options["objective_config"])
-            direct_weights(options["objective_config"], options["weight_config"])
-        elif contract["type"] == "aia_optically_thin" and "huber_delta" in options:
-            options.pop("huber_delta")
-            changed = True
-    if changed:
-        logging.getLogger(__name__).warning(
-            "Legacy snapshot objective metadata migrated for evaluation; "
-            "stored model weights are unchanged."
-        )
-        context.update(configuration=configuration, terms=terms)
-    return context
-
-
 def load_validated_save_state(path, *, map_location="cpu"):
     path = Path(path).expanduser().resolve()
     payload = torch.load(path, map_location="cpu", weights_only=True)
@@ -192,7 +146,9 @@ def load_validated_save_state(path, *, map_location="cpu"):
             "Unsupported P3S format. Only stream-state snapshots are accepted."
         )
     validate_tensors(payload["state_dict"])
-    context = _mse_evaluation_context(payload["context"])
+    context = payload["context"]
+    if context["configuration"].get("schema_version") != 5:
+        raise ArtifactExportError("Formal LTE snapshots require schema v5")
     from prom3theus.resources import validate_resource_sets
 
     resources = validate_resource_sets(context["resources"])
@@ -202,25 +158,38 @@ def load_validated_save_state(path, *, map_location="cpu"):
         )
     scene = SceneContract(**context["scene"])
     atmosphere = StratifiedAtmosphereModel(**context["atmosphere"]).float()
+    from prom3theus.inversion.lte import LTEWindow
+    synthesis_windows = {
+        name: LTEWindow(atmosphere, configuration=construction)
+        for name, construction in context["synthesis_windows"].items()
+    }
     terms = {
-        name: reconstruct_term(contract, atmosphere, scene)
+        name: reconstruct_term(contract, atmosphere, scene, synthesis_windows)
         for name, contract in context["terms"].items()
     }
-    module = EvaluationModel(atmosphere, terms)
+    module = EvaluationModel(atmosphere, terms, synthesis_windows)
     expected = module.state_dict()
-    # Old sigma buffers become direct component coefficients during migration.
-    # Learned atmosphere tensors remain untouched.
-    for name in list(payload["state_dict"]):
-        if name.endswith(".objective.stokes_sigmas"):
-            prefix = name.removesuffix(".objective.stokes_sigmas")
-            del payload["state_dict"][name]
-            weight_key = prefix + ".stokes_weights"
-            payload["state_dict"][weight_key] = expected[weight_key]
     if set(expected) != set(payload["state_dict"]) or any(
-        expected[n].shape != v.shape or expected[n].dtype != v.dtype
-        for n, v in payload["state_dict"].items()
+        expected[n].shape != v.shape for n, v in payload["state_dict"].items()
     ):
         raise ArtifactExportError("Snapshot model tensor contract differs.")
+    buffers = dict(module.named_buffers(remove_duplicate=False))
+    for name, saved in payload["state_dict"].items():
+        if saved.dtype == expected[name].dtype:
+            continue
+        # Earlier formal-LTE snapshots stored fixed geometry/physics buffers
+        # in double precision. The float32 runtime may consume these buffers;
+        # learned parameters, integer tensors and other casts remain strict.
+        if (
+            name not in buffers
+            or saved.dtype != torch.float64
+            or expected[name].dtype != torch.float32
+        ):
+            raise ArtifactExportError("Snapshot model tensor contract differs.")
+        converted = saved.float()
+        if not torch.isfinite(converted).all():
+            raise ArtifactExportError("Snapshot fixed buffer exceeds float32 range.")
+        payload["state_dict"][name] = converted
     module.load_state_dict(payload["state_dict"], strict=True)
     module.to(map_location).eval()
     if any(

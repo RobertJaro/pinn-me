@@ -18,7 +18,7 @@ from .coordinates import (
     spherical_to_cartesian_matrix,
     spherical_to_observer_matrix,
 )
-from .nn import FourierEncoding, MLPModel, RadialCoordinateWeighting, SIRENModel, Sine
+from .nn import FourierEncoding, IsotropicPositionalEncoding, MLPModel, RadialCoordinateWeighting, SIRENModel, Sine
 from .integrity import sha256_file, sha256_file_set
 from .solar_velocity import (
     CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S,
@@ -35,6 +35,7 @@ __all__ = [
     "Faddeeva",
     "FourierEncoding",
     "H_PLANCK",
+    "IsotropicPositionalEncoding",
     "K_BOLTZMANN",
     "MLPModel",
     "RadialCoordinateWeighting",

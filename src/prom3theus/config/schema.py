@@ -189,6 +189,11 @@ class HMIObservationConfig(ConfigNode):
     selection: HMISelectionConfig
     loader: DataLoaderConfig
     calibration: HMICalibrationConfig
+    binning: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.binning) is not int or self.binning < 1:
+            raise ValueError("binning must be a positive integer")
 
 
 ObservationConfig = HinodeObservationConfig | HMIObservationConfig
@@ -268,20 +273,20 @@ class LogParameterConfig(ConfigNode):
 
 @dataclass(frozen=True, slots=True)
 class VelocityParameterConfig(ConfigNode):
+    """Unbounded linear velocity readout scaled by the expected flow magnitude."""
+
     scale_m_per_s: float
-    maximum_m_per_s: float
 
     def __post_init__(self) -> None:
         _positive(self.scale_m_per_s, "scale_m_per_s")
-        _positive(self.maximum_m_per_s, "maximum_m_per_s")
-        if self.maximum_m_per_s >= _SPEED_OF_LIGHT_M_PER_S:
-            raise ValueError("maximum_m_per_s must be subluminal")
 
 
 @dataclass(frozen=True, slots=True)
 class MagneticParameterConfig(ConfigNode):
     scale_gauss: float
     representation: Literal["direct", "vector_potential", "potential_delta"] = "direct"
+    # Dimensionless decoder multiplier for A; model units remain B0 * L0.
+    scale_vector_potential: float = 1.0
     reference_height_megameter: float | None = None
     # Only meaningful for representation="potential_delta": the delta-field
     # contribution's weight alpha stays 0 for potential_delta_cool_steps, then
@@ -292,6 +297,7 @@ class MagneticParameterConfig(ConfigNode):
 
     def __post_init__(self) -> None:
         _positive(self.scale_gauss, "scale_gauss")
+        _positive(self.scale_vector_potential, "scale_vector_potential")
         if self.representation not in {
             "direct",
             "vector_potential",
@@ -345,6 +351,28 @@ class EncodingConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
+class IsotropicEncodingConfig(ConfigNode):
+    type: Literal["positional_isotropic"]
+    num_frequencies: tuple[int, ...] = (32,)
+    max_frequencies: tuple[float, ...] = (8.,)
+    min_frequencies: float = 0.
+    spatial_dim: Literal[3] = 3
+    include_input: bool = False
+    seed: int = 0
+
+    def __post_init__(self):
+        if not self.num_frequencies or len(self.num_frequencies) != len(self.max_frequencies):
+            raise ValueError("Isotropic frequency lists require one space block and one per nonspatial axis")
+        if any(type(count) is not int or count < 1 for count in self.num_frequencies):
+            raise ValueError("num_frequencies entries must be positive integers")
+        _finite(self.min_frequencies, "min_frequencies")
+        for maximum in self.max_frequencies:
+            _finite(maximum, "max_frequencies")
+            if maximum < self.min_frequencies:
+                raise ValueError("Frequency exponent bounds must increase")
+
+
+@dataclass(frozen=True, slots=True)
 class RadialWeightingConfig(ConfigNode):
     """Initial SIREN bandwidth envelope from the solar surface outward."""
 
@@ -366,7 +394,7 @@ class NetworkConfig(ConfigNode):
     hidden_dimension: int
     hidden_layers: int
     activation: Literal["silu", "gelu", "tanh"] | None = None
-    encoding: EncodingConfig | None = None
+    encoding: EncodingConfig | IsotropicEncodingConfig | None = None
     first_omega_0: float = 30.0
     hidden_omega_0: float = 1.0
     radial_weighting: RadialWeightingConfig | None = field(
@@ -400,10 +428,12 @@ class AtmosphereConfig(ConfigNode):
             if self.network.encoding is not None
             else expected_dimensions
         )
-        if self.network.type == "mlp" and frequency_dimensions != expected_dimensions:
+        encoding_dimensions = (1 + int(self.geometry.time_dependent)
+            if isinstance(self.network.encoding, IsotropicEncodingConfig) else expected_dimensions)
+        if self.network.type == "mlp" and frequency_dimensions != encoding_dimensions:
             raise ValueError(
-                "Fourier frequency lists must contain one entry per atmosphere "
-                f"coordinate ({expected_dimensions}); got {frequency_dimensions}"
+                "Frequency lists must match the encoding blocks "
+                f"({encoding_dimensions}); got {frequency_dimensions}"
             )
         geometry = self.geometry
         magnetic_height = self.parameters.magnetic_field.reference_height_megameter
@@ -432,20 +462,6 @@ class AtmosphereConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class SynthesisConfig(ConfigNode):
-    line_ids: tuple[str, ...]
-    excluded_wavelength_windows_angstrom: tuple[tuple[float, float], ...] = ()
-
-    def __post_init__(self) -> None:
-        if not self.line_ids or any(not value.strip() for value in self.line_ids):
-            raise ValueError("line_ids must contain at least one non-empty identifier")
-        if len(set(self.line_ids)) != len(self.line_ids):
-            raise ValueError("line_ids must be unique")
-        for index, interval in enumerate(self.excluded_wavelength_windows_angstrom):
-            _ordered_pair(interval, f"excluded_wavelength_windows_angstrom[{index}]")
-
-
-@dataclass(frozen=True, slots=True)
 class SpectralPSFConfig(ConfigNode):
     type: Literal["gaussian"]
     fwhm_angstrom: float
@@ -464,6 +480,7 @@ class HinodeInstrumentConfig(ConfigNode):
     spectral_psf: SpectralPSFConfig
     line_of_sight_velocity_correction_m_per_s: float = 0.0
     optimize_line_of_sight_velocity_correction: bool = False
+    maximum_line_of_sight_velocity_correction_m_per_s: float = 10000.0
 
     def __post_init__(self) -> None:
         if type(self.optimize_line_of_sight_velocity_correction) is not bool:
@@ -474,6 +491,12 @@ class HinodeInstrumentConfig(ConfigNode):
             self.line_of_sight_velocity_correction_m_per_s,
             "line_of_sight_velocity_correction_m_per_s",
         )
+        _positive(self.maximum_line_of_sight_velocity_correction_m_per_s,
+                  "maximum_line_of_sight_velocity_correction_m_per_s")
+        if self.maximum_line_of_sight_velocity_correction_m_per_s >= _SPEED_OF_LIGHT_M_PER_S:
+            raise ValueError("maximum_line_of_sight_velocity_correction_m_per_s must be subluminal")
+        if abs(self.line_of_sight_velocity_correction_m_per_s) >= self.maximum_line_of_sight_velocity_correction_m_per_s:
+            raise ValueError("LOS correction must lie strictly inside maximum_line_of_sight_velocity_correction_m_per_s")
         if (
             abs(self.line_of_sight_velocity_correction_m_per_s)
             >= _SPEED_OF_LIGHT_M_PER_S
@@ -489,6 +512,7 @@ class HMIInstrumentConfig(ConfigNode):
     magnetic_azimuth_offset_deg: float
     line_of_sight_velocity_correction_m_per_s: float = 0.0
     optimize_line_of_sight_velocity_correction: bool = False
+    maximum_line_of_sight_velocity_correction_m_per_s: float = 10000.0
 
     def __post_init__(self) -> None:
         _finite(self.magnetic_azimuth_offset_deg, "magnetic_azimuth_offset_deg")
@@ -504,6 +528,12 @@ class HMIInstrumentConfig(ConfigNode):
             self.line_of_sight_velocity_correction_m_per_s,
             "line_of_sight_velocity_correction_m_per_s",
         )
+        _positive(self.maximum_line_of_sight_velocity_correction_m_per_s,
+                  "maximum_line_of_sight_velocity_correction_m_per_s")
+        if self.maximum_line_of_sight_velocity_correction_m_per_s >= _SPEED_OF_LIGHT_M_PER_S:
+            raise ValueError("maximum_line_of_sight_velocity_correction_m_per_s must be subluminal")
+        if abs(self.line_of_sight_velocity_correction_m_per_s) >= self.maximum_line_of_sight_velocity_correction_m_per_s:
+            raise ValueError("LOS correction must lie strictly inside maximum_line_of_sight_velocity_correction_m_per_s")
         if (
             abs(self.line_of_sight_velocity_correction_m_per_s)
             >= _SPEED_OF_LIGHT_M_PER_S
@@ -541,24 +571,6 @@ class CoarseToFineConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class DepthSamplingConfig(ConfigNode):
-    sample_count: int
-    coarse_to_fine: CoarseToFineConfig
-    reference_log_tau500_bounds: tuple[float, float] = (-5.0, 1.0)
-
-    def __post_init__(self) -> None:
-        _ordered_pair(self.reference_log_tau500_bounds, "reference_log_tau500_bounds")
-        if (
-            not self.reference_log_tau500_bounds[0]
-            < 0
-            < self.reference_log_tau500_bounds[1]
-        ):
-            raise ValueError("reference_log_tau500_bounds must straddle zero")
-        if self.sample_count < 2:
-            raise ValueError("sample_count must be at least two")
-
-
-@dataclass(frozen=True, slots=True)
 class CollocationConfig(ConfigNode):
     volume_points_per_step: int
     height_layers_per_step: int
@@ -581,17 +593,12 @@ class CollocationConfig(ConfigNode):
     # of one point). height_layers_per_step is still validated but ignored
     # in this mode. Required by hard_example_enabled below.
     volume_sampling: Literal["height_grouped", "fully_random"] = "height_grouped"
-    residual_adaptive_enabled: bool = False
-    residual_adaptive_candidate_multiplier: int = 2
-    residual_adaptive_fraction: float = 0.5
-    residual_adaptive_start_step: int = 500
-    residual_adaptive_update_every_n_steps: int = 250
     # Persistent hard-example carry-forward: each step keeps the
     # highest-residual points from the previous step (jittered) instead of
     # redrawing every collocation point from scratch, so a thin high-error
-    # layer/region cannot simply be missed by the sampler. Independent of
-    # residual_adaptive_* above, which only re-ranks candidates within one
-    # already-selected discrete height layer.
+    # layer/region cannot simply be missed by the sampler. Reuses the
+    # diagnostics already computed for the loss -- no extra scored
+    # candidate pool or forward pass.
     hard_example_enabled: bool = False
     hard_example_count: int = 0
     hard_example_start_step: int = 0
@@ -616,24 +623,6 @@ class CollocationConfig(ConfigNode):
         ):
             _positive(getattr(self, name), name, allow_zero=True)
         _positive(self.height_sampling_power, "height_sampling_power")
-        if type(self.residual_adaptive_enabled) is not bool:
-            raise TypeError("residual_adaptive_enabled must be boolean")
-        _positive(
-            self.residual_adaptive_candidate_multiplier,
-            "residual_adaptive_candidate_multiplier",
-        )
-        _positive(
-            self.residual_adaptive_fraction,
-            "residual_adaptive_fraction",
-            allow_zero=True,
-        )
-        if self.residual_adaptive_fraction > 1.0:
-            raise ValueError("residual_adaptive_fraction must not exceed one")
-        _positive(self.residual_adaptive_start_step, "residual_adaptive_start_step", allow_zero=True)
-        _positive(
-            self.residual_adaptive_update_every_n_steps,
-            "residual_adaptive_update_every_n_steps",
-        )
         if type(self.hard_example_enabled) is not bool:
             raise TypeError("hard_example_enabled must be boolean")
         _positive(self.hard_example_count, "hard_example_count", allow_zero=True)
@@ -657,12 +646,6 @@ class CollocationConfig(ConfigNode):
                 "hard_example_enabled requires volume_sampling: fully_random "
                 "(carrying forward the globally hardest points only makes "
                 "sense without fixed discrete height groups)"
-            )
-        if self.volume_sampling == "fully_random" and self.residual_adaptive_enabled:
-            raise ValueError(
-                "residual_adaptive_enabled assumes more than one point per "
-                "height group to rank within, which volume_sampling: "
-                "fully_random does not have; use hard_example_enabled instead"
             )
 
 
@@ -714,12 +697,21 @@ def _disabled_equation() -> EquationConfig:
 
 @dataclass(frozen=True, slots=True)
 class CoronalEnergyConfig(EquationConfig):
-    cooling_table: Path | None = None
+    # The one registered, checksum-verified production cooling resource; see
+    # prom3theus.resources.registry.CORONAL_COOLING_RESOURCE (kept as a literal
+    # here since configuration loading never imports the resources package).
+    cooling_resource: Literal["plasma_v1:coronal_cooling"] = "plasma_v1:coronal_cooling"
     minimum_height_megameter: float = 3.0
     conductivity_w_m_k72: float = 1.0e-11
     magnetic_floor_gauss: float = 0.1
+    # Reference heating-law anchors: the field-dependent heating network
+    # perturbs these multiplicatively and reduces to them exactly at
+    # construction (see rt.coronal_energy.HeatingNetwork's zero init).
     heating_w_m3: float = 1.0e-5
     heating_scale_height_megameter: float = 30.0
+    heating_network_hidden_dim: int = 64
+    heating_network_hidden_layers: int = 4
+    heating_network_activation: Literal["silu", "gelu", "tanh"] = "silu"
 
     def __post_init__(self) -> None:
         EquationConfig.__post_init__(self)
@@ -731,9 +723,14 @@ class CoronalEnergyConfig(EquationConfig):
         ):
             _positive(getattr(self, name), name)
         _positive(self.heating_w_m3, "heating_w_m3", allow_zero=True)
-        if self.enabled and self.cooling_table is None:
-            raise ValueError("coronal_energy requires a prepared cooling_table")
-
+        for name in ("heating_network_hidden_dim", "heating_network_hidden_layers"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.heating_network_activation not in ("silu", "gelu", "tanh"):
+            raise ValueError(
+                "heating_network_activation must be 'silu', 'gelu', or 'tanh'"
+            )
     def validate_domain(self, atmosphere) -> None:
         if not self.enabled:
             return
@@ -755,14 +752,18 @@ class CoronalEnergyConfig(EquationConfig):
 
 @dataclass(frozen=True, slots=True)
 class PhysicsEquationConfig(ConfigNode):
-    hydrostatic_equilibrium: EquationConfig
-    magnetohydrostatic_equilibrium: EquationConfig
-    momentum: EquationConfig
-    magnetic_divergence: EquationConfig
-    induction: EquationConfig
-    continuity: EquationConfig
-    upper_boundary_gas_pressure_prior: EquationConfig
+    # Physics is opt-in: omitted residuals must never activate a constraint.
+    hydrostatic_equilibrium: EquationConfig = field(default_factory=_disabled_equation)
+    magnetohydrostatic_equilibrium: EquationConfig = field(default_factory=_disabled_equation)
+    momentum: EquationConfig = field(default_factory=_disabled_equation)
+    magnetic_divergence: EquationConfig = field(default_factory=_disabled_equation)
+    induction: EquationConfig = field(default_factory=_disabled_equation)
+    continuity: EquationConfig = field(default_factory=_disabled_equation)
+    upper_boundary_gas_pressure_prior: EquationConfig = field(default_factory=_disabled_equation)
     adiabatic_pressure: EquationConfig = field(default_factory=_disabled_equation)
+    # Gauge fixing for B = curl(A): penalizes div A on the volume collocation
+    # points, using the Jacobian the curl already builds. No separate samples.
+    vector_potential_gauge: EquationConfig = field(default_factory=_disabled_equation)
     coronal_energy: CoronalEnergyConfig = field(
         default_factory=lambda: CoronalEnergyConfig(enabled=False, weight=0.0)
     )
@@ -892,7 +893,7 @@ class PhysicsConfig(ConfigNode):
     vector_basis_matches_spatial_coordinates: bool
     collocation: CollocationConfig
     normalization: PhysicsNormalizationConfig
-    equations: PhysicsEquationConfig
+    equations: PhysicsEquationConfig = field(default_factory=PhysicsEquationConfig)
     adiabatic_index: float = 5.0 / 3.0
     magnetic_current_free_steps: int = 0
     magnetic_current_free_final_factor: float = 0.0
@@ -967,6 +968,7 @@ class PhysicsConfig(ConfigNode):
             self.equations.induction,
             self.equations.continuity,
             self.equations.adiabatic_pressure,
+            self.equations.vector_potential_gauge,
         )
         volume_active = any(
             equation.enabled and equation.weight > 0.0 for equation in volume_equations
@@ -983,6 +985,7 @@ class PhysicsConfig(ConfigNode):
                 self.equations.induction,
                 self.equations.continuity,
                 self.equations.adiabatic_pressure,
+                self.equations.vector_potential_gauge,
                 self.equations.coronal_energy,
                 self.equations.upper_boundary_current_free,
                 self.equations.side_boundary_current_free,
@@ -1074,14 +1077,46 @@ class StokesWeightConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
+class StokesScaleConfig(ConfigNode):
+    I: float
+    Q: float
+    U: float
+    V: float
+
+    def __post_init__(self):
+        for name in ("I", "Q", "U", "V"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise ValueError(f"Stokes {name} scale must be a positive number")
+            _positive(value, f"Stokes {name} scale")
+
+
+@dataclass(frozen=True, slots=True)
 class LossConfig(ConfigNode):
     type: Literal["mse", "asinh_mse"]
     stokes_weights: StokesWeightConfig
     asinh_scale: float = 1.0e-3
     qu_warmup_steps: int = 0
+    continuum_normalization: bool = False
+    continuum_quantile: float = 0.9
+    continuum_floor: float | None = None  # Legacy shared observed-mean normalization.
+    stokes_scales: StokesScaleConfig | None = None
 
     def __post_init__(self):
         _positive(self.asinh_scale, "Stokes asinh scale")
+        if self.stokes_scales is not None and self.type != "mse":
+            raise ValueError("Use either linear stokes_scales or asinh_mse, not both")
+        if (isinstance(self.continuum_quantile, bool)
+                or not isinstance(self.continuum_quantile, Real)
+                or not math.isfinite(self.continuum_quantile)
+                or not 0 < self.continuum_quantile <= 1):
+            raise ValueError("continuum_quantile must be in (0, 1]")
+        if self.continuum_floor is not None:
+            if isinstance(self.continuum_floor, bool) or not isinstance(self.continuum_floor, Real):
+                raise ValueError("Stokes continuum floor must be a positive number")
+            _positive(self.continuum_floor, "Stokes continuum floor")
+        if type(self.continuum_normalization) is not bool:
+            raise ValueError("continuum_normalization must be boolean")
         if type(self.qu_warmup_steps) is not int or self.qu_warmup_steps < 0:
             raise ValueError("qu_warmup_steps must be a non-negative integer")
 

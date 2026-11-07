@@ -87,6 +87,43 @@ def test_model_data_and_reference_geometry_changes_remain_incompatible():
         assert _scientific_contract(previous) != _scientific_contract(changed)
 
 
+def test_vector_potential_scale_default_is_compatible_but_changes_are_not():
+    previous = contract()
+    previous["configuration"]["atmosphere"]["parameters"] = {
+        "magnetic_field": {"representation": "vector_potential", "scale_gauss": 1000.0},
+    }
+    previous["atmosphere"] = {"magnetic_representation": "vector_potential"}
+    current = deepcopy(previous)
+    magnetic = current["configuration"]["atmosphere"]["parameters"]["magnetic_field"]
+    magnetic["scale_vector_potential"] = 1.0
+    current["atmosphere"]["scale_vector_potential"] = 1.0
+    assert _scientific_contract(previous) == _scientific_contract(current)
+    magnetic["scale_vector_potential"] = 0.01
+    assert _scientific_contract(previous) != _scientific_contract(current)
+    magnetic["scale_vector_potential"] = 1.0
+    current["atmosphere"]["scale_vector_potential"] = 0.01
+    assert _scientific_contract(previous) != _scientific_contract(current)
+
+
+def test_resume_allows_disabling_los_offset_fit_but_preserves_calibration_contract():
+    previous = contract()
+    instrument = {"line_of_sight_velocity_correction_m_per_s": 0.,
+                  "optimize_line_of_sight_velocity_correction": True}
+    previous["configuration"]["streams"][0]["data_term"]["instrument"] = instrument
+    previous["terms"] = {"hmi": {"type": "lte_stokes", "options": {
+        "instrument_line_of_sight_velocity_correction_m_per_s": 0.,
+        "optimize_instrument_line_of_sight_velocity_correction": True,
+    }}}
+    original = deepcopy(previous)
+    current = deepcopy(previous)
+    current["configuration"]["streams"][0]["data_term"]["instrument"]["optimize_line_of_sight_velocity_correction"] = False
+    current["terms"]["hmi"]["options"]["optimize_instrument_line_of_sight_velocity_correction"] = False
+    assert _scientific_contract(previous) == _scientific_contract(current)
+    assert previous == original
+    current["configuration"]["streams"][0]["data_term"]["instrument"]["line_of_sight_velocity_correction_m_per_s"] = 100.
+    assert _scientific_contract(previous) != _scientific_contract(current)
+
+
 def test_new_disabled_plain_equation_matches_absent_checkpoint_default():
     previous = contract()
     current = deepcopy(previous)
@@ -127,11 +164,14 @@ def test_structured_equation_options_remain_part_of_resume_contract():
     current = deepcopy(previous)
     structured = {
         "enabled": False, "weight": 0.0,
-        "cooling_table": "cooling_v1.npz", "minimum_height_megameter": 3.0,
+        "cooling_resource": "plasma_v1:coronal_cooling", "minimum_height_megameter": 3.0,
     }
     current["configuration"]["physics"]["equations"]["coronal_energy"] = structured
     assert _scientific_contract(previous) != _scientific_contract(current)
-    for name, value in (("cooling_table", "cooling_v2.npz"), ("minimum_height_megameter", 5.0)):
+    for name, value in (
+        ("cooling_resource", "plasma_v2:coronal_cooling"),
+        ("minimum_height_megameter", 5.0),
+    ):
         changed = deepcopy(current)
         changed["configuration"]["physics"]["equations"]["coronal_energy"][name] = value
         assert _scientific_contract(current) != _scientific_contract(changed)
@@ -152,6 +192,7 @@ def test_resume_keeps_new_loss_buffers_and_applies_requested_learning_rate():
     settings = SimpleNamespace(
         learning_rate=0.01,
         final_learning_rate=0.001,
+        learning_rate_decay_steps=None,
         max_steps=100,
         max_epochs=-1,
         migrate_data_order=False,
@@ -164,8 +205,7 @@ def test_resume_keeps_new_loss_buffers_and_applies_requested_learning_rate():
     state = {k: v.clone() for k, v in module.state_dict().items()}
     state["model.objective.test_scale"][:] = 9.0
     state["model.field"] = torch.tensor(5.0)
-    state["model.terms.stokes.objective.stokes_sigmas"] = torch.ones(1, 4, 1)
-    checkpoint = {"state_dict": state, "prom3theus_joint": context}
+    checkpoint = {"formal_transfer_format_version": 1, "state_dict": state, "prom3theus_joint": context}
     module.on_load_checkpoint(checkpoint)
     module.load_state_dict(checkpoint["state_dict"])
     assert model.field.item() == 5.0
@@ -272,3 +312,70 @@ def test_sampling_migration_rebuilds_only_derived_buffers_and_keeps_same_geometr
     )
     module._restore_potential_sampling(checkpoint)
     assert checkpoint["state_dict"][prefix + "_extra_state"]["last_update"] == -1
+
+
+def _formal_window_contract(chunk_size=64):
+    document = contract()
+    window = {
+        'id': 'fe', 'line_ids': ['FeI_6302.4932'],
+        'depth_count': 257, 'wavelength_chunk_size': chunk_size,
+        'transfer_precision': 'float64',
+        'wavelength_bounds_vacuum_angstrom': [6300., 6307.],
+        'shell_height_bounds_megameter': [-1., 1.5],
+    }
+    document['configuration']['synthesis'] = {'windows': [deepcopy(window)]}
+    # P3S construction contexts also record window options separately.
+    document['synthesis_windows'] = {'fe': deepcopy(window)}
+    return document
+
+
+def test_resume_allows_spectral_batch_changes_without_mutating_archived_contract():
+    previous = _formal_window_contract(64)
+    current = _formal_window_contract(32)
+    recorded_previous, recorded_current = deepcopy(previous), deepcopy(current)
+    assert _scientific_contract(previous) == _scientific_contract(current)
+    assert previous == recorded_previous
+    assert current == recorded_current
+    # Missing operational defaults also mean the same scientific model.
+    current['configuration']['synthesis']['windows'][0].pop('wavelength_chunk_size')
+    current['synthesis_windows']['fe'].pop('wavelength_chunk_size')
+    assert _scientific_contract(previous) == _scientific_contract(current)
+
+
+@pytest.mark.parametrize('location', ['configuration', 'construction'])
+@pytest.mark.parametrize('key,value', [('jitter_fraction', 1.), ('transfer_precision', 'float32')])
+def test_resume_allows_sampling_and_precision_controls_without_mutating_archived_contract(location, key, value):
+    previous = _formal_window_contract()
+    current = deepcopy(previous)
+    window = (current['configuration']['synthesis']['windows'][0]
+              if location == 'configuration' else current['synthesis_windows']['fe'])
+    window[key] = value
+    recorded = deepcopy(current)
+    assert _scientific_contract(previous) == _scientific_contract(current)
+    assert current == recorded
+
+
+@pytest.mark.parametrize('key,value', [
+    ('depth_count', 129),
+    ('shell_height_bounds_megameter', [-1., 2.]),
+    ('wavelength_bounds_vacuum_angstrom', [6300., 6308.]),
+])
+@pytest.mark.parametrize('location', ['configuration', 'construction'])
+def test_resume_rejects_changed_formal_physics_and_numerics(key, value, location):
+    previous = _formal_window_contract()
+    current = deepcopy(previous)
+    window = (current['configuration']['synthesis']['windows'][0]
+              if location == 'configuration' else current['synthesis_windows']['fe'])
+    window[key] = value
+    assert _scientific_contract(previous) != _scientific_contract(current)
+
+
+def test_missing_refinement_preserves_old_windows_but_enabling_changes_contract():
+    previous = _formal_window_contract()
+    current = deepcopy(previous)
+    refinement = {"enabled": False, "fine_sample_count": 1, "uniform_weight_floor": 0.}
+    current['configuration']['synthesis']['windows'][0]['coarse_to_fine'] = dict(refinement)
+    current['synthesis_windows']['fe']['coarse_to_fine'] = dict(refinement)
+    assert _scientific_contract(previous) == _scientific_contract(current)
+    current['configuration']['synthesis']['windows'][0]['coarse_to_fine']['enabled'] = True
+    assert _scientific_contract(previous) != _scientific_contract(current)

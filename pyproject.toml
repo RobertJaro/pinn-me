@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+muon = ["torch>=2.9,<3"]
 observations = [
   "astropy>=5",
   "python-dateutil>=2.8.2",
@@ -81,15 +82,30 @@ version = {attr = "prom3theus.__version__"}
   "data/hinode_sp/*.json",
   "data/hmi_stokes/*.json",
   "sets/euv/aia_euv_v1/*.json",
+  "sets/plasma/plasma_v1/*.json",
 ]
 
 [tool.setuptools.data-files]
-"share/prom3theus/configs" = [
-  "configs/hinode_lte_mhs.yaml",
-  "configs/hinode_lte_mhs_extrapolation.yaml",
-  "configs/hmi_lte_mhs.yaml",
-  "configs/hmi_lte_dynamic.yaml",
-  "configs/hmi_aia_dynamic.yaml",
+"share/prom3theus/configs/hinode" = [
+  "configs/hinode/mhs.yaml",
+  "configs/hinode/mhs_extrapolation.yaml",
+]
+"share/prom3theus/configs/sdo" = [
+  "configs/sdo/hmi_dynamic.yaml",
+  "configs/sdo/hmi_aia_dynamic.yaml",
+  "configs/sdo/hmi_aia_dynamic_energy.yaml",
+  "configs/sdo/hmi_aia_potential.yaml",
+  "configs/sdo/hmi_aia_vector_potential.yaml",
+]
+"share/prom3theus/configs/muram/sdo" = [
+  "configs/muram/sdo/stokes_only.yaml",
+  "configs/muram/sdo/joint.yaml",
+  "configs/muram/sdo/mhs.yaml",
+]
+"share/prom3theus/configs/muram/hinode" = [
+  "configs/muram/hinode/mhs.yaml",
+  "configs/muram/hinode/stokes_only.yaml",
+  "configs/muram/hinode/synthesis.yaml",
 ]
 
 [tool.pytest.ini_options]

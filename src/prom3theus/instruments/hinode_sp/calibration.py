@@ -108,8 +108,9 @@ def observer_los_velocity_metadata(
         "calibration_stage": "already removed from the Level-1 spectra by sp_prep",
         "inversion_action": (
             "do not apply DOP_RCV again; add rigid Carrington rotation to the "
-            "learned co-rotating velocity, then subtract the recovered solar LOS "
-            "shift removed by spectral registration"
+            "learned co-rotating material velocity; map detector wavelengths to "
+            "the inertial radiation frame using the inverse Doppler factor of "
+            "the recovered solar LOS shift removed by spectral registration"
         ),
         "removed_solar_los_velocity_m_per_s": removed_solar_velocity.tolist(),
         "removed_solar_shift_pixels": removed_solar_shift_pixels.tolist(),

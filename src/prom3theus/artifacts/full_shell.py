@@ -36,7 +36,7 @@ def full_shell_height_grid(
     if type(height_samples) is not int or height_samples < 2:
         raise ValueError("full_shell_samples must be an integer of at least two.")
     model = module.atmosphere_model
-    bounds = getattr(model, "shell_height_bounds_Mm", None)
+    bounds = getattr(model, "shell_height_bounds_megameter", None)
     if (
         not isinstance(bounds, (tuple, list))
         or len(bounds) != 2
@@ -45,7 +45,7 @@ def full_shell_height_grid(
     ):
         raise ArtifactExportError(
             "The artifact atmosphere does not define finite outer-to-inner "
-            "shell_height_bounds_Mm."
+            "shell_height_bounds_megameter."
         )
     parameter = next(model.parameters())
     return torch.linspace(
@@ -78,8 +78,8 @@ def full_shell_metadata(height_grid_m: torch.Tensor) -> dict[str, object]:
         "height_order": "outer_to_inner",
         "spatial_sampling": "radial_carrington_columns",
         "spatial_coordinates": [
-            "carrington_chart_x_mm",
-            "carrington_chart_y_mm",
+            "carrington_chart_x_megameter",
+            "carrington_chart_y_megameter",
             "time_hours",
         ],
         "valid_mask": "valid_mask",
@@ -122,7 +122,7 @@ def evaluate_full_shell_atmosphere(
     )
     metadata = full_shell_metadata(height_grid)
     expected_bounds = tuple(
-        float(value) * 1.0e6 for value in model.shell_height_bounds_Mm
+        float(value) * 1.0e6 for value in model.shell_height_bounds_megameter
     )
     tolerance = max(
         1.0,

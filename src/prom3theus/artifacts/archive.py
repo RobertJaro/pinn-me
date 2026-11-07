@@ -33,7 +33,10 @@ def _export_metadata(
 ):
     evaluation = {
         "depth_coordinate": "geometric_height_m",
-        "stokes_sampling_coordinate": "stokes_reference_log_tau500",
+        "atmosphere_sampling_coordinate": "photospheric_height_grid_m",
+        "stokes_prediction": "parallel_formal_lte",
+        "material_velocity_frame": "Carrington residual and solar inertial vectors are exported separately",
+        "detector_wavelength_map": "lambda_inertial_vacuum = lambda_detector_vacuum * detector_to_inertial_wavelength_factor",
         "depth_samples": depth_samples,
         "include_stokes": include_stokes,
         "storage_dtype": storage_dtype,
@@ -100,7 +103,13 @@ def build_save_state_export_metadata(
         storage_dtype=storage_dtype,
         device=device,
     )
-    metadata["schema_version"] = 2
+    # Preserve native-source and sampling information with evaluated products,
+    # so physical comparisons can reopen the correct MURaM snapshot on demand.
+    raster_metadata = raster_selection.raster.metadata
+    for key in ("muram_synthesis", "spatial_binning"):
+        if key in raster_metadata:
+            metadata["observation"][key] = raster_metadata[key]
+    metadata["schema_version"] = 3
     metadata["save_state"] = {
         "format": P3S_FORMAT,
         "version": P3S_VERSION,

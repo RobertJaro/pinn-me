@@ -28,8 +28,8 @@ def synthesize_side_view(
         [math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)]
     )
     radius = domain.solar_radius_m
-    inner = radius + max(0.0, domain.height_bounds_Mm[0]) * 1e6
-    outer = radius + domain.height_bounds_Mm[1] * 1e6
+    inner = radius + max(0.0, domain.height_bounds_megameter[0]) * 1e6
+    outer = radius + domain.height_bounds_megameter[1] * 1e6
     # A conservative cone encloses the angular wedge, including its curved faces.
     angle = min(
         math.pi,
@@ -119,9 +119,9 @@ def render_side_view(image, extent, channels, path, *, time_hours, height_marker
         )
         for height in height_markers:
             axis.axhline(height, color="white", linestyle=":", linewidth=0.6, alpha=0.7)
-        axis.set(title=f"{channel} Å", xlabel="Local north [Mm]")
+        axis.set(title=f"{channel} Å", xlabel="Local north [megameter]")
         figure.colorbar(artist, ax=axis, label="asinh(I / a) / asinh(1 / a)")
-    axes[0].set_ylabel("Projected height [Mm]")
+    axes[0].set_ylabel("Projected height [megameter]")
     figure.suptitle(f"Synthetic AIA side view | t={time_hours:.3f} h | east–west LOS")
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=dpi)

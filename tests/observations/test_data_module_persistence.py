@@ -55,6 +55,27 @@ def test_rank_zero_reuses_and_worker_never_builds(tmp_path, monkeypatch):
     torch.testing.assert_close(restored.streams["value"][:], torch.ones(4))
 
 
+def test_rank_zero_restores_unchanged_module_only_once(tmp_path, monkeypatch):
+    from prom3theus.observations import persistence
+
+    path = tmp_path / "data_module.pt"
+    save_data_module(JointDataModule({"value": torch.ones(4)}, None), path)
+    calls = []
+    original = persistence.load_data_module
+
+    def load(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(persistence, "global_rank", lambda: 0)
+    monkeypatch.setattr(persistence, "load_data_module", load)
+    module = restore_or_create_data_module(
+        path, lambda: pytest.fail("unexpected construction"), finalize=lambda module: False,
+    )
+    assert calls == [path.resolve()]
+    torch.testing.assert_close(module.streams["value"][:], torch.ones(4))
+
+
 def test_worker_timeout_does_not_prepare(tmp_path, monkeypatch):
     monkeypatch.setenv("RANK", "1")
     with pytest.raises(TimeoutError):

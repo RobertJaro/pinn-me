@@ -1,0 +1,34 @@
+{
+  "resource_set_id": "plasma_v1",
+  "schema_version": 1,
+  "builder": {
+    "name": "resource_builder.coronal_cooling",
+    "algorithm_version": 1,
+    "operation": "bolometric CHIANTI radiative-loss curve computed with FIASCO, offline"
+  },
+  "scientific_sources": {
+    "chianti_atomic_database": {
+      "filename": "chianti_11.0.2.h5",
+      "name": "CHIANTI",
+      "reference_url": "https://www.chiantidatabase.org/chianti_download.html",
+      "sha256": "6b34b5421342281baa8fd1d84b293dd5f3b55ec27e6ad9556429ed68a69288cd",
+      "size_bytes": 2327758549,
+      "version": "11.0.2",
+      "versioned_group_count": 10393
+    },
+    "chianti_abundance": {
+      "filename": "sun_coronal_2021_chianti.abund",
+      "name": "sun_coronal_2021_chianti",
+      "sha256": "396f76c5accb9178069ec6e89b78d06f0b8ebb5ec5567e2a10f35eff12ccaa40",
+      "size_bytes": 1582,
+      "version": "11.0.2"
+    },
+    "chianti_ionization_equilibrium": {
+      "filename": "chianti.ioneq",
+      "name": "chianti",
+      "sha256": "706029c824704ab727c40570a8709bae42bf69745db2fa5cd54d5b8b12bc41db",
+      "size_bytes": 504253,
+      "version": "11.0.2"
+    }
+  }
+}

@@ -18,19 +18,48 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from prom3theus.core import ATOMIC_MASS_UNIT
+from prom3theus.core import ATOMIC_MASS_UNIT, MLPModel
+from prom3theus.resources import CORONAL_COOLING_RESOURCE, resolve_resource_reference
+
+# Fixed reference scales used only to keep the heating network's inputs to
+# O(1) across the quiet-Sun-to-sunspot and corona-to-chromosphere dynamic
+# ranges; neither is a physical scale that enters the returned heating rate.
+HEATING_NETWORK_REFERENCE_GAUSS = 100.0
+HEATING_NETWORK_REFERENCE_DENSITY_KG_M3 = 1.0e-12
+
+# Shared ceiling for every exp() in this module that could see an
+# out-of-domain input (a point below coronal_energy's own minimum height,
+# evaluated anyway so its loss can be masked by height rather than
+# pre-filtered out of the batch). Kept well below float32's ~88 exp overflow
+# threshold because some of these exp() calls chain (HeatingNetwork's
+# amplitude feeds into a second exp() for the height-decay envelope) or
+# multiply a large prefactor (a megameter-scale heating_scale_height_m in metres) --
+# exp(20) ~ 4.9e8 is still many orders of magnitude past any physically
+# meaningful heating/radiative-loss variation, with ample headroom left for
+# those downstream multiplications to stay finite too.
+_MAX_EXP_ARGUMENT = 20.0
 
 
 @dataclass(frozen=True)
 class CoronalEnergyOptions:
     """Runtime options independent of the application configuration layer."""
 
-    cooling_table: str | Path | None = None
+    # A plain ``str`` is resolved as a "resource_set:logical_name" reference
+    # through the checksum-verified resource registry (the default is the
+    # bundled, production CHIANTI-derived table); a ``Path`` is read literally,
+    # which unit tests use to exercise a small synthetic cooling curve.
+    cooling_resource: str | Path = CORONAL_COOLING_RESOURCE
     minimum_height_megameter: float = 3.0
     conductivity_w_m_k72: float = 1.0e-11
     magnetic_floor_gauss: float = 0.1
+    # Reference heating-law anchors: the field-dependent heating network in
+    # `HeatingNetwork` perturbs these multiplicatively, and reduces to them
+    # exactly at construction (see its zero-initialized output layer).
     heating_w_m3: float = 1.0e-5
     heating_scale_height_megameter: float = 30.0
+    heating_network_hidden_dim: int = 64
+    heating_network_hidden_layers: int = 4
+    heating_network_activation: str = "silu"
 
     def __post_init__(self):
         for name in (
@@ -48,6 +77,82 @@ class CoronalEnergyOptions:
                 or (value == 0 and name != "heating_w_m3")
             ):
                 raise ValueError(f"Invalid coronal energy option {name}")
+        for name in ("heating_network_hidden_dim", "heating_network_hidden_layers"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"Invalid coronal energy option {name}")
+        if self.heating_network_activation not in {"silu", "gelu", "tanh"}:
+            raise ValueError(
+                "Invalid coronal energy option heating_network_activation"
+            )
+
+
+class HeatingNetwork(nn.Module):
+    """Volumetric heating amplitude and decay length as functions of ``(|B|, rho)``.
+
+    The height dependence stays the fixed exponential profile: only its
+    amplitude and scale height are perturbed by a small network of the local
+    field strength and mass density, so the source term cannot degenerate into
+    an unconstrained function of position and time -- see ``CoronalEnergy``
+    for how the two outputs are combined with height. Density is a physically
+    motivated second input (most heating candidates -- Ohmic and especially
+    Alfven-wave/turbulent dissipation -- scale with density through the local
+    Alfven speed, not field strength alone), unlike temperature or pressure,
+    which the energy equation itself solves for and are therefore excluded to
+    avoid the source term trivially tracking whatever state the data terms
+    already produce. The output layer is zero-initialized, so a freshly
+    constructed instance reproduces the fixed reference heating law exactly
+    until training moves its parameters.
+    """
+
+    def __init__(self, options: CoronalEnergyOptions):
+        super().__init__()
+        self.heating_w_m3 = float(options.heating_w_m3)
+        self.heating_scale_height_m = float(
+            options.heating_scale_height_megameter * 1.0e6
+        )
+        self.magnetic_floor_gauss = float(options.magnetic_floor_gauss)
+        self.network = MLPModel(
+            in_dim=2,
+            out_dim=2,
+            dim=options.heating_network_hidden_dim,
+            n_layers=options.heating_network_hidden_layers,
+            activation=options.heating_network_activation,
+            encoding_config={"type": "identity"},
+        )
+        with torch.no_grad():
+            self.network.out_layer.weight.zero_()
+            self.network.out_layer.bias.zero_()
+
+    def forward(
+        self,
+        magnetic_field_gauss: torch.Tensor,
+        mass_density_kg_m3: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(amplitude_w_m3, scale_height_m)`` for a batch of points."""
+
+        magnitude = torch.sqrt(
+            magnetic_field_gauss.square().sum(-1) + self.magnetic_floor_gauss**2
+        )
+        log_field = torch.log10(magnitude / HEATING_NETWORK_REFERENCE_GAUSS)
+        log_density = torch.log10(
+            mass_density_kg_m3 / HEATING_NETWORK_REFERENCE_DENSITY_KG_M3
+        )
+        raw = self.network(torch.stack((log_field, log_density), dim=-1))
+        # Clamped, not just exponentiated: points far outside the corona
+        # (e.g. below coronal_energy's minimum_height_megameter, evaluated
+        # anyway so the loss reduction can mask them by height rather than
+        # pre-filtering the batch) can feed this network wildly
+        # out-of-distribution inputs. exp(_MAX_EXP_ARGUMENT) is already many
+        # orders of magnitude past any physical heating rate, so the clamp
+        # only ever engages there -- it keeps the output finite instead of
+        # overflowing to inf, which a masked-out point could otherwise still
+        # poison shared parameters' gradients with (0 * inf = nan).
+        amplitude = self.heating_w_m3 * torch.exp(raw[..., 0].clamp(max=_MAX_EXP_ARGUMENT))
+        scale_height = self.heating_scale_height_m * torch.exp(
+            raw[..., 1].clamp(max=_MAX_EXP_ARGUMENT)
+        )
+        return amplitude, scale_height
 
 
 class CoronalCoolingTable(nn.Module):
@@ -58,9 +163,14 @@ class CoronalCoolingTable(nn.Module):
     These numerical tails do not extend the physical validity of the closure.
     """
 
-    def __init__(self, path):
+    def __init__(self, resource):
         super().__init__()
-        payload = Path(path).read_bytes()
+        resource = (
+            resolve_resource_reference(resource)
+            if isinstance(resource, str)
+            else Path(resource)
+        )
+        payload = resource.read_bytes()
         self.sha256 = hashlib.sha256(payload).hexdigest()
         document = json.loads(payload)
         if (
@@ -131,6 +241,18 @@ class CoronalCoolingTable(nn.Module):
         return result
 
 
+def _mass_u_per_h_nucleus(thermodynamic_eos) -> float:
+    """Return the mean atomic mass per H nucleus for either EOS shape.
+
+    ``HybridSolarEOS`` (and simple test doubles) expose this directly.
+    ``SolarPlasmaTable``, the production unified-lookup wrapper, only exposes
+    it on the ``HybridSolarEOS`` instance it wraps as ``.eos``.
+    """
+
+    value = getattr(thermodynamic_eos, "mass_u_per_h_nucleus", None)
+    return value if value is not None else thermodynamic_eos.eos.mass_u_per_h_nucleus
+
+
 def coordinate_gradient(value, coordinates, *, create_graph=True):
     """Pointwise derivative, including constant/unused-coordinate fields."""
     if not value.requires_grad:
@@ -160,14 +282,21 @@ def spitzer_heat_flux(temperature, gradient_k_m, magnetic_gauss, coefficient, fl
 
 
 class CoronalEnergy(nn.Module):
-    """One normalized dynamic pressure-equation residual; no learned heating."""
+    """One normalized dynamic pressure-equation residual.
+
+    Heating keeps the fixed exponential height profile but its amplitude and
+    scale height are learned functions of the local field strength and mass
+    density through ``HeatingNetwork``, rather than the two fixed constants
+    used previously.
+    """
 
     def __init__(self, options):
         super().__init__()
         self.options = options
-        if options.cooling_table is None:
-            raise ValueError("coronal_energy requires a prepared cooling_table")
-        self.cooling = CoronalCoolingTable(options.cooling_table)
+        if options.cooling_resource is None:
+            raise ValueError("coronal_energy requires a prepared cooling_resource")
+        self.cooling = CoronalCoolingTable(options.cooling_resource)
+        self.heating = HeatingNetwork(options)
 
     def residual(
         self,
@@ -226,13 +355,16 @@ class CoronalEnergy(nn.Module):
         *,
         create_graph,
         model_time_scale_s: float | None,
+        return_components: bool = False,
     ):
         """Evaluate the coronal energy equation in model units.
 
         Atomic cooling and the conductivity coefficient remain in their native
         physical table/operator units inside this adapter.  The atmosphere
         fields, derivatives, source normalization, and returned residual are
-        dimensionless.
+        dimensionless. With ``return_components=True``, also returns the
+        transport/heating/radiation/conduction breakdown before it is summed
+        and divided by the local pressure scale, for diagnostic rendering.
         """
         parameter = next(atmosphere.parameters())
         coordinates = (
@@ -315,21 +447,48 @@ class CoronalEnergy(nn.Module):
         density = atmosphere.mass_density_normalized(temperature, pressure)
         electrons = atmosphere.electron_density_normalized(temperature, pressure)
         temperature_si = temperature * atmosphere.temperature_scale_k
+        # The SI density product must enter the exponent, not multiply it: the
+        # normalized densities and a coronal Lambda leave exp() below float32's
+        # smallest normal, while the coefficient alone is above its largest.
+        # Summing the logarithms keeps the physical W m^-3 loss representable.
+        log_radiation_coefficient = (
+            math.log(atmosphere.electron_density_scale_m3)
+            + math.log(atmosphere.density_scale_kg_m3)
+            - math.log(
+                _mass_u_per_h_nucleus(atmosphere.thermodynamic_eos) * ATOMIC_MASS_UNIT
+            )
+        )
+        # Clamped for the same reason as HeatingNetwork's exp(): a point far
+        # below minimum_height_megameter (evaluated anyway; masked out only
+        # at the loss reduction) can push this argument arbitrarily high.
         radiation = torch.exp(
-            electrons.log()
-            + density.log()
-            + self.cooling(temperature_si) * 2.302585092994046
+            (
+                electrons.log()
+                + density.log()
+                + self.cooling(temperature_si) * 2.302585092994046
+                + log_radiation_coefficient
+            ).clamp(max=_MAX_EXP_ARGUMENT)
         )
         height_model = (
             torch.linalg.vector_norm(coordinates[:, :3], dim=-1)
             - 1.0
         ) * atmosphere.solar_radius_model
-        heating = self.options.heating_w_m3 * torch.exp(
-            -(
-                height_model
-                - self.options.minimum_height_megameter * 1.0e6 / length_scale_m
-            )
-            / (self.options.heating_scale_height_megameter * 1.0e6 / length_scale_m)
+        magnetic_gauss = magnetic * atmosphere.magnetic_scale_gauss
+        density_kg_m3 = density * atmosphere.density_scale_kg_m3
+        heating_amplitude, heating_scale_height_m = self.heating(
+            magnetic_gauss, density_kg_m3
+        )
+        # Also clamped: well below minimum_height_megameter this exponent is
+        # large and positive (the profile is only designed to decay upward),
+        # and a learned scale_height can shrink toward zero.
+        heating = heating_amplitude * torch.exp(
+            (
+                -(
+                    height_model
+                    - self.options.minimum_height_megameter * 1.0e6 / length_scale_m
+                )
+                / (heating_scale_height_m / length_scale_m)
+            ).clamp(max=_MAX_EXP_ARGUMENT)
         )
         rate_time = float(time_scale_s) / time_scale_model_s
         rate_advective = (
@@ -345,31 +504,39 @@ class CoronalEnergy(nn.Module):
                 + gamma * divergence_velocity_model
             )
         )
-        radiation_coefficient = (
-            atmosphere.electron_density_scale_m3
-            * atmosphere.density_scale_kg_m3
-            / (
-                atmosphere.thermodynamic_eos.mass_u_per_h_nucleus
-                * ATOMIC_MASS_UNIT
-            )
-        )
         conductivity_coefficient = (
             self.options.conductivity_w_m_k72
             * 1.0e15
             * atmosphere.temperature_scale_k
             / length_scale_m**2
         )
-        source = float(time_scale_s) / atmosphere.gas_pressure_scale_pa * (
-            heating
-            - radiation_coefficient * radiation
-            - conductivity_coefficient * divergence_flux_shape
-        )
-        residual = (
-            dynamic - (gamma - 1.0) * source
-        ) / pressure.detach().clamp_min(torch.finfo(pressure.dtype).tiny)
-        if not torch.isfinite(residual).all():
-            raise FloatingPointError("Non-finite coronal energy residual")
-        return residual
+        # Same decomposition style as the other normalized force-balance
+        # equations (e.g. momentum's "-J×B"): each term keeps the sign it
+        # contributes to the residual, so the labelled terms sum exactly to
+        # `dynamic - (gamma - 1) * source` -- verify algebraically before
+        # changing any sign here.
+        gamma_factor = (gamma - 1.0) * float(time_scale_s) / atmosphere.gas_pressure_scale_pa
+        heating_term = -gamma_factor * heating
+        radiation_term = gamma_factor * radiation
+        conduction_term = gamma_factor * conductivity_coefficient * divergence_flux_shape
+        pressure_scale = pressure.detach().clamp_min(torch.finfo(pressure.dtype).tiny)
+        residual = (dynamic + heating_term + radiation_term + conduction_term) / pressure_scale
+        # No finiteness check here: the caller may evaluate this at points
+        # outside coronal_energy's valid domain (below minimum_height_megameter)
+        # on purpose, sharing the volume equations' collocation batch instead
+        # of pre-filtering it -- those points are expected to be masked out of
+        # the loss afterward, not necessarily finite. The caller is
+        # responsible for checking finiteness of whatever subset it actually
+        # uses (see MagnetofluidConstraints.upper_domain).
+        if not return_components:
+            return residual
+        components = {
+            "D_t p + γp∇·v": dynamic,
+            "-(γ-1)Q_heat": heating_term,
+            "+(γ-1)n_e n_H Λ": radiation_term,
+            "+(γ-1)∇·F_c": conduction_term,
+        }
+        return residual, components, pressure_scale
 
     def _residual_physical(
         self,
@@ -428,7 +595,7 @@ class CoronalEnergy(nn.Module):
         eos = atmosphere.thermodynamic_eos
         density = eos.mass_density(temperature, pressure)
         electrons = eos.electron_density(temperature, pressure)
-        hydrogen = density / (eos.mass_u_per_h_nucleus * ATOMIC_MASS_UNIT)
+        hydrogen = density / (_mass_u_per_h_nucleus(eos) * ATOMIC_MASS_UNIT)
         # Multiply in log space: neither n_e*n_H nor a tiny Lambda need exist
         # as an intermediate float32 value.
         radiation = torch.exp(
@@ -437,9 +604,10 @@ class CoronalEnergy(nn.Module):
             + self.cooling(temperature) * 2.302585092994046
         )
         height_m = (coordinates[:, :3].norm(dim=-1) - 1.0) * radius
-        heating = self.options.heating_w_m3 * torch.exp(
+        heating_amplitude, heating_scale_height_m = self.heating(magnetic, density)
+        heating = heating_amplitude * torch.exp(
             -(height_m - self.options.minimum_height_megameter * 1.0e6)
-            / (self.options.heating_scale_height_megameter * 1.0e6)
+            / heating_scale_height_m
         )
         transport = dp[:, 3] / 3600.0 + (velocity * dp[:, :3]).sum(-1) / radius
         # Divide the entire physical pressure residual by a detached pressure

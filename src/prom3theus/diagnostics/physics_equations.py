@@ -9,7 +9,7 @@ import torch
 from .providers import DiagnosticOutput
 
 
-def equation_figure(latitude_deg, height_mm, equation, data, *, longitude_deg, time_hours):
+def equation_figure(latitude_deg, height_megameter, equation, data, *, longitude_deg, time_hours):
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm, Normalize
 
@@ -41,7 +41,7 @@ def equation_figure(latitude_deg, height_mm, equation, data, *, longitude_deg, t
     # column title.
     term_count = len(raw_terms)
     fig, axes = plt.subplots(2, 1 + term_count, figsize=(4.3 * (1 + term_count), 7), squeeze=False, layout='constrained')
-    shape = (len(height_mm), len(latitude_deg))
+    shape = (len(height_megameter), len(latitude_deg))
     for row, prefix in enumerate(('', 'normalized_')):
         residual = np.asarray(data[prefix + 'residual'])
         residual_magnitude = (
@@ -65,7 +65,7 @@ def equation_figure(latitude_deg, height_mm, equation, data, *, longitude_deg, t
             norm, plotted = color_norm(scale_values)
             if col != 0:
                 plotted = np.ma.masked_less_equal(values, 0.0)
-            mesh = ax.pcolormesh(latitude_deg, height_mm, plotted, shading='auto', cmap='magma', norm=norm)
+            mesh = ax.pcolormesh(latitude_deg, height_megameter, plotted, shading='auto', cmap='magma', norm=norm)
             unit = 'dimensionless' if row else data['units']
             fig.colorbar(mesh, ax=ax, label=unit)
             ax.set_title(name)
@@ -77,7 +77,7 @@ def equation_figure(latitude_deg, height_mm, equation, data, *, longitude_deg, t
                     if data['units'].startswith('dimensionless')
                     else 'Unnormalized'
                 )
-                ax.set_ylabel((base_label if row == 0 else 'Normalized (loss)') + '\nHeight [Mm]')
+                ax.set_ylabel((base_label if row == 0 else 'Normalized (loss)') + '\nHeight [megameter]')
     title = {'magnetohydrostatic_equilibrium': 'MHS', 'hydrostatic_equilibrium': 'HSE',
              'magnetic_divergence': 'div B'}.get(equation, equation.replace('_', ' '))
     raw_residual = np.asarray(data['residual'])
@@ -106,7 +106,7 @@ def evaluate_equation_slice(model, constraints, domain, *, longitude_deg, latitu
         math.sin(domain.latitude_bounds_rad[1]) - math.sin(domain.latitude_bounds_rad[0])
     )
     fraction = torch.linspace(0, 1, height_points, device=parameter.device)
-    height = domain.height_bounds_Mm[0] + fraction * (domain.height_bounds_Mm[1] - domain.height_bounds_Mm[0])
+    height = domain.height_bounds_megameter[0] + fraction * (domain.height_bounds_megameter[1] - domain.height_bounds_megameter[0])
     lon_min = domain.longitude_center_rad + domain.longitude_offset_bounds_rad[0]
     lon_width = domain.longitude_offset_bounds_rad[1] - domain.longitude_offset_bounds_rad[0]
     longitude = domain.longitude_center_rad + math.remainder(math.radians(longitude_deg) - domain.longitude_center_rad, 2 * math.pi)
@@ -139,7 +139,7 @@ def evaluate_equation_slice(model, constraints, domain, *, longitude_deg, latitu
     return lat.cpu().numpy() * 180 / np.pi, height.cpu().numpy(), collected, losses, time
 
 
-def _height_statistics(values, height_mm, latitude_count):
+def _height_statistics(values, height_megameter, latitude_count):
     """Summarize one residual/term at every sampled height."""
 
     values = np.asarray(values)
@@ -148,11 +148,11 @@ def _height_statistics(values, height_mm, latitude_count):
         if values.ndim == 1
         else np.linalg.norm(values, axis=-1)
     )
-    height_count = len(height_mm)
+    height_count = len(height_megameter)
     magnitudes = magnitudes.reshape(height_count, latitude_count)
     return [
         {
-            "height_Mm": float(height_mm[index]),
+            "height_megameter": float(height_megameter[index]),
             "mean": float(np.mean(row)),
             "rms": float(np.sqrt(np.mean(row**2))),
             "p50": float(np.percentile(row, 50)),
@@ -165,6 +165,72 @@ def _height_statistics(values, height_mm, latitude_count):
     ]
 
 
+# Cleared above minimum_height_megameter, not just clamped to it: the domain
+# geometry -> position -> height round trip (through _positions and then
+# upper_domain's own `position.norm() - solar_radius_m`) can land a point
+# constructed exactly at the boundary a hair below it, especially on GPU
+# where reduction rounding differs from CPU -- upper_domain then sees a
+# partial mask and rejects the whole diagnostic call. 10 km is several
+# orders of magnitude above that float32 position-scale rounding noise
+# (~10-100 m at solar-radius magnitudes) and negligible on any megameter-scale plot.
+_UPPER_SLICE_HEIGHT_MARGIN_MEGAMETER = 0.01
+
+
+def evaluate_upper_equation_slice(
+    model, constraints, domain, *, longitude_deg, latitude_points, height_points,
+    batch_size, minimum_height_megameter,
+):
+    """Same grid construction as ``evaluate_equation_slice``, for equations
+    evaluated through ``constraints.upper_domain`` (the spectrally invisible
+    upper atmosphere) rather than ``constraints.volume``.
+
+    Their valid domain starts at ``minimum_height_megameter``, not the
+    sampling domain's own lower bound, so every sampled point stays inside it
+    -- ``upper_domain`` rejects a partial mask under ``return_diagnostics``.
+    """
+    parameter = next(model.parameters())
+    lat = torch.linspace(*domain.latitude_bounds_rad, latitude_points, device=parameter.device)
+    latitude_fraction = (lat.sin() - math.sin(domain.latitude_bounds_rad[0])) / (
+        math.sin(domain.latitude_bounds_rad[1]) - math.sin(domain.latitude_bounds_rad[0])
+    )
+    height_lower_megameter = max(
+        domain.height_bounds_megameter[0],
+        minimum_height_megameter + _UPPER_SLICE_HEIGHT_MARGIN_MEGAMETER,
+    )
+    fraction = torch.linspace(0, 1, height_points, device=parameter.device)
+    height = height_lower_megameter + fraction * (domain.height_bounds_megameter[1] - height_lower_megameter)
+    lon_min = domain.longitude_center_rad + domain.longitude_offset_bounds_rad[0]
+    lon_width = domain.longitude_offset_bounds_rad[1] - domain.longitude_offset_bounds_rad[0]
+    longitude = domain.longitude_center_rad + math.remainder(math.radians(longitude_deg) - domain.longitude_center_rad, 2 * math.pi)
+    u = (longitude - lon_min) / lon_width
+    if not 0 <= u <= 1:
+        raise ValueError('Physics slice longitude is outside the observed domain')
+    time = sum(domain.time_bounds_hours) / 2
+    chunk_heights = max(1, batch_size // latitude_points)
+    collected = {}
+    losses = {}
+    with torch.inference_mode(False), torch.enable_grad():
+        for begin in range(0, height_points, chunk_heights):
+            h = height[begin:begin + chunk_heights]
+            hh, vv = torch.meshgrid(h, latitude_fraction, indexing='ij')
+            positions = domain._positions(hh.flatten(), torch.full_like(hh.flatten(), u), vv.flatten(), torch.full_like(hh.flatten(), .5), device=parameter.device)['position_m']
+            result = constraints.upper_domain(model, positions, torch.full((len(positions), 1), time, device=parameter.device), height_group_shape=(len(h), latitude_points), create_graph=False, return_diagnostics=True)
+            for name, data in result.equation_diagnostics.items():
+                dest = collected.setdefault(name, {'units': data['units'], 'weight': data['weight'], 'robust_loss_delta': data.get('robust_loss_delta', 0.0), 'terms': {}, 'normalized_terms': {}, 'residual': [], 'normalized_residual': []})
+                for key in ('terms', 'normalized_terms'):
+                    for term, values in data[key].items():
+                        dest[key].setdefault(term, []).append(values.cpu().numpy())
+                for key in ('residual', 'normalized_residual'):
+                    dest[key].append(data[key].cpu().numpy())
+                losses[name] = losses.get(name, 0.) + float(result.losses[name].detach()) * len(h) / height_points
+    for data in collected.values():
+        for key in ('terms', 'normalized_terms'):
+            data[key] = {name: np.concatenate(parts) for name, parts in data[key].items()}
+        for key in ('residual', 'normalized_residual'):
+            data[key] = np.concatenate(data[key])
+    return lat.cpu().numpy() * 180 / np.pi, height.cpu().numpy(), collected, losses, time
+
+
 def render_physics_equations(runtime, trainer, output):
     from prom3theus.inversion.data_terms.regularization import PhysicsConstraintTerm
     options = runtime.config.diagnostics.visualization
@@ -172,17 +238,9 @@ def render_physics_equations(runtime, trainer, output):
         return DiagnosticOutput({'enabled': False})
     import matplotlib.pyplot as plt
     paths, report = [], {}
-    for name, term in runtime.model.shared_objectives.items():
-        if not isinstance(term, PhysicsConstraintTerm) or not term.constraints.volume_active:
-            continue
-        sampling = options.slice_sampling
-        lat, height, equations, losses, time = evaluate_equation_slice(
-            runtime.model.atmosphere_model, term.constraints, term.sampling_domain,
-            longitude_deg=options.meridional_slice.longitude_deg,
-            latitude_points=sampling.latitude_points, height_points=sampling.radial_points,
-            batch_size=sampling.batch_size,
-        )
-        directory = Path(output) / 'physics_equations'
+    directory = Path(output) / 'physics_equations'
+
+    def render_slice(name, term, lat, height, equations, losses, time):
         directory.mkdir(parents=True, exist_ok=True)
         for equation, data in equations.items():
             if equation == 'magnetic_current_free':
@@ -196,7 +254,7 @@ def render_physics_equations(runtime, trainer, output):
             finally:
                 plt.close(fig)
             paths.append(str(path))
-            np.savez_compressed(path.with_suffix('.npz'), latitude_deg=lat, height_Mm=height,
+            np.savez_compressed(path.with_suffix('.npz'), latitude_deg=lat, height_megameter=height,
                                 residual=data['residual'], normalized_residual=data['normalized_residual'],
                                 **{f'raw_{i}': value for i, value in enumerate(data['terms'].values())},
                                 **{f'normalized_{i}': value for i, value in enumerate(data['normalized_terms'].values())})
@@ -251,4 +309,35 @@ def render_physics_equations(runtime, trainer, output):
                 },
             }
         (directory / f'{name}_step{trainer.global_step}.json').write_text(json.dumps(report, indent=2))
+
+    for name, term in runtime.model.shared_objectives.items():
+        if not isinstance(term, PhysicsConstraintTerm):
+            continue
+        sampling = options.slice_sampling
+        if term.constraints.volume_active:
+            lat, height, equations, losses, time = evaluate_equation_slice(
+                runtime.model.atmosphere_model, term.constraints, term.sampling_domain,
+                longitude_deg=options.meridional_slice.longitude_deg,
+                latitude_points=sampling.latitude_points, height_points=sampling.radial_points,
+                batch_size=sampling.batch_size,
+            )
+            render_slice(name, term, lat, height, equations, losses, time)
+        # Only coronal_energy currently reports upper-domain diagnostics; the
+        # thermodynamic priors sharing this domain are simple reference-offset
+        # penalties without a comparable multi-term breakdown to plot.
+        if (
+            term.constraints.upper_volume_active
+            and term.upper_sampling_domain is not None
+            and term.constraints.coronal_energy is not None
+        ):
+            lat, height, equations, losses, time = evaluate_upper_equation_slice(
+                runtime.model.atmosphere_model, term.constraints, term.upper_sampling_domain,
+                longitude_deg=options.meridional_slice.longitude_deg,
+                latitude_points=sampling.latitude_points, height_points=sampling.radial_points,
+                batch_size=sampling.batch_size,
+                minimum_height_megameter=(
+                    term.constraints.coronal_energy.options.minimum_height_megameter
+                ),
+            )
+            render_slice(name, term, lat, height, equations, losses, time)
     return DiagnosticOutput(report, tuple(paths), media_groups={f'Physics equation {Path(path).stem.split("_step")[0]}': (path,) for path in paths})

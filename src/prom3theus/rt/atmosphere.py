@@ -27,12 +27,12 @@ from prom3theus.core import (
     M_ELECTRON,
     MLPModel,
     SIRENModel,
-    SPEED_OF_LIGHT,
 )
 from prom3theus.resources import verify_manifest_resource
 from .atomic import AtomicDatabase
 from .plasma import SolarPlasmaTable
 from .geometry import (
+    radial_height_along_ray,
     RayTraceResult,
     validate_scene_basis,
 )
@@ -769,6 +769,16 @@ def _scalar_gradient(
     return gradient
 
 
+def _divergence_from_jacobian(jacobian: torch.Tensor) -> torch.Tensor:
+    """Return divergence for a ``[..., vector component, coordinate]`` Jacobian.
+
+    The vector-potential paths already build this Jacobian to form
+    ``B = curl(A)``; its trace is ``div A`` at no additional cost.
+    """
+
+    return torch.diagonal(jacobian, dim1=-2, dim2=-1).sum(dim=-1)
+
+
 def _curl_from_jacobian(jacobian: torch.Tensor) -> torch.Tensor:
     """Return curl for a ``[..., vector component, coordinate]`` Jacobian."""
 
@@ -946,9 +956,11 @@ class StratifiedAtmosphereModel(nn.Module):
     vector-potential decoder. In the latter mode, the three magnetic readout
     channels are an ``A`` field in G m and the exposed magnetic field is the
     physical Cartesian curl ``B = curl(A)`` in G.
-    Velocity components use a smooth arctangent bound with the configured
-    local linear scale, preventing invalid relativistic Doppler factors while
-    retaining nonzero gradients outside the ordinary photospheric range.
+    Velocity components are an unbounded linear readout scaled by
+    ``velocity_scale_m_per_s``, the expected local flow magnitude; nothing in
+    the atmosphere decoder caps velocity, so an implausible or superluminal
+    value surfaces as an explicit assertion failure downstream in synthesis
+    (``|v_los| < c``) rather than being silently clipped here.
     """
 
     _DIRECT_OUTPUT_NAMES = (
@@ -981,24 +993,24 @@ class StratifiedAtmosphereModel(nn.Module):
     def __init__(
         self,
         *,
-        shell_height_bounds_Mm: tuple[float, float],
+        shell_height_bounds_megameter: tuple[float, float],
         temperature_log_scale: float = 0.2,
         velocity_scale_m_per_s: float = 1_000.0,
-        velocity_max_m_per_s: float = 100_000.0,
         magnetic_scale_gauss: float = 100.0,
+        scale_vector_potential: float = 1.0,
         magnetic_representation: str = "direct",
         magnetic_reference_height_megameter: float | None = None,
         magnetic_potential_delta_cool_steps: int = 0,
         magnetic_potential_delta_ramp_steps: int = 0,
         gas_pressure_log_scale: float = 1.0,
-        spatial_coordinate_center_mm=(0.0, 0.0),
-        spatial_coordinate_scale_mm=(1.0, 1.0),
+        spatial_coordinate_center_megameter=(0.0, 0.0),
+        spatial_coordinate_scale_megameter=(1.0, 1.0),
         height_input_scale_m: float = 1_000_000.0,
         uniform_spatial_scaling: bool = False,
         time_dependent: bool = False,
         time_coordinate_center_hours: float = 0.0,
         time_coordinate_scale_hours: float = 1.0,
-        line_formation_height_bounds_Mm: tuple[float, float] | None = None,
+        line_formation_height_bounds_megameter: tuple[float, float] | None = None,
         tangent_margin_m: float = 1_000.0,
         reference_atmosphere_config: str | Mapping | None = "falc_82",
         upper_atmosphere_config: Mapping | None = None,
@@ -1010,8 +1022,8 @@ class StratifiedAtmosphereModel(nn.Module):
         scales = {
             "temperature_log_scale": temperature_log_scale,
             "velocity_scale_m_per_s": velocity_scale_m_per_s,
-            "velocity_max_m_per_s": velocity_max_m_per_s,
             "magnetic_scale_gauss": magnetic_scale_gauss,
+            "scale_vector_potential": scale_vector_potential,
             "gas_pressure_log_scale": gas_pressure_log_scale,
             "microturbulence_log_scale": microturbulence_log_scale,
         }
@@ -1022,16 +1034,11 @@ class StratifiedAtmosphereModel(nn.Module):
             raise ValueError(
                 f"Atmosphere physical scales must be positive; got {scales}."
             )
-        if math.sqrt(3.0) * float(velocity_max_m_per_s) >= SPEED_OF_LIGHT:
-            raise ValueError(
-                "sqrt(3)*velocity_max_m_per_s must remain below the speed of light "
-                "so every projected velocity is strictly subluminal."
-            )
 
         self.temperature_log_scale = float(temperature_log_scale)
         self.velocity_scale_m_per_s = float(velocity_scale_m_per_s)
-        self.velocity_max_m_per_s = float(velocity_max_m_per_s)
         self.magnetic_scale_gauss = float(magnetic_scale_gauss)
+        self.scale_vector_potential = float(scale_vector_potential)
         if magnetic_representation not in {
             "direct",
             "vector_potential",
@@ -1060,18 +1067,18 @@ class StratifiedAtmosphereModel(nn.Module):
         self.gas_pressure_log_scale = float(gas_pressure_log_scale)
         self.microturbulence_log_scale = float(microturbulence_log_scale)
         self.register_buffer(
-            "spatial_coordinate_center_mm",
+            "spatial_coordinate_center_megameter",
             _coordinate_pair(
-                spatial_coordinate_center_mm,
-                name="spatial_coordinate_center_mm",
+                spatial_coordinate_center_megameter,
+                name="spatial_coordinate_center_megameter",
                 positive=False,
             ),
         )
         self.register_buffer(
-            "spatial_coordinate_scale_mm",
+            "spatial_coordinate_scale_megameter",
             _coordinate_pair(
-                spatial_coordinate_scale_mm,
-                name="spatial_coordinate_scale_mm",
+                spatial_coordinate_scale_megameter,
+                name="spatial_coordinate_scale_megameter",
                 positive=True,
             ),
         )
@@ -1130,17 +1137,17 @@ class StratifiedAtmosphereModel(nn.Module):
             self.solar_radius_m / self.height_input_scale_m,
         )
         self.solar_radius_value_m = solar_radius_m
-        shell_height_bounds_Mm = tuple(map(float, shell_height_bounds_Mm))
-        if len(shell_height_bounds_Mm) != 2 or not (
-            math.isfinite(shell_height_bounds_Mm[0])
-            and math.isfinite(shell_height_bounds_Mm[1])
-            and shell_height_bounds_Mm[0] > shell_height_bounds_Mm[1]
+        shell_height_bounds_megameter = tuple(map(float, shell_height_bounds_megameter))
+        if len(shell_height_bounds_megameter) != 2 or not (
+            math.isfinite(shell_height_bounds_megameter[0])
+            and math.isfinite(shell_height_bounds_megameter[1])
+            and shell_height_bounds_megameter[0] > shell_height_bounds_megameter[1]
         ):
             raise ValueError(
-                "shell_height_bounds_Mm must be [outer_height, inner_height] "
-                "as offsets from R_sun in Mm, with outer_height > inner_height."
+                "shell_height_bounds_megameter must be [outer_height, inner_height] "
+                "as offsets from R_sun in megameter, with outer_height > inner_height."
             )
-        self.shell_height_bounds_Mm = shell_height_bounds_Mm
+        self.shell_height_bounds_megameter = shell_height_bounds_megameter
         if (
             self.magnetic_representation in ("vector_potential", "potential_delta")
             and magnetic_reference_height_megameter is not None
@@ -1156,30 +1163,30 @@ class StratifiedAtmosphereModel(nn.Module):
                 raise TypeError("magnetic_reference_height_megameter must be numeric or null")
             magnetic_reference_height_megameter = float(magnetic_reference_height_megameter)
             if not math.isfinite(magnetic_reference_height_megameter) or not (
-                shell_height_bounds_Mm[1]
+                shell_height_bounds_megameter[1]
                 <= magnetic_reference_height_megameter
-                <= shell_height_bounds_Mm[0]
+                <= shell_height_bounds_megameter[0]
             ):
                 raise ValueError("magnetic_reference_height_megameter must be finite and lie within the shell")
         self.magnetic_reference_height_megameter = magnetic_reference_height_megameter
-        if line_formation_height_bounds_Mm is None:
-            line_formation_height_bounds_Mm = shell_height_bounds_Mm
-        line_formation_height_bounds_Mm = tuple(
-            map(float, line_formation_height_bounds_Mm)
+        if line_formation_height_bounds_megameter is None:
+            line_formation_height_bounds_megameter = shell_height_bounds_megameter
+        line_formation_height_bounds_megameter = tuple(
+            map(float, line_formation_height_bounds_megameter)
         )
-        if len(line_formation_height_bounds_Mm) != 2 or not (
-            line_formation_height_bounds_Mm[1] == shell_height_bounds_Mm[1]
-            and shell_height_bounds_Mm[1]
-            < line_formation_height_bounds_Mm[0]
-            <= shell_height_bounds_Mm[0]
+        if len(line_formation_height_bounds_megameter) != 2 or not (
+            line_formation_height_bounds_megameter[1] == shell_height_bounds_megameter[1]
+            and shell_height_bounds_megameter[1]
+            < line_formation_height_bounds_megameter[0]
+            <= shell_height_bounds_megameter[0]
         ):
             raise ValueError(
-                "line_formation_height_bounds_Mm must share the shell inner "
+                "line_formation_height_bounds_megameter must share the shell inner "
                 "height and end at or below the full-domain outer height."
             )
-        self.line_formation_height_bounds_Mm = line_formation_height_bounds_Mm
+        self.line_formation_height_bounds_megameter = line_formation_height_bounds_megameter
         self.extrapolation_enabled = (
-            line_formation_height_bounds_Mm[0] < shell_height_bounds_Mm[0]
+            line_formation_height_bounds_megameter[0] < shell_height_bounds_megameter[0]
         )
         if self.extrapolation_enabled and upper_atmosphere_config is None:
             raise ValueError("An extrapolated shell requires upper_atmosphere_config.")
@@ -1194,11 +1201,11 @@ class StratifiedAtmosphereModel(nn.Module):
             reference_atmosphere_config,
             upper_atmosphere_config=upper_atmosphere_config,
             maximum_height_m=(
-                shell_height_bounds_Mm[0] * 1.0e6
+                shell_height_bounds_megameter[0] * 1.0e6
                 if self.extrapolation_enabled
                 else None
             ),
-            minimum_height_m=shell_height_bounds_Mm[1] * 1.0e6,
+            minimum_height_m=shell_height_bounds_megameter[1] * 1.0e6,
             solar_radius_m=solar_radius_m,
             thermodynamic_eos=self.thermodynamic_eos,
             atomic_database=atomic_database,
@@ -1240,7 +1247,7 @@ class StratifiedAtmosphereModel(nn.Module):
             )
         self.density_scale_kg_m3 = float(density_scale.detach().item())
         self.electron_density_scale_m3 = float(electron_density_scale.detach().item())
-        top_height = self.solar_radius_m.new_tensor(shell_height_bounds_Mm[0] * 1.0e6)
+        top_height = self.solar_radius_m.new_tensor(shell_height_bounds_megameter[0] * 1.0e6)
         top_reference_logs = self.reference_atmosphere.logs_at_height(top_height)
         if top_reference_logs[1] <= math.log(
             torch.finfo(self.solar_radius_m.dtype).tiny
@@ -1312,8 +1319,8 @@ class StratifiedAtmosphereModel(nn.Module):
                 radial_weighting.update(
                     radial_dimension=2,
                     radial_bounds=(
-                        shell_height_bounds_Mm[1] * 1.0e6 / self.height_input_scale_m,
-                        shell_height_bounds_Mm[0] * 1.0e6 / self.height_input_scale_m,
+                        shell_height_bounds_megameter[1] * 1.0e6 / self.height_input_scale_m,
+                        shell_height_bounds_megameter[0] * 1.0e6 / self.height_input_scale_m,
                     ),
                 )
             self.network = SIRENModel(
@@ -1333,6 +1340,13 @@ class StratifiedAtmosphereModel(nn.Module):
             for index in (0, 7, 8):
                 self.network.out_layer.weight[index].zero_()
                 self.network.out_layer.bias[index].zero_()
+            if self.magnetic_representation == "direct":
+                # Parameter scaling should control update conditioning, not
+                # seed a kilogauss answer when a kG optimization scale is used.
+                # Retain a weak nonzero field for transverse Zeeman gradients.
+                gain = min(1., 10./self.magnetic_scale_gauss)
+                self.network.out_layer.weight[4:7].mul_(gain)
+                self.network.out_layer.bias[4:7].mul_(gain)
 
     def set_step(self, step: int) -> None:
         """Set the current training step for the ``potential_delta`` alpha ramp."""
@@ -1368,7 +1382,7 @@ class StratifiedAtmosphereModel(nn.Module):
             raise ValueError(
                 "geometric_height_m must be finite and strictly decrease inward."
             )
-        outer, inner = self.shell_height_bounds_Mm
+        outer, inner = self.shell_height_bounds_megameter
         tolerance = (
             2 * torch.finfo(height.dtype).eps * max(abs(outer), abs(inner)) * 1e6
         )
@@ -1385,14 +1399,14 @@ class StratifiedAtmosphereModel(nn.Module):
             raise ValueError("coords must end in [x, y, time].")
         # Scene chart geometry is unchanged. Only neural input normalization
         # uses the same physical length for x, y, and radial height.
-        spatial_scale_mm = (
+        spatial_scale_megameter = (
             self.height_input_scale_m / 1e6
             if getattr(self, "uniform_spatial_scaling", False)
-            else self.spatial_coordinate_scale_mm.to(coords)
+            else self.spatial_coordinate_scale_megameter.to(coords)
         )
         normalized_xy = (
-            coords[..., :2] - self.spatial_coordinate_center_mm.to(coords)
-        ) / spatial_scale_mm
+            coords[..., :2] - self.spatial_coordinate_center_megameter.to(coords)
+        ) / spatial_scale_megameter
         if geometric_height_m.shape[:-1] != coords.shape[:-1]:
             raise ValueError(
                 "geometric_height_m must have shape coords.shape[:-1]+[points]."
@@ -1467,12 +1481,7 @@ class StratifiedAtmosphereModel(nn.Module):
             geometric_height_m.to(raw)
         )
         temperature_log = reference_logs[0] + (self.temperature_log_scale * raw[..., 0])
-        velocity_argument = raw[..., 1:4] * (
-            0.5 * math.pi * self.velocity_scale_m_per_s / self.velocity_max_m_per_s
-        )
-        velocity_field = (
-            self.velocity_max_m_per_s * (2.0 / math.pi) * torch.atan(velocity_argument)
-        )
+        velocity_field = raw[..., 1:4] * self.velocity_scale_m_per_s
         if self.magnetic_representation == "vector_potential":
             if magnetic_field_gauss is None or vector_potential is None:
                 raise RuntimeError(
@@ -1527,15 +1536,9 @@ class StratifiedAtmosphereModel(nn.Module):
                 + self.temperature_log_scale * raw[..., 0]
             )
         )
-        velocity_argument = raw[..., 1:4] * (
-            0.5 * math.pi * self.velocity_scale_m_per_s / self.velocity_max_m_per_s
-        )
-        velocity = (
-            self.velocity_max_m_per_s
-            / self.velocity_scale_m_per_s
-            * (2.0 / math.pi)
-            * torch.atan(velocity_argument)
-        )
+        # Physical velocity is raw * velocity_scale_m_per_s (see _decode_raw);
+        # dividing by the same scale to normalize leaves the raw output itself.
+        velocity = raw[..., 1:4]
         if self.magnetic_representation == "vector_potential":
             if magnetic_field_model is None or vector_potential_model is None:
                 raise RuntimeError(
@@ -1637,11 +1640,23 @@ class StratifiedAtmosphereModel(nn.Module):
                 "must match their leading dimensions."
             )
         if self.magnetic_representation in ("vector_potential", "potential_delta"):
-            position = self.position_from_coords_height(coords, height)
-            return self.evaluate_position_rsun(
-                position / self.solar_radius_m,
-                time_hours=coords[..., 2],
+            evaluator = (
+                self._evaluate_vector_potential_position
+                if self.magnetic_representation == "vector_potential"
+                else self._evaluate_potential_delta_position
             )
+            fields = evaluator(
+                torch.zeros_like(coords),
+                time_hours=coords[..., 2],
+                chart_height_reference=(coords, height),
+            )
+            # ``div A`` rides along with the vector-potential decoder for the
+            # gauge objective, which queries the position evaluators directly.
+            # It is not a radiative-transfer quantity, so it is dropped here
+            # rather than travelling through ``StratifiedAtmosphere`` and every
+            # coarse/fine depth merge that rebuilds one.
+            fields.pop("vector_potential_divergence", None)
+            return fields
         inputs = self._network_inputs_at_height(coords, height[..., None])[..., 0, :]
         raw = self._network_raw(inputs)
         return self._decode_raw(
@@ -1663,18 +1678,38 @@ class StratifiedAtmosphereModel(nn.Module):
             * (self.solar_radius_m + height)[..., None]
         )
 
-    def _chart_direction(self, chart_xy_mm: torch.Tensor) -> torch.Tensor:
+    def _chart_direction(self, chart_xy_megameter: torch.Tensor) -> torch.Tensor:
         """Fast inverse gnomonic map for already validated model coordinates."""
 
         local = torch.cat(
             (
-                chart_xy_mm * (1.0e6 / self.solar_radius_m),
-                torch.ones_like(chart_xy_mm[..., :1]),
+                chart_xy_megameter * (1.0e6 / self.solar_radius_m),
+                torch.ones_like(chart_xy_megameter[..., :1]),
             ),
             dim=-1,
         )
         direction = torch.matmul(local, self.scene_basis.to(local))
         return direction / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
+
+    def _displaced_chart_height(self, displacement_rsun, reference):
+        """Map local Cartesian displacements around an accurately known height.
+
+        Curl/gradient differentiation is with respect to the displacement, so
+        it is identical to differentiation in global Cartesian coordinates.
+        Keeping the origin height separately avoids rounding it through R_sun.
+        """
+        coords, height = reference
+        unit = self._chart_direction(coords.reshape(-1, 3)[..., :2])
+        height = height.reshape(-1)
+        radius = 1.0 + height / self.solar_radius_m
+        position = unit * radius[..., None] + displacement_rsun
+        chart, _ = self._position_chart_height(position)
+        scaled = displacement_rsun / radius[..., None]
+        delta = (scaled * (2.0 * unit + scaled)).sum(-1)
+        height_delta = self.solar_radius_m * (
+            displacement_rsun * (2.0 * unit + scaled)
+        ).sum(-1) / (torch.sqrt(1.0 + delta) + 1.0)
+        return chart, height + height_delta
 
     def _position_chart_height(
         self, position_rsun: torch.Tensor
@@ -1733,7 +1768,10 @@ class StratifiedAtmosphereModel(nn.Module):
                 coordinates, height.reshape(-1, 1)
             )[..., 0, :]
             raw = self._network_raw(inputs)
-            vector_potential = self.vector_potential_scale_gauss_m * raw[..., 4:7]
+            vector_potential = (
+                self.vector_potential_scale_gauss_m
+                * self.scale_vector_potential * raw[..., 4:7]
+            )
         if not need_graph:
             vector_potential = vector_potential.detach()
         return vector_potential.reshape((*output_shape, 3))
@@ -1783,7 +1821,7 @@ class StratifiedAtmosphereModel(nn.Module):
                 coordinates, height.reshape(-1, 1)
             )[..., 0, :]
             raw = self._network_raw(inputs)
-            vector_potential = raw[..., 4:7]
+            vector_potential = self.scale_vector_potential * raw[..., 4:7]
         if not need_graph:
             vector_potential = vector_potential.detach()
         return vector_potential.reshape((*output_shape, 3))
@@ -1829,7 +1867,7 @@ class StratifiedAtmosphereModel(nn.Module):
                 coordinates, height.reshape(-1, 1)
             )[..., 0, :]
             raw = self._network_raw(inputs)
-            vector_potential = raw[..., 4:7]
+            vector_potential = self.scale_vector_potential * raw[..., 4:7]
             jacobian = _batched_vector_jacobian(
                 vector_potential,
                 flat_position,
@@ -1842,6 +1880,13 @@ class StratifiedAtmosphereModel(nn.Module):
                 magnetic_field_model=magnetic_field,
                 vector_potential_model=vector_potential,
             )
+            # The gauge residual is the trace of the Jacobian already built
+            # for the curl, so the gauge constraint costs no extra network
+            # evaluation and no extra sample points.  div(A_hat) carries the
+            # units of B_hat.
+            fields["vector_potential_divergence"] = (
+                _divergence_from_jacobian(jacobian) / self.solar_radius_model
+            )
         if not need_graph:
             fields = {name: value.detach() for name, value in fields.items()}
         return {
@@ -1853,6 +1898,8 @@ class StratifiedAtmosphereModel(nn.Module):
         self,
         position_rsun: torch.Tensor,
         time_hours: torch.Tensor | float | None,
+        *,
+        chart_height_reference: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Evaluate ``A`` and derive ``B = curl(A)`` in physical Cartesian space."""
 
@@ -1867,7 +1914,11 @@ class StratifiedAtmosphereModel(nn.Module):
                 # ``@torch.inference_mode`` inputs cannot be made grad-bearing
                 # by detaching alone; clone into an ordinary autograd tensor.
                 flat_position = flat_position.detach().clone().requires_grad_(True)
-            chart, height = self._position_chart_height(flat_position)
+            chart, height = (
+                self._position_chart_height(flat_position)
+                if chart_height_reference is None
+                else self._displaced_chart_height(flat_position, chart_height_reference)
+            )
             if time_hours is None:
                 time = torch.full(
                     (*output_shape, 1),
@@ -1893,7 +1944,8 @@ class StratifiedAtmosphereModel(nn.Module):
             )[..., 0, :]
             raw = self._network_raw(inputs)
             vector_potential = (
-                self.vector_potential_scale_gauss_m * raw[..., 4:7]
+                self.vector_potential_scale_gauss_m
+                * self.scale_vector_potential * raw[..., 4:7]
             )
             jacobian = _batched_vector_jacobian(
                 vector_potential,
@@ -1907,6 +1959,10 @@ class StratifiedAtmosphereModel(nn.Module):
                 magnetic_field_gauss=magnetic_field,
                 vector_potential=vector_potential,
             )
+            # Free with the curl above; physical div A carries gauss.
+            fields["vector_potential_divergence"] = (
+                _divergence_from_jacobian(jacobian) / self.solar_radius_m
+            )
         if not need_graph:
             fields = {name: value.detach() for name, value in fields.items()}
         return {
@@ -1918,6 +1974,8 @@ class StratifiedAtmosphereModel(nn.Module):
         self,
         position_rsun: torch.Tensor,
         time_hours: torch.Tensor | float | None,
+        *,
+        chart_height_reference: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Evaluate ``B = grad(psi) + alpha * B_delta`` in physical Cartesian space.
 
@@ -1939,7 +1997,11 @@ class StratifiedAtmosphereModel(nn.Module):
             flat_position = position.reshape(-1, 3)
             if not flat_position.requires_grad:
                 flat_position = flat_position.detach().clone().requires_grad_(True)
-            chart, height = self._position_chart_height(flat_position)
+            chart, height = (
+                self._position_chart_height(flat_position)
+                if chart_height_reference is None
+                else self._displaced_chart_height(flat_position, chart_height_reference)
+            )
             if time_hours is None:
                 time = torch.full(
                     (*output_shape, 1),
@@ -2121,6 +2183,10 @@ class StratifiedAtmosphereModel(nn.Module):
             normalized["vector_potential"] = (
                 fields["vector_potential"] / self.vector_potential_scale_gauss_m
             )
+        if "vector_potential_divergence" in fields:
+            normalized["vector_potential_divergence"] = (
+                fields["vector_potential_divergence"] / self.magnetic_scale_gauss
+            )
         if "geometric_height_m" in fields:
             normalized["geometric_height_m"] = (
                 fields["geometric_height_m"] / self.height_input_scale_m
@@ -2149,6 +2215,10 @@ class StratifiedAtmosphereModel(nn.Module):
         if "vector_potential" in fields:
             physical["vector_potential"] = (
                 fields["vector_potential"] * self.vector_potential_scale_gauss_m
+            )
+        if "vector_potential_divergence" in fields:
+            physical["vector_potential_divergence"] = (
+                fields["vector_potential_divergence"] * self.magnetic_scale_gauss
             )
         if "geometric_height_m" in fields:
             physical["geometric_height_m"] = (
@@ -2263,55 +2333,67 @@ class StratifiedAtmosphereModel(nn.Module):
         if direction.shape != (*coords.shape[:-1], 3):
             raise ValueError("Ray directions must match coords leading dimensions.")
 
-        # coords[..., :2] identifies the ray at the photosphere. In this local
-        # Carrington parameterization, positions are O(1) R_sun and offsets are
-        # O(shell thickness / R_sun), preserving both in float32.
         surface_reference_rsun = self._chart_direction(coords[..., :2])
-
         requested_height = height.expand(*coords.shape[:-1], height.numel())
-        # The impact parameter belongs to the ray, not to a depth sample.
-        # Compute it once before broadcasting the ray across the shell grid.
+        mu = -(surface_reference_rsun * direction).sum(-1)
         impact = torch.linalg.vector_norm(
             torch.linalg.cross(surface_reference_rsun, direction, dim=-1), dim=-1
         )
-        requested_radius = 1.0 + requested_height / self.solar_radius_m
-        outer_radius = requested_radius[..., :1]
-        inner_radius = requested_radius[..., -1:]
-        effective_inner = torch.maximum(
-            inner_radius,
-            impact[..., None] + self.tangent_margin_m / self.solar_radius_m,
+        # Rationalize both sphere intersections: subtracting two O(1) radii
+        # loses tens of metres in float32 photospheric shells.
+        tangent_height = -self.solar_radius_m * mu.square() / (1.0 + impact)
+        inner_height = torch.maximum(
+            requested_height[..., -1], tangent_height + self.tangent_margin_m
         )
-        if torch.any(effective_inner >= outer_radius):
+        outer_height = requested_height[..., 0]
+        if torch.any(inner_height >= outer_height):
             raise ValueError(
                 "At least one ray does not traverse a finite atmospheric shell "
                 "inside the configured tangent margin."
             )
-        outer_offset = self._near_sphere_offset(
-            surface_reference_rsun, direction, outer_radius[..., 0]
+
+        def intersection(h):
+            local_mu = mu[..., None] if h.ndim == mu.ndim + 1 else mu
+            delta = (h / self.solar_radius_m) * (2.0 + h / self.solar_radius_m)
+            root = torch.sqrt((local_mu.square() + delta).clamp_min(0.0))
+            # Opposite-facing rays use the other stable quadratic branch.
+            # Keep its inactive rational branch finite for autograd as well.
+            denominator = torch.where(
+                local_mu >= 0, local_mu + root, torch.ones_like(local_mu)
+            )
+            denominator = denominator.clamp_min(torch.finfo(h.dtype).tiny)
+            return torch.where(
+                local_mu >= 0,
+                -h * (2.0 + h / self.solar_radius_m) / denominator,
+                self.solar_radius_m * (local_mu - root),
+            )
+
+        outer_offset_m = intersection(outer_height)
+        fraction = (outer_height[..., None] - requested_height) / (
+            outer_height[..., None] - requested_height[..., -1:]
         )
-        inner_offset = self._near_sphere_offset(
-            surface_reference_rsun, direction, effective_inner[..., 0]
-        )
-        # Parameterize the ray in height units before adding the O(1) solar
-        # radius.  Forming ``outer_radius - requested_radius`` and later
-        # subtracting ``outer_offset`` again loses precision in float32 when
-        # two jittered depth points lie close together.  The algebra below is
-        # identical, but every subtraction remains on the atmospheric-shell
-        # scale and therefore preserves strictly ordered ray distances.
-        outer_height = requested_height[..., :1]
-        inner_height = requested_height[..., -1:]
-        fraction = (outer_height - requested_height) / (outer_height - inner_height)
-        ray_span_rsun = inner_offset - outer_offset
-        local_offset_rsun = fraction * ray_span_rsun[..., None]
-        offset_rsun = outer_offset[..., None] + local_offset_rsun
-        local_distance_m = local_offset_rsun * self.solar_radius_m
-        expanded_reference = surface_reference_rsun.unsqueeze(-2).expand(
-            *requested_height.shape, 3
-        )
-        expanded_direction = direction.unsqueeze(-2).expand_as(expanded_reference)
-        position_rsun = expanded_reference + offset_rsun[..., None] * expanded_direction
+        # Sample the requested *radial heights*, not their fractions along the
+        # chord. Radius varies nonlinearly with distance along an oblique ray;
+        # interpolating only the endpoint distances displaced photospheric
+        # nodes by >100 km near the limb. Only compress the height distribution
+        # when the deepest requested sphere lies beyond the ray's tangent.
+        accessible_height = requested_height + fraction * (
+            inner_height - requested_height[..., -1]
+        )[..., None]
+        offset_m = intersection(accessible_height)
+        local_distance_m = offset_m - outer_offset_m[..., None]
+        position_rsun = surface_reference_rsun[..., None, :] + (
+            offset_m / self.solar_radius_m
+        )[..., None] * direction[..., None, :]
         position = position_rsun * self.solar_radius_m
-        chart, actual_height = self._position_chart_height(position_rsun)
+        chart, _ = self._position_chart_height(position_rsun)
+        actual_height = radial_height_along_ray(
+            surface_reference_rsun,
+            torch.zeros_like(mu),
+            direction,
+            offset_m,
+            self.solar_radius_m,
+        )
         ray_time = coords[..., 2].unsqueeze(-1).expand(position_rsun.shape[:-1])
         evaluation_coords = torch.cat((chart, ray_time[..., None]), dim=-1)
         fields = self.evaluate_chart_height_points(evaluation_coords, actual_height)
@@ -2323,7 +2405,7 @@ class StratifiedAtmosphereModel(nn.Module):
         return atmosphere, RayTraceResult(
             position_m=position,
             distance_m=local_distance_m,
-            chart_xy_mm=chart,
+            chart_xy_megameter=chart,
             geometric_height_m=actual_height,
         )
 
@@ -2378,10 +2460,10 @@ class StratifiedAtmosphereModel(nn.Module):
                     "consume dimensionless model-unit fields"
                 ),
             },
-            "line_formation_height_bounds_Mm": list(
-                self.line_formation_height_bounds_Mm
+            "line_formation_height_bounds_megameter": list(
+                self.line_formation_height_bounds_megameter
             ),
-            "full_domain_height_bounds_Mm": list(self.shell_height_bounds_Mm),
+            "full_domain_height_bounds_megameter": list(self.shell_height_bounds_megameter),
             "top_boundary_reference": {
                 "source": (
                     "hydrostatic FALC-to-corona reference"
@@ -2393,9 +2475,9 @@ class StratifiedAtmosphereModel(nn.Module):
                 ),
             },
             "velocity_scale_m_per_s": self.velocity_scale_m_per_s,
-            "velocity_max_m_per_s": self.velocity_max_m_per_s,
             "magnetic_scale_gauss": self.magnetic_scale_gauss,
             "magnetic_representation": self.magnetic_representation,
+            "scale_vector_potential": self.scale_vector_potential,
             **(
                 {
                     "vector_potential_scale_gauss_m": self.vector_potential_scale_gauss_m,
@@ -2460,7 +2542,7 @@ class StratifiedAtmosphereModel(nn.Module):
                 "not a Carrington coordinate time derivative"
             ),
             "coordinate_system": "physical spherical shell; heights in metres above R_sun",
-            "shell_height_bounds_Mm": list(self.shell_height_bounds_Mm),
+            "shell_height_bounds_megameter": list(self.shell_height_bounds_megameter),
             "tangent_margin_m": self.tangent_margin_m,
             "spherical_geometry": {
                 "enabled": True,
@@ -2476,16 +2558,16 @@ class StratifiedAtmosphereModel(nn.Module):
                 "field_vector_basis": "Heliographic Carrington Cartesian [Xc,Yc,Zc]",
             },
             "spatial_coordinates": {
-                "public_input": "observer-independent Carrington gnomonic chart in Mm",
-                "network_center_mm": self.spatial_coordinate_center_mm.detach()
+                "public_input": "observer-independent Carrington gnomonic chart in megameter",
+                "network_center_megameter": self.spatial_coordinate_center_megameter.detach()
                 .cpu()
                 .tolist(),
-                "network_scale_mm": (
+                "network_scale_megameter": (
                     [self.height_input_scale_m / 1e6] * 2
                     if getattr(self, "uniform_spatial_scaling", False)
-                    else self.spatial_coordinate_scale_mm.detach().cpu().tolist()
+                    else self.spatial_coordinate_scale_megameter.detach().cpu().tolist()
                 ),
-                "network_transform": "(xy_mm - center_mm) / scale_mm",
+                "network_transform": "(xy_megameter - center_megameter) / scale_megameter",
             },
             "network_inputs": list(self.network_input_names),
             "network_type": self.network_type,

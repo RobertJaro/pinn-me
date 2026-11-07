@@ -1,4 +1,4 @@
-"""Component assembly for the LTE training runtime."""
+"""Physical-constraint assembly for the atmosphere inversion runtime."""
 
 from __future__ import annotations
 
@@ -9,30 +9,15 @@ from numbers import Integral, Real
 from typing import Any, Mapping
 
 import torch
-from torch import nn
 
-from prom3theus.instruments import build_instrument
 from prom3theus.inversion.constraints.magnetofluid import (
     EQUATION_NAMES,
     MagnetofluidConstraints,
 )
-from prom3theus.inversion.depth_sampling import DepthRefinement
-from prom3theus.inversion.forward import LTEForwardComposition, LTESynthesisBackend
 from prom3theus.inversion.sampling import SphericalShellDomain
-from prom3theus.rt import LTESynthesizer, StratifiedAtmosphereModel
-
-from .configuration import DepthSamplingSettings
 
 
-@dataclass(frozen=True, slots=True)
-class ForwardAssembly:
-    """The trainable LTE synthesis chain and its prepared wavelength grid."""
 
-    synthesizer: LTESynthesizer
-    instrument: nn.Module
-    composition: LTEForwardComposition
-    synthesis_wavelength_angstrom: torch.Tensor
-    continuum_opacity: nn.Module | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,11 +56,6 @@ class PhysicsAssembly:
     robust_loss_delta: float = 0.0
     height_sampling_power: float = 1.0
     volume_sampling: str = "height_grouped"
-    residual_adaptive_enabled: bool = False
-    residual_adaptive_candidate_multiplier: int = 2
-    residual_adaptive_fraction: float = 0.5
-    residual_adaptive_start_step: int = 500
-    residual_adaptive_update_every_n_steps: int = 250
     hard_example_enabled: bool = False
     hard_example_count: int = 0
     hard_example_start_step: int = 0
@@ -105,15 +85,6 @@ class PhysicsAssembly:
             "validation_points_per_height": (self.validation_points_per_height),
             "height_sampling_power": self.height_sampling_power,
             "volume_sampling": self.volume_sampling,
-            "residual_adaptive_enabled": self.residual_adaptive_enabled,
-            "residual_adaptive_candidate_multiplier": (
-                self.residual_adaptive_candidate_multiplier
-            ),
-            "residual_adaptive_fraction": self.residual_adaptive_fraction,
-            "residual_adaptive_start_step": self.residual_adaptive_start_step,
-            "residual_adaptive_update_every_n_steps": (
-                self.residual_adaptive_update_every_n_steps
-            ),
             "hard_example_enabled": self.hard_example_enabled,
             "hard_example_count": self.hard_example_count,
             "hard_example_start_step": self.hard_example_start_step,
@@ -124,45 +95,6 @@ class PhysicsAssembly:
         }
 
 
-def build_forward_assembly(
-    *,
-    atmosphere_model: StratifiedAtmosphereModel,
-    synthesizer_config: Mapping[str, Any],
-    instrument_config: Mapping[str, Any],
-    velocity_synthesis_mode: str,
-    depth_sampling: DepthSamplingSettings,
-    wavelength_angstrom: torch.Tensor,
-) -> ForwardAssembly:
-    """Build the differentiable atmosphere-to-observation composition."""
-
-    synthesizer = LTESynthesizer(
-        # The atmosphere is a continuous coordinate model. Training supplies
-        # the grid carried by each stratified atmosphere realization.
-        log_tau500=None,
-        continuum_opacity=getattr(atmosphere_model, "thermodynamic_eos", None),
-        **synthesizer_config,
-    )
-    instrument = build_instrument(instrument_config)
-    composition = LTEForwardComposition(
-        atmosphere_model=atmosphere_model,
-        backend=LTESynthesisBackend(synthesizer),
-        instrument=instrument,
-        velocity_synthesis_mode=velocity_synthesis_mode,
-        reference_log_tau500_bounds=depth_sampling.reference_log_tau500_bounds,
-        depth_refinement=DepthRefinement(
-            enabled=depth_sampling.coarse_to_fine_enabled,
-            sample_count=depth_sampling.fine_sample_count,
-            uniform_weight_floor=depth_sampling.uniform_weight_floor,
-        ),
-    )
-    synthesis_wavelength = composition.prepare_wavelength_grid(wavelength_angstrom)
-    return ForwardAssembly(
-        synthesizer=synthesizer,
-        instrument=instrument,
-        composition=composition,
-        synthesis_wavelength_angstrom=synthesis_wavelength,
-        continuum_opacity=getattr(synthesizer, "continuum_opacity", None),
-    )
 
 
 def build_physics_assembly(
@@ -189,11 +121,6 @@ def build_physics_assembly(
     options.setdefault("robust_loss_delta", 0.0)
     options.setdefault("height_sampling_power", 1.0)
     options.setdefault("volume_sampling", "height_grouped")
-    options.setdefault("residual_adaptive_enabled", False)
-    options.setdefault("residual_adaptive_candidate_multiplier", 2)
-    options.setdefault("residual_adaptive_fraction", 0.5)
-    options.setdefault("residual_adaptive_start_step", 500)
-    options.setdefault("residual_adaptive_update_every_n_steps", 250)
     options.setdefault("hard_example_enabled", False)
     options.setdefault("hard_example_count", 0)
     options.setdefault("hard_example_start_step", 0)
@@ -219,11 +146,6 @@ def build_physics_assembly(
         "validation_points_per_height",
         "height_sampling_power",
         "volume_sampling",
-        "residual_adaptive_enabled",
-        "residual_adaptive_candidate_multiplier",
-        "residual_adaptive_fraction",
-        "residual_adaptive_start_step",
-        "residual_adaptive_update_every_n_steps",
         "hard_example_enabled",
         "hard_example_count",
         "hard_example_start_step",
@@ -291,35 +213,6 @@ def build_physics_assembly(
         raise ValueError(
             "volume_sampling must be 'height_grouped' or 'fully_random'."
         )
-    residual_adaptive_enabled = options.pop("residual_adaptive_enabled")
-    if not isinstance(residual_adaptive_enabled, bool):
-        raise TypeError("residual_adaptive_enabled must be boolean.")
-    if volume_sampling == "fully_random" and residual_adaptive_enabled:
-        raise ValueError(
-            "residual_adaptive_enabled assumes more than one point per height "
-            "group to rank within, which volume_sampling: fully_random does "
-            "not have; use hard_example_enabled instead."
-        )
-    residual_adaptive_candidate_multiplier = nonnegative_count(
-        "residual_adaptive_candidate_multiplier"
-    )
-    if residual_adaptive_candidate_multiplier < 1:
-        raise ValueError("residual_adaptive_candidate_multiplier must be positive.")
-    residual_adaptive_fraction = options.pop("residual_adaptive_fraction")
-    if not isinstance(residual_adaptive_fraction, Real) or isinstance(
-        residual_adaptive_fraction, bool
-    ):
-        raise TypeError("residual_adaptive_fraction must be numeric.")
-    residual_adaptive_fraction = float(residual_adaptive_fraction)
-    if not math.isfinite(residual_adaptive_fraction) or not 0.0 <= residual_adaptive_fraction <= 1.0:
-        raise ValueError("residual_adaptive_fraction must be between zero and one.")
-    residual_adaptive_start_step = nonnegative_count("residual_adaptive_start_step")
-    residual_adaptive_update_every_n_steps = nonnegative_count(
-        "residual_adaptive_update_every_n_steps"
-    )
-    if residual_adaptive_update_every_n_steps < 1:
-        raise ValueError("residual_adaptive_update_every_n_steps must be positive.")
-
     def count(name: str) -> int:
         value = options.pop(name)
         if not isinstance(value, Integral) or isinstance(value, bool):
@@ -585,11 +478,6 @@ def build_physics_assembly(
         robust_loss_delta=robust_loss_delta,
         height_sampling_power=height_sampling_power,
         volume_sampling=volume_sampling,
-        residual_adaptive_enabled=residual_adaptive_enabled,
-        residual_adaptive_candidate_multiplier=residual_adaptive_candidate_multiplier,
-        residual_adaptive_fraction=residual_adaptive_fraction,
-        residual_adaptive_start_step=residual_adaptive_start_step,
-        residual_adaptive_update_every_n_steps=residual_adaptive_update_every_n_steps,
         hard_example_enabled=hard_example_enabled,
         hard_example_count=hard_example_count,
         hard_example_start_step=hard_example_start_step,
@@ -599,8 +487,6 @@ def build_physics_assembly(
 
 
 __all__ = [
-    "ForwardAssembly",
     "PhysicsAssembly",
-    "build_forward_assembly",
     "build_physics_assembly",
 ]

@@ -1,4 +1,4 @@
-"""Stored-input Stokes evaluation for validated LTE artifacts."""
+"""Stored-input outgoing radiation evaluation for validated LTE inversion artifacts."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from prom3theus.core.nn import temporary_eval_mode
 from prom3theus.observations import (
     CARRINGTON_REGISTERED_RELATIVE_VELOCITY,
     ObservationRaster,
@@ -43,55 +44,41 @@ def stokes_batches(
     velocity_synthesis_mode: str,
     instrument_type: str,
 ) -> Iterator[tuple[dict[str, Any], torch.Tensor]]:
-    """Yield canonical synthesis inputs for each valid-pixel batch."""
+    """Yield canonical radiation observation inputs for each valid-pixel batch."""
 
-    coordinates = read_flat_samples(raster.coordinates, flat_indices)
-    rays = read_flat_samples(raster.ray_direction, flat_indices)
-    bases = read_flat_samples(raster.stokes_basis, flat_indices)
-    observer_los = _flatten_auxiliary(
-        raster, "observer_los_velocity_m_per_s", flat_indices
-    )
-    response = None
-    spectral = _flatten_auxiliary(raster, _HMI_SPECTRAL_WEIGHTS, flat_indices)
-    continuum = _flatten_auxiliary(raster, _HMI_CONTINUUM_WEIGHTS, flat_indices)
-    if (spectral is None) != (continuum is None):
+    spectral_present = _HMI_SPECTRAL_WEIGHTS in raster.auxiliary
+    continuum_present = _HMI_CONTINUUM_WEIGHTS in raster.auxiliary
+    if spectral_present != continuum_present:
         raise ArtifactExportError(
             "Canonical observation store must contain both HMI instrument-response arrays."
         )
-    if spectral is not None:
-        response = {"spectral_weights": spectral, "continuum_weights": continuum}
-    if instrument_type == "hmi_filter_profiles" and response is None:
-        raise ArtifactExportError(
-            "HMI Stokes export requires canonical auxiliary arrays "
-            f"{_HMI_SPECTRAL_WEIGHTS!r} and {_HMI_CONTINUUM_WEIGHTS!r}. "
-            "Recreate the artifact with a runner that persists its evaluated "
-            "per-pixel instrument response."
-        )
-    if instrument_type != "hmi_filter_profiles" and response is not None:
-        raise ArtifactExportError(
-            "Only hmi_filter_profiles observations may contain HMI response arrays."
-        )
+    if instrument_type == "hmi_filter_profiles" and not spectral_present:
+        raise ArtifactExportError("HMI Stokes export requires canonical instrument-response arrays.")
+    if instrument_type != "hmi_filter_profiles" and spectral_present:
+        raise ArtifactExportError("Only hmi_filter_profiles observations may contain HMI response arrays.")
     removed = None
     if velocity_synthesis_mode == CARRINGTON_REGISTERED_RELATIVE_VELOCITY:
-        per_column = torch.as_tensor(removed_solar_los_velocity(raster))
-        column_indices = flat_indices % raster.spatial_shape[1]
-        removed = per_column.index_select(0, column_indices)
-    for start in range(0, coordinates.shape[0], batch_size):
-        stop = min(start + batch_size, coordinates.shape[0])
-        batch: dict[str, Any] = {
-            "coordinates": coordinates[start:stop],
-            "ray_direction": rays[start:stop],
-            "stokes_basis": bases[start:stop],
+        removed = torch.as_tensor(removed_solar_los_velocity(raster))
+    for start in range(0, len(flat_indices), batch_size):
+        selected = flat_indices[start:start + batch_size]
+        batch = {
+            "coordinates": read_flat_samples(raster.coordinates, selected),
+            "ray_direction": read_flat_samples(raster.ray_direction, selected),
+            "stokes_basis": read_flat_samples(raster.stokes_basis, selected),
         }
+        observer_los = _flatten_auxiliary(raster, "observer_los_velocity_m_per_s", selected)
         if observer_los is not None:
-            batch["observer_los_velocity_m_per_s"] = observer_los[start:stop]
+            batch["observer_los_velocity_m_per_s"] = observer_los
         if removed is not None:
-            batch["removed_solar_los_velocity_m_per_s"] = removed[start:stop]
-        if response is not None:
+            batch["removed_solar_los_velocity_m_per_s"] = removed.index_select(
+                0, selected % raster.spatial_shape[1],
+            )
+        if spectral_present:
             batch["instrument_response"] = {
-                name: value[start:stop] for name, value in response.items()
+                "spectral_weights": _flatten_auxiliary(raster, _HMI_SPECTRAL_WEIGHTS, selected),
+                "continuum_weights": _flatten_auxiliary(raster, _HMI_CONTINUUM_WEIGHTS, selected),
             }
-        yield batch, flat_indices[start:stop]
+        yield batch, selected
 
 
 @torch.inference_mode()
@@ -103,7 +90,7 @@ def evaluate_stokes(
     batch_size: int,
     storage_dtype: str,
 ) -> dict[str, np.ndarray]:
-    """Synthesize every valid pixel from only canonical stored inputs."""
+    """Predict every valid pixel from only canonical stored inputs."""
 
     if batch_size < 1:
         raise ValueError("stokes_batch_size must be positive.")
@@ -119,9 +106,10 @@ def evaluate_stokes(
         np.nan,
         dtype=numpy_dtype,
     )
-    was_training = module.training
-    module.eval()
-    try:
+    # A direct observation term does not own its shared window or atmosphere.
+    with temporary_eval_mode(
+        module, getattr(module, "synthesis_window", None), module.atmosphere_model
+    ):
         batches = stokes_batches(
             raster,
             flat_indices,
@@ -130,44 +118,27 @@ def evaluate_stokes(
             spec.instrument_type,
         )
         for batch, selected in batches:
-            response = batch.get("instrument_response")
-            if response is not None:
-                response = {
-                    name: value.to(parameter) for name, value in response.items()
-                }
-            prediction = module.synthesize(
-                batch["coordinates"].to(parameter),
-                ray_direction=batch["ray_direction"].to(parameter),
-                stokes_basis=batch["stokes_basis"].to(parameter),
-                observer_los_velocity_m_per_s=(
-                    None
-                    if "observer_los_velocity_m_per_s" not in batch
-                    else batch["observer_los_velocity_m_per_s"].to(parameter)
-                ),
-                removed_solar_los_velocity_m_per_s=(
-                    None
-                    if "removed_solar_los_velocity_m_per_s" not in batch
-                    else batch["removed_solar_los_velocity_m_per_s"].to(parameter)
-                ),
-                instrument_response=response,
-            )["stokes"]
+            device_batch = {
+                name: ({key: value.to(parameter) for key, value in item.items()}
+                       if isinstance(item, dict) else item.to(parameter))
+                for name, item in batch.items()
+            }
+            prediction = module.predict(device_batch)
             expected_shape = (int(selected.numel()), 4, wavelength_count)
             if tuple(prediction.shape) != expected_shape:
                 raise ArtifactExportError(
-                    "Synthesized Stokes shape differs from the canonical observation: "
+                    "Predicted Stokes shape differs from the canonical observation: "
                     f"expected {expected_shape}, got {tuple(prediction.shape)}."
                 )
             predicted_flat[selected.cpu().numpy()] = (
                 prediction.detach().to(torch_dtype).cpu().numpy()
             )
-    finally:
-        module.train(was_training)
     shape = (*raster.spatial_shape, 4, wavelength_count)
     predicted = predicted_flat.reshape(shape)
     observed = materialize_array(raster.stokes).detach().to(torch_dtype).cpu().numpy()
     return {
         "wavelength_angstrom": (
-            raster.wavelength_angstrom.detach().to(torch_dtype).cpu().numpy()
+            raster.wavelength_angstrom.detach().double().cpu().numpy()
         ),
         "predicted_stokes": predicted,
         "observed_stokes": observed,

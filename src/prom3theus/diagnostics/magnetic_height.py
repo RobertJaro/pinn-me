@@ -75,7 +75,7 @@ def check_magnetic_height(
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     loader = P3SLoader(source, device="cpu")
     model = loader.module.atmosphere_model.eval()
-    outer, inner = model.shell_height_bounds_Mm
+    outer, inner = model.shell_height_bounds_megameter
     if heights[0] < inner or heights[-1] > outer:
         raise ValueError("All diagnostic heights must lie within the atmosphere shell")
     batch = deterministic_validation_batch(loader._observations(), max_samples=sample_count)

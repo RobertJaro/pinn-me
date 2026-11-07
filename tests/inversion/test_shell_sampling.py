@@ -10,7 +10,7 @@ def test_random_grouped_uses_quadratic_radial_sampling_toward_inner_radius():
         longitude_offset_bounds_rad=(-0.1, 0.1),
         latitude_bounds_rad=(-0.1, 0.1),
         time_bounds_hours=(0.0, 1.0),
-        height_bounds_Mm=(-0.1, 20.0),
+        height_bounds_megameter=(-0.1, 20.0),
         solar_radius_m=695_700_000.0,
     )
     samples = domain.random_grouped(16, 2)
@@ -31,7 +31,7 @@ def test_deterministic_grouped_keeps_uniform_radial_sampling():
         longitude_offset_bounds_rad=(-0.1, 0.1),
         latitude_bounds_rad=(-0.1, 0.1),
         time_bounds_hours=(0.0, 1.0),
-        height_bounds_Mm=(0.0, 20.0),
+        height_bounds_megameter=(0.0, 20.0),
         solar_radius_m=695_700_000.0,
     )
 
@@ -49,7 +49,7 @@ def test_random_sides_balances_four_angular_faces_and_returns_outward_normals():
         longitude_offset_bounds_rad=(-0.1, 0.15),
         latitude_bounds_rad=(-0.2, 0.1),
         time_bounds_hours=(0.0, 1.0),
-        height_bounds_Mm=(0.0, 20.0),
+        height_bounds_megameter=(0.0, 20.0),
         solar_radius_m=695_700_000.0,
     )
 
@@ -102,7 +102,7 @@ def test_deterministic_sides_are_repeatable_flat_and_cover_radial_domain():
         longitude_offset_bounds_rad=(-0.1, 0.1),
         latitude_bounds_rad=(-0.1, 0.1),
         time_bounds_hours=(0.0, 1.0),
-        height_bounds_Mm=(0.0, 20.0),
+        height_bounds_megameter=(0.0, 20.0),
         solar_radius_m=695_700_000.0,
     )
 

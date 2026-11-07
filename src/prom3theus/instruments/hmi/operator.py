@@ -8,6 +8,7 @@ import math
 import torch
 from torch import nn
 
+from prom3theus.core.validation import require_tensor
 from prom3theus.instruments.base import MagneticAzimuthConvention
 from prom3theus.resources import resource_path, verify_manifest_resource
 
@@ -30,10 +31,8 @@ def _validate_wavelength(wavelength: torch.Tensor, name: str) -> None:
         raise ValueError(
             f"{name} must be a one-dimensional grid with at least two points."
         )
-    if not torch.isfinite(wavelength).all() or not torch.all(
-        wavelength[1:] > wavelength[:-1]
-    ):
-        raise ValueError(f"{name} must contain finite, strictly increasing values.")
+    require_tensor(torch.isfinite(wavelength).all() & (wavelength[1:] > wavelength[:-1]).all(),
+                   f"{name} must contain finite, strictly increasing values.")
 
 
 class HMIFilterProfiles(nn.Module):
@@ -90,20 +89,20 @@ class HMIFilterProfiles(nn.Module):
                 self.tuning_reference_angstrom + self.inner_half_width_angstrom,
             ]
         )
-        # At visible wavelengths one float32 ULP is about 5e-4 Angstrom.  The
-        # outermost Gauss--Legendre node of the production HMI grid lies less
-        # than one ULP inside each nominal continuum endpoint, so a direct cast
-        # can collapse both pairs onto identical values.  Keep the fast float32
-        # forward model and move only a collided auxiliary endpoint by one
-        # representable value away from the quadrature interval.
-        if endpoints[0] >= quadrature[0]:
-            endpoints[0] = torch.nextafter(
-                quadrature[0], quadrature.new_tensor(-torch.inf)
-            )
-        if endpoints[1] <= quadrature[-1]:
-            endpoints[1] = torch.nextafter(
-                quadrature[-1], quadrature.new_tensor(torch.inf)
-            )
+        # Continuum endpoints must remain distinct even after the prepared
+        # model is cast to float32. Move only a colliding auxiliary endpoint;
+        # retain the calibrated quadrature nodes in their original precision.
+        comparison_dtype = (
+            torch.float32 if observed.dtype == torch.float64 else observed.dtype
+        )
+        rounded_nodes = quadrature.to(comparison_dtype)
+        rounded_endpoints = endpoints.to(comparison_dtype)
+        endpoints = torch.stack((
+            torch.where(rounded_endpoints[0] >= rounded_nodes[0],
+                torch.nextafter(rounded_nodes[0], rounded_nodes.new_tensor(-torch.inf)).to(endpoints), endpoints[0]),
+            torch.where(rounded_endpoints[1] <= rounded_nodes[-1],
+                torch.nextafter(rounded_nodes[-1], rounded_nodes.new_tensor(torch.inf)).to(endpoints), endpoints[1]),
+        ))
         return torch.cat(
             (
                 endpoints[:1],
@@ -129,18 +128,19 @@ class HMIFilterProfiles(nn.Module):
         )
         if stokes.ndim < 3 or stokes.shape[-2:] != (4, synthesis_wavelength.numel()):
             raise ValueError("stokes must end in [4, synthesis_wavelength].")
-        if not stokes.is_floating_point() or not torch.isfinite(stokes).all():
+        if not stokes.is_floating_point():
             raise ValueError("stokes must contain finite real floating-point values.")
+        require_tensor(torch.isfinite(stokes).all(), "stokes must contain finite real floating-point values.")
         _validate_wavelength(synthesis_wavelength, "synthesis_wavelength_angstrom")
         _validate_wavelength(observed_wavelength, "observed_wavelength_angstrom")
         expected_synthesis = self.synthesis_grid(observed_wavelength).to(stokes)
         tolerance = 8 * torch.finfo(stokes.dtype).eps * expected_synthesis.abs().max()
-        if synthesis_wavelength.shape != expected_synthesis.shape or torch.any(
-            torch.abs(synthesis_wavelength - expected_synthesis) > tolerance
-        ):
+        if synthesis_wavelength.shape != expected_synthesis.shape:
             raise ValueError(
                 "synthesis_wavelength_angstrom does not match the configured HMI response."
             )
+        require_tensor((torch.abs(synthesis_wavelength - expected_synthesis) <= tolerance).all(),
+                       "synthesis_wavelength_angstrom does not match the configured HMI response.")
         weights = torch.as_tensor(
             spectral_weights, dtype=stokes.dtype, device=stokes.device
         )
@@ -158,22 +158,17 @@ class HMIFilterProfiles(nn.Module):
             raise ValueError("HMI response weights do not match the quadrature grid.")
         if continuum.shape != weights.shape[:-1]:
             raise ValueError("HMI continuum_weights must have shape [..., filter].")
-        if (
-            not torch.isfinite(weights).all()
-            or not torch.isfinite(continuum).all()
-            or torch.any(weights < 0)
-            or torch.any(continuum < 0)
-            or not torch.allclose(
+        require_tensor(
+            torch.isfinite(weights).all() & torch.isfinite(continuum).all()
+            & (weights >= 0).all() & (continuum >= 0).all()
+            & torch.isclose(
                 weights.sum(dim=-1) + continuum,
                 torch.ones_like(continuum),
                 rtol=1e-4,
                 atol=1e-5,
-            )
-        ):
-            raise ValueError(
-                "HMI spectral and continuum weights must be finite, non-negative, "
-                "and sum to one."
-            )
+            ).all(),
+            "HMI spectral and continuum weights must be finite, non-negative, "
+            "and sum to one.")
         quadrature_stokes = stokes[..., 1:-1]
         integrated = torch.matmul(
             quadrature_stokes,

@@ -186,7 +186,11 @@ class JointTrainingDiagnostics(Callback):
         self.last_step = step
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if trainer.global_step % pl_module.settings.validation_every_n_steps == 0:
+        if getattr(pl_module.settings, "steps_per_epoch", None) is None and trainer.global_step % pl_module.settings.validation_every_n_steps == 0:
+            self._evaluate(trainer, pl_module)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if getattr(pl_module.settings, "steps_per_epoch", None) is not None:
             self._evaluate(trainer, pl_module)
 
     def on_train_end(self, trainer, pl_module):
@@ -215,13 +219,14 @@ def run_joint_inversion(
     factories: JointRunnerFactories | None = None,
     profiler=None,
 ) -> JointInversionRun:
-    """Run optimization on one device or externally launched distributed ranks; persist resumable Lightning checkpoints."""
+    """Run single-device or native Lightning DDP training with resumable checkpoints."""
     settings = config.training
     if settings is None:
         raise ValueError("Joint inversion requires an explicit training section.")
+    torch.set_float32_matmul_precision("high")
     from prom3theus.core.distributed import initialize_distributed
     from .runtime import _device
-    rank, world_size = initialize_distributed(_device(settings.device))
+    rank, world_size = initialize_distributed(_device(settings.device), devices=settings.devices)
     output = config.solver.output_directory
     resume_checkpoint = _resume_checkpoint(output, settings.resume_from_checkpoint)
     if resume_checkpoint is not None:
@@ -234,6 +239,13 @@ def run_joint_inversion(
     )
     if runtime.device.type not in ("cpu", "cuda"):
         raise ValueError("Joint training currently supports CPU or CUDA devices.")
+    print(f"Training topology: rank={rank}/{world_size}, device={runtime.device}, "
+          f"strategy={'DDP' if world_size > 1 else 'single device'}", flush=True)
+    if world_size == 1 and runtime.device.type == "cuda" and torch.cuda.device_count() > 1:
+        rank_zero_info(
+            "Multiple GPUs are visible, but training.devices is 1. "
+            "Set training.devices: auto to enable Lightning DDP on all visible GPUs."
+        )
     output.mkdir(parents=True, exist_ok=True)
     contract = config.to_dict()
     # Operational settings may change on resume; the physical/data contract may not.
@@ -271,6 +283,7 @@ def run_joint_inversion(
     scheduler = StreamBatchScheduler(
         loaders, settings.reference_stream or config.scene.reference_stream,
         explicit_commit=True, rank=rank, world_size=world_size,
+        steps_per_epoch=settings.steps_per_epoch,
     )
     if runtime.device.type == "cuda" and settings.gpu_prefetch:
         scheduler.device = runtime.device

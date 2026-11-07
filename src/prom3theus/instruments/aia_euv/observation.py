@@ -546,6 +546,9 @@ def load_prepared_aia_observation(
         "expected_calibration_convention_id",
     )
     raw = dict(config)
+    from prom3theus.muram.binning import bin_image_raster, validate_binning
+
+    binning = validate_binning(raw.pop("binning", 1))
     expected = {"type", "directory", "channels_angstrom", "selection", "loader"}
     if set(raw) != expected:
         raise TypeError(
@@ -655,6 +658,19 @@ def load_prepared_aia_observation(
         spec = replace(spec, exposure_groups=groups)
         if validation_group not in groups:
             validation_group = groups[0]
+    source_signature = manifest["source_signature"]
+    if binning != 1:
+        import hashlib
+
+        rasters = [bin_image_raster(raster, binning) for raster in rasters]
+        metadata = dict(metadata)
+        metadata["objective_statistics"] = aia_objective_statistics(rasters, configured_channels)
+        metadata["spatial_binning"] = {"factor": binning, "source_signature": source_signature}
+        scales = metadata["objective_statistics"]["asinh_scale_by_channel_dn_s_pixel"]
+        asinh_scales = tuple(scales[str(channel)] for channel in configured_channels)
+        source_signature = hashlib.sha256(
+            f"{source_signature}:muram-spatial-mean-v1:{binning}".encode()
+        ).hexdigest()
     intensity_scale_mapping = channel_intensity_scales(rasters, configured_channels)
     data = StoredImageDataModule(
         rasters,
@@ -676,7 +692,7 @@ def load_prepared_aia_observation(
         descriptor=descriptor,
         data_module=data,
         store_path=root,
-        source_signature=manifest["source_signature"],
+        source_signature=source_signature,
     )
     return PreparedAIAObservation(
         stream=stream,

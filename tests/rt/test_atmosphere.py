@@ -16,7 +16,7 @@ from prom3theus.rt import (
 
 def _model() -> StratifiedAtmosphereModel:
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(1.5, -0.1),
         scene_geometry_config={
             "solar_radius_m": 695_700_000.0,
             "scene_basis": torch.eye(3),
@@ -31,9 +31,27 @@ def _model() -> StratifiedAtmosphereModel:
     )
 
 
+def test_direct_field_starts_weak_independently_of_magnetic_update_scale():
+    def make(scale):
+        torch.manual_seed(123)
+        return StratifiedAtmosphereModel(
+            magnetic_scale_gauss=scale,
+            shell_height_bounds_megameter=(1.5,-.1),
+            scene_geometry_config={"solar_radius_m":695700000.,"scene_basis":torch.eye(3)},
+            model_config={"type":"siren","dim":32,"n_layers":3,
+                          "first_omega_0":30.,"hidden_omega_0":1.,"radial_weighting_config":None})
+    small, large = make(100.), make(3000.)
+    coordinates = torch.zeros(10,3)
+    height = torch.linspace(0,1e6,10)
+    a = small.evaluate_chart_height_points(coordinates,height)['magnetic_field']
+    b = large.evaluate_chart_height_points(coordinates,height)['magnetic_field']
+    torch.testing.assert_close(a,b)
+    assert 0 < b.norm(dim=-1).max() < 100
+
+
 def _siren_model() -> StratifiedAtmosphereModel:
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(20.0, -0.1),
+        shell_height_bounds_megameter=(20.0, -0.1),
         scene_geometry_config={
             "solar_radius_m": 695_700_000.0,
             "scene_basis": torch.eye(3),
@@ -55,8 +73,8 @@ def _siren_model() -> StratifiedAtmosphereModel:
 
 def _extended_model(*, maximum_height_megameter: float = 20.0, points: int = 512):
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(maximum_height_megameter, -0.1),
-        line_formation_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(maximum_height_megameter, -0.1),
+        line_formation_height_bounds_megameter=(1.5, -0.1),
         upper_atmosphere_config={
             "type": "hydrostatic_corona",
             "transition_region_top_megameter": 2.5,
@@ -193,7 +211,7 @@ def test_atmosphere_is_a_differentiable_continuous_field():
 def test_atmosphere_rejects_noncanonical_or_nonsmooth_activations(activation):
     with pytest.raises(ValueError, match="smooth activation"):
         StratifiedAtmosphereModel(
-            shell_height_bounds_Mm=(1.5, -0.1),
+            shell_height_bounds_megameter=(1.5, -0.1),
             scene_geometry_config={
                 "solar_radius_m": 695_700_000.0,
                 "scene_basis": torch.eye(3),
@@ -243,7 +261,7 @@ def test_atmosphere_model_rejects_invalid_evaluation_grids_and_rays():
 def test_extended_model_keeps_ray_sampling_in_the_line_formation_domain():
     model = _extended_model(maximum_height_megameter=3.0, points=128)
 
-    ray_heights = torch.tensor(model.line_formation_height_bounds_Mm) * 1e6
+    ray_heights = torch.tensor(model.line_formation_height_bounds_megameter) * 1e6
     sampled, trace = model.trace_rays(
         torch.zeros(1, 3), torch.tensor([[0.0, 0.0, -1.0]]), ray_heights
     )
@@ -294,7 +312,7 @@ def test_coronal_continuation_uses_the_native_top_and_satisfies_hydrostatics():
     base_logs = logs[-point_count - 1]
 
     # 25 line-formation nodes, 37 restored native FALC nodes, the coronal
-    # continuation, and the adiabatic interior nodes carrying the -0.1 Mm
+    # continuation, and the adiabatic interior nodes carrying the -0.1 megameter
     # shell floor below the FALC table bottom.
     interior_nodes = reference.metadata()["lower_atmosphere"]["interval_count"]
     assert interior_nodes == 16
@@ -480,7 +498,7 @@ def test_adiabatic_interior_replaces_the_runaway_table_extrapolation():
     """A sub-photospheric shell floor must follow an adiabat, not the table.
 
     The FALC table stops about 69 km below the surface.  Extrapolating its
-    steep bottom gradient reaches 48 kK by -0.5 Mm, which is roughly four
+    steep bottom gradient reaches 48 kK by -0.5 megameter, which is roughly four
     times the real solar value and drives the forward model past the hot end
     of the photospheric fade, where the Fe I reservoir vanishes entirely.
     """

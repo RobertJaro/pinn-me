@@ -12,12 +12,17 @@ from prom3theus.cli.main import _build_parser, main
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_invert_dispatches_joint_training_with_active_aia(monkeypatch):
+def test_invert_dispatches_joint_training_with_active_aia(monkeypatch, tmp_path):
     from prom3theus.application import joint_training
 
     calls = []
     monkeypatch.setattr(joint_training, "run_joint_inversion", lambda config, **kw: calls.append((config, kw)))
-    main(["invert", str(PROJECT_ROOT / "configs/hmi_aia_dynamic.yaml")])
+    import yaml
+    document = yaml.safe_load((PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml").read_text())
+    next(stream for stream in document["streams"] if stream["id"] == "coronal_euv")["data_term"]["weight"] = 0.1
+    path = tmp_path / "active-aia.yaml"
+    path.write_text(yaml.safe_dump(document))
+    main(["invert", str(path)])
     assert len(calls) == 1
     config, options = calls[0]
     assert config.training is not None
@@ -35,7 +40,7 @@ def test_invert_can_record_a_bounded_training_profile(monkeypatch, tmp_path):
         lambda config, **kw: calls.append(kw),
     )
     main([
-        "invert", str(PROJECT_ROOT / "configs/hmi_aia_dynamic.yaml"),
+        "invert", str(PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml"),
         "--profile", str(tmp_path),
     ])
     profiler = calls[0]["profiler"]
@@ -139,7 +144,7 @@ def test_aia_download_dispatch_is_direct(monkeypatch, capsys):
 def test_dry_run_command_is_removed(capsys):
     assert "dry-run" not in _build_parser().format_help()
     with pytest.raises(SystemExit) as exc:
-        main(["dry-run", "configs/joint.yaml", "--rebuild-observations"])
+        main(["dry-run", "configs/sdo/hmi_aia_dynamic.yaml", "--rebuild-observations"])
     assert exc.value.code == 2
     assert "invalid choice: 'dry-run'" in capsys.readouterr().err
 
@@ -466,11 +471,11 @@ def test_validate_config_prints_resolved_schema(capsys):
     main(
         [
             "validate-config",
-            str(PROJECT_ROOT / "configs" / "hmi_lte_dynamic.yaml"),
+            str(PROJECT_ROOT / "configs" / "sdo/hmi_dynamic.yaml"),
         ]
     )
     document = json.loads(capsys.readouterr().out)
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == 5
     assert document["solver"]["kind"] == "joint"
     assert len(document["streams"]) == 1
     assert document["streams"][0]["observation"]["type"] == "hmi_stokes"

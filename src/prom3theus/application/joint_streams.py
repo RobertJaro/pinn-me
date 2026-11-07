@@ -10,7 +10,7 @@ import torch
 
 from prom3theus.config.joint_schema import JointInversionConfig
 from prom3theus.observations import ObservationKind, SceneContract
-from prom3theus.rt.geometry import direction_to_chart_mm
+from prom3theus.rt.geometry import direction_to_chart_megameter
 
 from .joint_contracts import LoadedJointStream
 from prom3theus.observations.scene import stokes_reference_time_tai_seconds, geometry_chunks
@@ -26,11 +26,11 @@ def _scene_from_stokes(
         ray = metadata["ray_geometry"]
         scene_basis = ray["scene_basis_rows"]
         solar_radius_m = float(ray["solar_radius_m"])
-        spatial_center = tuple(map(float, spatial["center_mm"]))
-        spatial_scale = tuple(map(float, spatial["scale_mm"]))
+        spatial_center = tuple(map(float, spatial["center_megameter"]))
+        spatial_scale = tuple(map(float, spatial["scale_megameter"]))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
-            "Reference Stokes stream lacks a valid coordinate/scene contract."
+            f"Reference Stokes stream lacks a valid coordinate/scene contract: {error}"
         ) from error
     temporal = coordinate_metadata.get("time_affine", {})
     time_center = float(temporal.get("center_hours", 0.0))
@@ -40,8 +40,8 @@ def _scene_from_stokes(
         scene_basis=torch.as_tensor(scene_basis, dtype=torch.float64),
         solar_radius_m=solar_radius_m,
         reference_time_tai_seconds=stokes_reference_time_tai_seconds(metadata),
-        spatial_coordinate_center_mm=spatial_center,
-        spatial_coordinate_scale_mm=spatial_scale,
+        spatial_coordinate_center_megameter=spatial_center,
+        spatial_coordinate_scale_megameter=spatial_scale,
         time_coordinate_center_hours=time_center,
         time_coordinate_scale_hours=time_scale,
         height_bounds_m=(
@@ -72,7 +72,7 @@ def _scene_from_image(
         for positions, _, valid, _ in geometry_chunks(raster):
             if not valid.any():
                 continue
-            chart = direction_to_chart_mm(positions[valid].to(torch.float64), scene_basis, solar_radius_m)
+            chart = direction_to_chart_megameter(positions[valid].to(torch.float64), scene_basis, solar_radius_m)
             minimum = torch.minimum(minimum, chart.amin(dim=0))
             maximum = torch.maximum(maximum, chart.amax(dim=0))
         times.append((float(raster.absolute_tai_seconds) - reference_time) / 3600.0)
@@ -84,8 +84,8 @@ def _scene_from_image(
         scene_basis=scene_basis,
         solar_radius_m=solar_radius_m,
         reference_time_tai_seconds=reference_time,
-        spatial_coordinate_center_mm=tuple(center.tolist()),
-        spatial_coordinate_scale_mm=tuple(scale.tolist()),
+        spatial_coordinate_center_megameter=tuple(center.tolist()),
+        spatial_coordinate_scale_megameter=tuple(scale.tolist()),
         time_coordinate_center_hours=0.5 * (time_min + time_max),
         time_coordinate_scale_hours=max(0.5 * (time_max - time_min), 1.0 / 3600.0),
         height_bounds_m=(

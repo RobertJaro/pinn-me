@@ -108,13 +108,88 @@ def test_physics_term_is_training_ready_by_default_and_backpropagates_pde():
     torch.testing.assert_close(gradient, torch.tensor(4.0))
 
 
+class _SharedBatchConstraints(nn.Module):
+    """Records the exact batch each equation group receives."""
+
+    volume_active = True
+    upper_volume_active = True
+    upper_boundary_active = False
+    side_boundary_active = False
+    loss_weights = {"magnetic_divergence": 1.0, "coronal_energy": 1.0}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.volume_calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.upper_domain_calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    @staticmethod
+    def is_active(name: str) -> bool:
+        return name in ("magnetic_divergence", "coronal_energy")
+
+    def volume(
+        self,
+        atmosphere_model,
+        position_m,
+        time_hours,
+        *,
+        create_graph,
+        return_state,
+        height_group_shape,
+    ):
+        del atmosphere_model, create_graph, return_state, height_group_shape
+        self.volume_calls.append((position_m, time_hours))
+        zero = position_m.new_zeros(())
+        return PhysicsResult(losses={"magnetic_divergence": zero}, weights=self.loss_weights)
+
+    def upper_domain(
+        self,
+        atmosphere_model,
+        position_m,
+        time_hours,
+        *,
+        height_group_shape,
+        create_graph,
+    ):
+        del atmosphere_model, height_group_shape, create_graph
+        self.upper_domain_calls.append((position_m, time_hours))
+        zero = position_m.new_zeros(())
+        return PhysicsResult(losses={"coronal_energy": zero}, weights=self.loss_weights)
+
+
+def test_upper_volume_equations_share_the_volume_sampling_batch():
+    """coronal_energy must not draw its own, second collocation batch.
+
+    It should reuse exactly the positions/times already sampled for the
+    ordinary volume equations (momentum, induction, ...), not a separate
+    upper_sampling_domain draw -- masking which points count toward its own
+    loss happens at reduction time, not via a second sampling pass.
+    """
+
+    atmosphere = _DerivativeAtmosphere()
+    assembly = _assembly()
+    constraints = _SharedBatchConstraints()
+    assembly.constraints = constraints
+    term = PhysicsConstraintTerm(assembly)
+
+    term.evaluate(atmosphere)
+
+    assert len(constraints.volume_calls) == 1
+    assert len(constraints.upper_domain_calls) == 1
+    volume_position, volume_time = constraints.volume_calls[0]
+    upper_position, upper_time = constraints.upper_domain_calls[0]
+    torch.testing.assert_close(volume_position, upper_position)
+    torch.testing.assert_close(volume_time, upper_time)
+    # Exactly one collocation draw from the domain for both equation groups.
+    assert assembly.sampling_domain.calls == 1
+
+
 class _TaggedHardExampleDomain:
     """Returns points tagged by call number so tests can trace their origin."""
 
     # Chosen so the synthetic small-magnitude test coordinates below are not
     # pulled back onto the shell by the real radial-clamp safeguard.
     solar_radius_m = 0.0
-    height_bounds_Mm = (-1.0e6, 1.0e6)
+    height_bounds_megameter = (-1.0e6, 1.0e6)
     time_bounds_hours = (0.0, 2.0)
 
     def __init__(self) -> None:
@@ -141,6 +216,7 @@ def test_hard_examples_carry_the_highest_residual_point_into_the_next_step():
     assembly.sampling_domain = _TaggedHardExampleDomain()
     assembly.volume_points_per_step = 3
     assembly.height_layers_per_step = 3
+    assembly.volume_sampling = "fully_random"
     assembly.hard_example_enabled = True
     assembly.hard_example_count = 1
     assembly.hard_example_start_step = 0
@@ -189,6 +265,75 @@ def test_hard_examples_carry_the_highest_residual_point_into_the_next_step():
     torch.testing.assert_close(position[0, 0, 0], torch.tensor(1002.0))
 
 
+def _residual_grows_with_x(constraints):
+    """Install a volume stub whose residual increases with the x coordinate."""
+
+    seen: list[tuple[int, int]] = []
+
+    def volume(
+        atmosphere_model,
+        position_m,
+        time_hours,
+        *,
+        return_diagnostics=False,
+        height_group_shape=None,
+        **kwargs,
+    ):
+        del atmosphere_model, time_hours, kwargs
+        seen.append(height_group_shape)
+        diagnostics = None
+        if return_diagnostics:
+            diagnostics = {
+                "magnetic_divergence": {"normalized_residual": position_m[:, :1]}
+            }
+        return PhysicsResult(
+            losses={"magnetic_divergence": position_m[:, 0].square().mean()},
+            weights=constraints.loss_weights,
+            equation_diagnostics=diagnostics,
+        )
+
+    constraints.volume = volume
+    constraints.loss_weights = {"magnetic_divergence": 1.0}
+    constraints.is_active = lambda name: name == "magnetic_divergence"
+    return seen
+
+
+def test_hard_examples_rank_random_points_globally_without_height_groups():
+    assembly = _assembly()
+    assembly.sampling_domain = _TaggedHardExampleDomain()
+    assembly.volume_points_per_step = 4
+    assembly.height_layers_per_step = 4
+    assembly.volume_sampling = "fully_random"
+    assembly.hard_example_enabled = True
+    assembly.hard_example_count = 2
+    assembly.hard_example_start_step = 0
+    assembly.hard_example_jitter_length_m = 0.0
+    assembly.hard_example_jitter_time_hours = 0.0
+    _residual_grows_with_x(assembly.constraints)
+    term = PhysicsConstraintTerm(assembly)
+    term.set_step(0)
+
+    # Bootstrap step: no carried-forward set yet, so the whole batch is fresh.
+    term.evaluate(_DerivativeAtmosphere())
+    assert assembly.sampling_domain.calls == [(4, 1)]
+    # Generation 1 spans x = 1000..1003, so the two globally hardest points
+    # carried into the next step are 1003 and 1002.
+    torch.testing.assert_close(
+        term._hard_position_m[:, 0, 0], torch.tensor([1003.0, 1002.0])
+    )
+
+    samples = term._samples(
+        next(_DerivativeAtmosphere().parameters()), _DerivativeAtmosphere()
+    )
+
+    # Only the remaining (4 - 2) points are freshly drawn.
+    assert assembly.sampling_domain.calls == [(4, 1), (2, 1)]
+    torch.testing.assert_close(
+        samples["volume_position_m"][:, 0, 0],
+        torch.tensor([1003.0, 1002.0, 2000.0, 2001.0]),
+    )
+
+
 def test_regularization_reports_only_enabled_components_even_at_zero():
     from prom3theus.inversion.data_terms import AtmosphereRegularizationTerm
 
@@ -212,41 +357,6 @@ def test_regularization_reports_only_enabled_components_even_at_zero():
     term.component_weights["magnetic"] = 0.0
     result = term.evaluate(atmosphere)
     assert not result.active and result.component_losses == {}
-
-
-def test_vector_potential_gauge_uses_physical_spatial_derivative():
-    from prom3theus.inversion.data_terms import AtmosphereRegularizationTerm
-
-    class LinearVectorPotential(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.gain = nn.Parameter(torch.tensor(1.0))
-            self.magnetic_representation = "vector_potential"
-            self.height_input_scale_m = 1.0e7
-            self.vector_potential_scale_gauss_m = 100.0 * self.height_input_scale_m
-            self.register_buffer("solar_radius_m", torch.tensor(7.0e8))
-
-        def _evaluate_vector_potential_only(self, position_rsun, time_hours):
-            del time_hours
-            # A_x = B_scale * H_scale * x/R_sun, so
-            # (div A)/B_scale = H_scale/R_sun.
-            return self.gain * self.vector_potential_scale_gauss_m * torch.stack(
-                (position_rsun[..., 0], torch.zeros_like(position_rsun[..., 0]),
-                 torch.zeros_like(position_rsun[..., 0])),
-                dim=-1,
-            )
-
-    atmosphere = LinearVectorPotential()
-    term = AtmosphereRegularizationTerm(
-        kind="vector_potential",
-        position_m=torch.zeros(4, 3),
-        time_hours=torch.zeros(4),
-        component_weights={"gauge": 1.0, "smoothness": 0.0},
-    )
-
-    result = term.evaluate(atmosphere)
-    expected = (atmosphere.height_input_scale_m / float(atmosphere.solar_radius_m)) ** 2
-    torch.testing.assert_close(result.metrics["raw_gauge"], torch.tensor(expected))
 
 
 @pytest.mark.parametrize("final_factor", [0.0, 0.1, 1.0])

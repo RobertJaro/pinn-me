@@ -11,6 +11,21 @@ import subprocess
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_hinode_stokes_launcher_starts_one_rank_per_allocated_gpu():
+    script = PROJECT_ROOT / "scripts/muram_hinode/run_stokes_only.sh"
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    text = script.read_text()
+    allocated = int(re.search(r"#PBS -l select=1:.*ngpus=(\d+)", text)[1])
+    from prom3theus.config import load_config
+    from prom3theus.muram import config as _register_muram_schema
+    config = load_config(PROJECT_ROOT / "configs/muram/hinode/stokes_only.yaml").to_dict()
+    assert allocated == 4
+    assert config['training']['devices'] == 'auto'
+    assert config['training']['device'] == 'cuda'
+    assert 'torchrun' not in text and 'torch.distributed.run' not in text
+    assert "python -m prom3theus.muram.cli invert configs/muram/hinode/stokes_only.yaml" in text
+
+
 def test_shell_scripts_have_no_conditionals():
     for path in (PROJECT_ROOT / "scripts").rglob("*.sh"):
         assert not re.search(r"^\s*(if|elif|else|fi)\b", path.read_text(), re.MULTILINE), path
@@ -24,6 +39,15 @@ SDO_DOWNLOAD = PROJECT_ROOT / "scripts" / "sdo" / "download.sh"
 SDO_PREPARE = PROJECT_ROOT / "scripts" / "sdo" / "prepare.sh"
 SDO_RUN = PROJECT_ROOT / "scripts" / "sdo" / "run.sh"
 SCRIPTS = (HMI_DOWNLOAD, HMI_PREPARE, HMI_RUN, HINODE_RESOURCES, HINODE_RUN)
+# MURaM validation tooling: unpack_snapshots.sh is a Python script (`.sh`
+# only by extension, per its own naming) that stages raw MURaM archives, so
+# it does not go through the static-bash checks below; the other two follow
+# the same fixed, argument-rejecting, prom3theus.muram.cli-dispatching
+# pattern as the SCRIPTS tuple, just against a different CLI entry point.
+MURAM_UNPACK = PROJECT_ROOT / "scripts" / "muram" / "unpack_snapshots.sh"
+MURAM_SYNTHESIZE = PROJECT_ROOT / "scripts" / "muram" / "synthesize_snapshots.sh"
+MURAM_RUN = PROJECT_ROOT / "scripts" / "muram" / "run_inversion.sh"
+MURAM_SCRIPTS = (MURAM_SYNTHESIZE, MURAM_RUN)
 
 
 def _fake_python(tmp_path: Path) -> tuple[Path, Path]:
@@ -76,6 +100,13 @@ def test_scripts_are_executable_static_bash_without_dispatch_or_overwrite():
         "scripts/hmi/download.sh",
         "scripts/hmi/prepare.sh",
         "scripts/hmi/run.sh",
+        "scripts/muram/run_inversion.sh",
+        "scripts/muram/synthesize_snapshots.sh",
+        "scripts/muram/unpack_snapshots.sh",
+        "scripts/muram_hinode/check_setup.sh",
+        "scripts/muram_hinode/run.sh",
+        "scripts/muram_hinode/run_stokes_only.sh",
+        "scripts/muram_hinode/synthesize.sh",
         "scripts/resources/rebuild.sh",
         "scripts/sdo/download.sh",
         "scripts/sdo/prepare.sh",
@@ -100,6 +131,19 @@ def test_scripts_are_executable_static_bash_without_dispatch_or_overwrite():
         assert "sample_" not in text
         assert "<<" not in text
         assert "--overwrite" not in text
+
+    for script in MURAM_SCRIPTS:
+        assert os.access(script, os.X_OK)
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        text = script.read_text()
+        assert "if " not in text
+        assert "case " not in text
+        assert "--overwrite" not in text
+        assert "PROM3THEUS_" not in text
+        assert "pme" not in text.lower()
+        assert "PYTHONPATH=src python -m prom3theus.muram.cli" in text
+
+    assert os.access(MURAM_UNPACK, os.X_OK)
 
 
 def test_run_scripts_preserve_the_pbs_job_header():
@@ -129,7 +173,7 @@ def test_scripts_reject_all_arguments(tmp_path):
         "PROM3THEUS_TEST_LOG": str(tmp_path / "commands.log"),
         "JSOC_EMAIL": "scientist@example.test",
     }
-    for script in (*SCRIPTS, SDO_DOWNLOAD, SDO_PREPARE, SDO_RUN):
+    for script in (*SCRIPTS, SDO_DOWNLOAD, SDO_PREPARE, SDO_RUN, *MURAM_SCRIPTS, MURAM_UNPACK):
         result = subprocess.run(
             ["bash", str(script), "--overwrite"],
             cwd="/",
@@ -181,7 +225,7 @@ def test_sdo_commands_are_fixed_and_minimal(tmp_path):
         ],
     ]
     assert _run(SDO_RUN, tmp_path / "run") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_aia_dynamic.yaml"],
+        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_aia_dynamic_energy.yaml"],
     ]
 
 
@@ -239,7 +283,7 @@ def test_hmi_preparation_commands_are_fixed(tmp_path):
 
 def test_run_commands_are_separate_and_fixed(tmp_path):
     assert _run(HMI_RUN, tmp_path / "hmi") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/hmi_lte_dynamic.yaml"],
+        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_dynamic.yaml"],
         [
             "-m",
             "prom3theus.cli.main",
@@ -255,14 +299,21 @@ def test_run_commands_are_separate_and_fixed(tmp_path):
             "-m",
             "prom3theus.cli.main",
             "invert",
-            "configs/hinode_lte_mhs.yaml",
+            "configs/hinode/mhs.yaml",
         ],
         [
             "-m",
             "prom3theus.cli.main",
             "invert",
-            "configs/hinode_lte_mhs_extrapolation.yaml",
+            "configs/hinode/mhs_extrapolation.yaml",
         ],
+    ]
+
+
+def test_muram_inversion_launches_configured_runs(tmp_path):
+    assert _run(MURAM_RUN, tmp_path) == [
+        ["-m", "prom3theus.muram.cli", "invert", "configs/muram/sdo/joint.yaml"],
+        ["-m", "prom3theus.muram.cli", "invert", "configs/muram/sdo/mhs.yaml"],
     ]
 
 

@@ -7,11 +7,17 @@ from copy import deepcopy
 class StreamBatchScheduler:
     version = 3
 
-    def __init__(self, loaders, reference_stream, *, explicit_commit=False, rank=0, world_size=1):
+    def __init__(self, loaders, reference_stream, *, explicit_commit=False, rank=0, world_size=1, steps_per_epoch=None):
         if world_size < 1 or not 0 <= rank < world_size:
             raise ValueError("Invalid distributed schedule rank/world_size")
         self.rank, self.world_size = rank, world_size
         self.loaders = dict(loaders)
+        if steps_per_epoch is not None:
+            if type(steps_per_epoch) is not int or steps_per_epoch < 1:
+                raise ValueError("steps_per_epoch must be a positive integer")
+            if any(not hasattr(loader, "iter_random") for loader in self.loaders.values()):
+                raise ValueError("Fixed-length epochs require loaders implementing iter_random")
+        self.steps_per_epoch = steps_per_epoch
         if reference_stream not in self.loaders:
             raise ValueError("Training reference must name a configured stream")
         if any(len(loader) == 0 for loader in self.loaders.values()):
@@ -23,6 +29,8 @@ class StreamBatchScheduler:
         self.device = None
 
     def __len__(self):
+        if self.steps_per_epoch is not None:
+            return self.steps_per_epoch
         import math
         return math.ceil(len(self.loaders[self.reference_stream]) / self.world_size)
 
@@ -96,7 +104,10 @@ class StreamBatchScheduler:
         count = len(self) - start % len(self)
         # All background producers start before the first blocking receive.
         validity = [True] * count
-        if self.world_size == 1:
+        if self.steps_per_epoch is not None:
+            indices = [step * self.world_size + self.rank for step in range(start, start + count)]
+            self._active = [loader.iter_random(indices) for loader in self.loaders.values()]
+        elif self.world_size == 1:
             self._active = [self._iterator(loader, start, count) for loader in self.loaders.values()]
         else:
             reference_count = len(self.loaders[self.reference_stream])
@@ -135,6 +146,7 @@ class StreamBatchScheduler:
 
     def _contract(self):
         return {
+            "steps_per_epoch": self.steps_per_epoch,
             "world_size": self.world_size,
             "reference_stream": self.reference_stream,
             "lengths": {name: len(loader) for name, loader in self.loaders.items()},
@@ -165,9 +177,14 @@ class StreamBatchScheduler:
             self.close()
             return
         contract = self._contract()
+        if state.get("steps_per_epoch") != self.steps_per_epoch:
+            # Epoch length/sampling changes affect only coverage, not scientific state.
+            state["steps_per_epoch"] = self.steps_per_epoch
+            state["completed"] = 0
+            self.order_migrated = True
         if state.get("world_size", 1) != self.world_size:
-            if not migrate:
-                raise ValueError("World size changed; explicitly migrate_data_order to restart coverage")
+            # The checkpoint format and scientific state are unchanged. A new
+            # rank partition only requires restarting the data-coverage cursor.
             state["world_size"] = self.world_size
             state["completed"] = 0
             self.order_migrated = True
@@ -220,6 +237,9 @@ class StreamBatchScheduler:
             raise ValueError("Invalid completed stream cursor")
         self.close()
         self.completed = self.delivered = state["completed"]
+        if self.order_migrated:
+            print("Resuming with changed sampling schedule: restarting data coverage; "
+                  "retaining model and optimizer state.", flush=True)
 
     def close(self):
         for iterator in self._active:

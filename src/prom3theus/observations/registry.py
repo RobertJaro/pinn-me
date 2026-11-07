@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
 from types import MappingProxyType
@@ -65,6 +66,21 @@ def _hmi_source_files(config: Mapping[str, Any]) -> tuple[Path, ...]:
     )
 
     groups = resolve_acquisition_groups(directory=config["directory"])
+    from prom3theus.instruments.hmi.acquisition import read_hmi_image_header
+
+    synthetic = [bool(read_hmi_image_header(next(path for path in paths if path.name.endswith(".I0.fits"))).get("SYNTHET", False)) for _, paths in groups]
+    if any(synthetic):
+        if not all(synthetic):
+            raise ValueError("Cannot mix synthetic and observed HMI acquisitions.")
+        from prom3theus.muram.fits import synthetic_response_path
+
+        files = [path for _, paths in groups for path in paths]
+        profiles = [
+            synthetic_response_path(
+                config["calibration"]["transmission_profile_directory"], path
+            ) for path in files if path.name.endswith(".I0.fits")
+        ]
+        return tuple(dict.fromkeys([*files, *profiles]))
     calibration = config["calibration"]
     response_root = Path(calibration["transmission_profile_directory"]).resolve()
     # Validation hashes every response archive against this manifest. The
@@ -77,8 +93,32 @@ def _hmi_source_files(config: Mapping[str, Any]) -> tuple[Path, ...]:
     )
 
 
+def _build_muram_stored(config: Mapping[str, Any]) -> Any:
+    from prom3theus.muram.observation import _build_data
+
+    return _build_data(config)
+
+
+def _describe_muram_stored(data: Any) -> ObservationSpec:
+    from prom3theus.muram.observation import _describe_data
+
+    return _describe_data(data)
+
+
+def _muram_stored_source_files(config: Mapping[str, Any]) -> tuple[Path, ...]:
+    from prom3theus.muram.observation import _source_files
+
+    return _source_files(config)
+
+
 _ADAPTERS: Mapping[str, ObservationAdapter] = MappingProxyType(
     {
+        "muram_stored": ObservationAdapter(
+            "muram_stored",
+            _build_muram_stored,
+            _describe_muram_stored,
+            _muram_stored_source_files,
+        ),
         "hinode_sp": ObservationAdapter(
             "hinode_sp", _build_hinode, _describe_hinode, _hinode_source_files
         ),
@@ -264,6 +304,22 @@ def load_or_prepare_observation(
         store_path,
         expected_signature=signature,
     )
+    # A prepared cache can outlive a radiative-transfer change. Recheck the
+    # target generator on every load, including cache hits, rather than relying
+    # on the serialization schema or a verification result saved long ago.
+    seen_synthetic_contracts = set()
+    for raster in rasters:
+        contract = raster.metadata.get("muram_synthesis")
+        if contract is None:
+            continue
+        from prom3theus.muram.provenance import check_stokes_forward_provenance
+
+        identity = json.dumps(contract, sort_keys=True)
+        if identity not in seen_synthetic_contracts:
+            check_stokes_forward_provenance(
+                contract.get("forward_model_provenance"), contract["instrument"]["type"]
+            )
+            seen_synthetic_contracts.add(identity)
     if store_metadata["adapter"] != adapter.name:
         raise ValueError("Observation store adapter does not match the requested type.")
     spec = _spec_from_metadata(store_metadata["observation"])

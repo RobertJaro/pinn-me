@@ -20,6 +20,9 @@ def implementation_signature():
             "application/joint_contracts.py",
             "rt/geometry.py",
             "rt/units.py",
+            "rt/radiometry.py",
+            "muram/fits.py",
+            "muram/provenance.py",
         )
         if (root / name).exists()
     )

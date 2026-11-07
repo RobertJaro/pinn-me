@@ -12,7 +12,7 @@ from prom3theus.inversion.sampling import SphericalShellDomain
 
 @pytest.mark.parametrize('equation', ['magnetic_divergence', 'induction'])
 def test_builder_uses_only_stokes_source_footprint(monkeypatch, equation):
-    config = load_config('configs/hmi_aia_dynamic.yaml')
+    config = load_config('configs/sdo/hmi_aia_dynamic.yaml')
     equations = config.physics.equations
     equations = replace(equations, **{field.name: replace(getattr(equations, field.name), enabled=False, weight=0.) for field in fields(equations)})
     equations = replace(equations, **{equation: replace(getattr(equations, equation), enabled=True, weight=1.)})
@@ -27,7 +27,7 @@ def test_builder_uses_only_stokes_source_footprint(monkeypatch, equation):
         calls.append(set(selected))
         width = .04 if len(selected) == 1 else .06
         result = SphericalShellDomain(0., (-width, width), (-width, width), (0., 2.), (0., 50.), 696e6).configuration()
-        result.pop('height_Mm')
+        result.pop('height_megameter')
         return result
 
     monkeypatch.setattr(joint_assembly, '_joint_observation_bounds', bounds)
@@ -47,13 +47,13 @@ def test_builder_uses_only_stokes_source_footprint(monkeypatch, equation):
     # Refreshing or changing the reference must not rescale volume residuals.
     from prom3theus.rt import StratifiedAtmosphereModel
     model = StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(50., -.1), time_dependent=True,
+        shell_height_bounds_megameter=(50., -.1), time_dependent=True,
         scene_geometry_config={"solar_radius_m": 696e6, "scene_basis": torch.eye(3)},
         model_config={"type": "mlp", "dim": 10, "n_layers": 2,
                       "activation": "silu", "encoding_config": {"type": "identity"}},
     )
     sample = physics.sampling_domain.deterministic_grouped(2, 4)
-    monkeypatch.setattr(physics, '_samples', lambda parameter: {
+    monkeypatch.setattr(physics, '_samples', lambda parameter, atmosphere: {
         'volume_position_m': sample['position_m'],
         'volume_time_hours': sample['time_hours'],
     })
@@ -68,7 +68,7 @@ def test_builder_uses_only_stokes_source_footprint(monkeypatch, equation):
 
 
 @pytest.mark.parametrize('options', [
-    {'time_samples': 3}, {'update_every_n_steps': 0}, {'freeze_step': 1001}, {'blend': 1.1},
+    {'time_samples': 3}, {'update_every_n_steps': 0}, {'freeze_step': 999}, {'blend': 1.1},
     {'grid_size': 3}, {'side_height_points': 0}, {'source_height_megameter': -.1}, {'source_height_megameter': .1}, {'geometry': 'buried_plane_fft'}, {'start_step': 1.5},
 ])
 def test_rejects_invalid_potential_schedule_or_grid(options):

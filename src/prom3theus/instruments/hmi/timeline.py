@@ -96,6 +96,18 @@ def _selected_acquisition_indices(
 
 
 def _response_samplers(response_directory: Path, acquisitions):
+    synthetic = ["synthetic_schema" in item for item in acquisitions]
+    if any(synthetic):
+        if not all(synthetic):
+            raise ValueError("Cannot mix synthetic and observed HMI acquisitions.")
+        from prom3theus.muram.fits import SyntheticHMIResponse, synthetic_response_path
+
+        archives = {
+            Path(item["path"]): SyntheticHMIResponse(
+                synthetic_response_path(response_directory, item["path"])
+            ) for item in acquisitions
+        }
+        return archives, [archives[Path(item["path"])] for item in acquisitions]
     manifest = load_response_manifest(response_directory)
     archives: dict[Path, HMIResponseArchive] = {}
     acquisition_archives = []
@@ -152,10 +164,14 @@ class HMIDataModule(ObservationDataModule):
         quiet_sun_trim_quantiles=(0.05, 0.95),
         minimum_quiet_sun_pixels: int = 32,
         calibration_sample_limit: int = 4096,
+        binning: int = 1,
     ) -> None:
         self.transmission_profile_directory = transmission_profile_directory
         self.acquisition_indices = acquisition_indices
+        from prom3theus.muram.binning import validate_binning
+
         self.raster_options = {
+            "binning": validate_binning(binning),
             "require_quality_zero": require_quality_zero,
             "quiet_sun_max_fractional_polarization": (
                 quiet_sun_max_fractional_polarization
@@ -355,8 +371,8 @@ class HMIDataModule(ObservationDataModule):
                 time_min = min(time_min, float(coordinates[:, 2].amin()))
                 time_max = max(time_max, float(coordinates[:, 2].amax()))
         affine = self.raster.metadata["coordinates"]["network_affine"]
-        affine["center_mm"] = (0.5 * (xy_min + xy_max)).tolist()
-        affine["scale_mm"] = torch.maximum(
+        affine["center_megameter"] = (0.5 * (xy_min + xy_max)).tolist()
+        affine["scale_megameter"] = torch.maximum(
             0.5 * (xy_max - xy_min), torch.full_like(xy_min, 1.0e-6)
         ).tolist()
         self.raster.metadata["coordinates"]["time_origin"] = str(reference_time.isot)

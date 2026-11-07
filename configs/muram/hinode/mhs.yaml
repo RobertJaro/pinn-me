@@ -1,0 +1,185 @@
+# muram/hinode/mhs
+# Run-defining settings and overrides; omitted options use schema defaults.
+schema_version: 5
+solver:
+  kind: joint
+  output_directory: /glade/work/rjarolim/lte/muram_hinode_mhs_isotropic_soap_v03
+  work_directory: /glade/derecho/scratch/rjarolim/lte/muram_hinode_mhs_isotropic_soap_v03
+scene:
+  reference_stream: photospheric_stokes
+atmosphere:
+  geometry:
+    type: spherical_shell
+    time_dependent: false
+    height_input_scale_m: 10000000.0
+    outer_height_megameter: 30.0
+    inner_height_megameter: -0.5
+    tangent_margin_m: 1000.0
+    line_formation_outer_height_megameter: 2.5
+    uniform_spatial_scaling: true
+  reference_atmosphere: falc_82
+  parameters:
+    temperature:
+      log_scale: 0.1
+    velocity:
+      scale_m_per_s: 1000.0
+    magnetic_field:
+      scale_gauss: 1000.0
+      representation: vector_potential
+      scale_vector_potential: 0.01
+    microturbulence:
+      log_scale: 0.2
+    gas_pressure:
+      log_scale: 0.5
+  network:
+    type: siren
+    first_omega_0: 5.0
+    hidden_dimension: 256
+    hidden_layers: 8
+    radial_weighting: null
+  upper_atmosphere:
+    type: hydrostatic_corona
+    # Keep the transition-region top 1 Mm above the line-formation domain.
+    transition_region_top_megameter: 3.5
+    coronal_temperature_k: 1000000.0
+synthesis:
+  windows:
+    - id: fe_i_6302
+      line_ids:
+        - FeI_6301.5008
+        - FeI_6302.4932
+      wavelength_bounds_vacuum_angstrom:
+        - 6300.0
+        - 6307.0
+      radiance_scale: 25000000000000.0
+      # Trial depth budget; compare against a denser grid after fitting.
+      depth_count: 32
+      coarse_to_fine:
+        enabled: false
+        fine_sample_count: 16
+        uniform_weight_floor: 0.05
+      jitter_fraction: 1.0
+      wavelength_chunk_size: 64
+      transfer_precision: float32
+      shell_height_bounds_megameter:
+        - -0.5
+        - 2.5
+      lateral_halo_megameter: 5.0
+physics:
+  vector_basis_matches_spatial_coordinates: true
+  collocation:
+    volume_points_per_step: 2048
+    height_layers_per_step: 64
+    upper_boundary_points_per_step: 256
+    validation_height_layers: 12
+    validation_points_per_height: 32
+    upper_volume_points_per_step: 1024
+    upper_height_layers_per_step: 32
+    side_boundary_points_per_step: 512
+    validation_side_boundary_points: 256
+    validation_upper_height_layers: 6
+    height_sampling_power: 2.5
+    volume_sampling: fully_random
+    hard_example_enabled: true
+    hard_example_count: 256
+    hard_example_start_step: 500
+  normalization:
+    length_m: 1000000.0
+    time_s: 3600.0
+    force_balance_pressure_floor_pa: 1.0
+  equations:
+    magnetohydrostatic_equilibrium:
+      enabled: true
+      weight: 0.001
+    upper_boundary_gas_pressure_prior:
+      enabled: true
+      weight: 0.0001
+    vector_potential_gauge:
+      enabled: false
+      weight: 0.0
+  potential_boundary:
+    enabled: false
+    start_step: 2000
+    update_every_n_steps: 1000
+    weight: 0.01
+    photosphere:
+      enabled: false
+      minimum_horizontal_field_gauss: 1.0
+      start_step: 2000
+      ramp_steps: 2000
+      end_step: 10000
+  loss_start_step: 0
+  loss_ramp_steps: 0
+atmosphere_regularization: []
+streams:
+  - id: photospheric_stokes
+    observation:
+      type: muram_stored
+      binning: 4  # Average native synthesis pixels during loading.
+      directory: /glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_single_frame
+      loader:
+        batch_size: 128
+        validation_batch_size: 16
+        validation_stride: 16
+        preparation_workers: 8
+        workers: 8
+    data_term:
+      type: lte_stokes
+      synthesis_window: fe_i_6302
+      weight: 1.0
+      instrument:
+        type: hinode_sp
+        spectral_psf:
+          type: gaussian
+          fwhm_angstrom: 0.025
+          oversample: 4
+          truncate_sigma: 4.0
+      objective:
+        type: mse
+        stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
+        qu_warmup_steps: 0
+        continuum_normalization: true
+        stokes_scales: {I: 1.0, Q: 0.1, U: 0.1, V: 0.1}
+diagnostics:
+  visualization:
+    enabled: true
+    ray_sampling:
+      batch_size: 16
+      max_pixels: 4096
+      max_profile_samples: 2048
+    slice_sampling:
+      batch_size: 512
+      longitude_points: 128
+      latitude_points: 128
+      radial_points: 256
+    meridional_slice:
+      enabled: true
+      longitude_deg: 2.0
+    contribution_ray_count: 0
+dry_run:
+  gradient_sample_count: 4
+  max_samples_per_stream: 64
+  quadrature_samples:
+    - 96
+    - 192
+  report_filename: hinode_setup.json
+training:
+  max_steps: -1
+  learning_rate: 0.001
+  final_learning_rate: 0.0001
+  optimizer: soap
+  device: cuda
+  steps_per_epoch: 1000
+  learning_rate_decay_steps: 10000
+  reference_stream: photospheric_stokes
+logging:
+  type: wandb
+  project: PROM3THEUS
+  run_name: MURaM Hinode SIREN SOAP vector-potential MHS
+  tags:
+    - muram
+    - synthetic
+    - hinode
+    - validation
+    - single-frame
+    - mhs

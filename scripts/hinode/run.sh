@@ -11,6 +11,6 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 test "$#" -eq 0
 
-PYTHONPATH=src python -m prom3theus.cli.main invert configs/hinode_lte_mhs.yaml
+PYTHONPATH=src python -m prom3theus.cli.main invert configs/hinode/mhs.yaml
 
-PYTHONPATH=src python -m prom3theus.cli.main invert configs/hinode_lte_mhs_extrapolation.yaml
+PYTHONPATH=src python -m prom3theus.cli.main invert configs/hinode/mhs_extrapolation.yaml

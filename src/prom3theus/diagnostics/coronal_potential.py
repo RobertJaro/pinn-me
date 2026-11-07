@@ -101,7 +101,7 @@ def infer_photospheric_source(atmosphere_model, domain, *, grid_size=12,
 def differential_metrics(field, position_m, *, step_megameter=0.02):
     """Independent centred Cartesian differences of the integrated field.
 
-    Residuals use a fixed 1 Mm length. Unlike a current-weighted angle, these
+    Residuals use a fixed 1 megameter length. Unlike a current-weighted angle, these
     remain meaningful for a current-free model, whose exact current is zero.
     Two step sizes expose differentiation/quadrature error in the exported data.
     """
@@ -116,7 +116,7 @@ def differential_metrics(field, position_m, *, step_megameter=0.02):
         delta = np.eye(3) * step * 1e6
         plus = field((positions[:, None] + delta[None]).reshape(-1, 3)).reshape(-1, 3, 3)
         minus = field((positions[:, None] - delta[None]).reshape(-1, 3)).reshape(-1, 3, 3)
-        # [probe, component, coordinate], in Gauss / Mm.
+        # [probe, component, coordinate], in Gauss / megameter.
         jacobian = ((plus - minus) / (2 * step)).transpose(0, 2, 1)
         divergence = np.trace(jacobian, axis1=1, axis2=2)
         curl = np.stack((jacobian[:, 2, 1] - jacobian[:, 1, 2],
@@ -229,7 +229,7 @@ def export_potential_corona(atmosphere_model, domain, output_directory, *,
     heights = np.asarray(heights_megameter, dtype=np.float64)
     if (heights.ndim != 1 or len(heights) < 2 or not np.isfinite(heights).all()
             or (heights <= 0).any() or (np.diff(heights) <= 0).any() or heights[-1] <= 2.5):
-        raise ValueError("Use increasing positive heights extending above 2.5 Mm")
+        raise ValueError("Use increasing positive heights extending above 2.5 megameter")
     if horizontal_points < 2:
         raise ValueError("Output grid requires at least two points per axis")
     output = Path(output_directory)
@@ -265,7 +265,7 @@ def export_potential_corona(atmosphere_model, domain, output_directory, *,
     steps = differential["step_checks"]
     residual_names = ("max_normalized_divergence", "max_normalized_curl", "max_normalized_lorentz_force")
     # Float32 geometry operators impose a finite-difference noise floor. Below
-    # 1e-4 / Mm, a strict factor-of-four convergence test would measure rounding
+    # 1e-4 / megameter, a strict factor-of-four convergence test would measure rounding
     # rather than the field. Above it, halving the step must not worsen residuals
     # by more than 50 percent. Both steps independently meet the main tolerance.
     convergence_floor = 1e-4
@@ -361,7 +361,7 @@ def potential_corona_figure(field, domain, heights, positions, magnetic, lines, 
     axes[0, 1].semilogy(heights, rms, "o-", label="RMS |B|")
     axes[0, 1].semilogy(heights, peak, "s--", label="Maximum |B|")
     axes[0, 1].axvspan(2.5, heights[-1], color="tab:orange", alpha=0.08)
-    axes[0, 1].set(title="Spherical potential field into the corona", xlabel="Height [Mm]", ylabel="Field [G]")
+    axes[0, 1].set(title="Spherical potential field into the corona", xlabel="Height [megameter]", ylabel="Field [G]")
     axes[0, 1].legend()
     axes[0, 1].grid(alpha=0.2)
     index = int(np.argmin(np.abs(heights - 5)))
@@ -371,7 +371,7 @@ def potential_corona_figure(field, domain, heights, positions, magnetic, lines, 
     scale = max(float(np.max(np.abs(value))), 1e-6)
     artist = axes[1, 0].imshow(value.reshape(output_size, output_size).T, origin="lower", extent=extent,
                               aspect="auto", cmap="RdBu_r", vmin=-scale, vmax=scale)
-    axes[1, 0].set(title=f"Coronal radial field at {heights[index]:g} Mm", xlabel="Carrington longitude [deg]", ylabel="Latitude [deg]")
+    axes[1, 0].set(title=f"Coronal radial field at {heights[index]:g} megameter", xlabel="Carrington longitude [deg]", ylabel="Latitude [deg]")
     figure.colorbar(artist, ax=axes[1, 0], label="Br [G]")
     axes[1, 1].remove()
     trace_axis = figure.add_subplot(2, 2, 4, projection="3d")
@@ -384,7 +384,7 @@ def potential_corona_figure(field, domain, heights, positions, magnetic, lines, 
         x, y = line @ west / 1e6, line @ north / 1e6
         z = (np.linalg.norm(line, axis=-1) - domain.solar_radius_m) / 1e6
         trace_axis.plot(x, y, z, lw=1.1)
-    trace_axis.set(xlabel="West [Mm]", ylabel="North [Mm]", zlabel="Height [Mm]", title="Field lines from the inferred boundary")
+    trace_axis.set(xlabel="West [megameter]", ylabel="North [megameter]", zlabel="Height [megameter]", title="Field lines from the inferred boundary")
     trace_axis.set_zlim(0, heights[-1])
     trace_axis.view_init(elev=23, azim=-65)
     figure.suptitle("Photospheric boundary → spherical α=0 force-free corona\n"

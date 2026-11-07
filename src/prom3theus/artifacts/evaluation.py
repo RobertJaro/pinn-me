@@ -1,4 +1,4 @@
-"""Atmosphere evaluation for validated LTE inversion artifacts."""
+"""Physical atmosphere evaluation for validated LTE inversion artifacts."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from prom3theus.core import (
+    SPEED_OF_LIGHT,
     carrington_rotation_velocity_cartesian,
     cartesian_to_spherical,
     project_cartesian_to_spherical,
@@ -59,7 +60,7 @@ def _observation_los_offset(
     raster: ObservationRaster,
     velocity_synthesis_mode: str,
 ) -> torch.Tensor:
-    """Resolve the authoritative per-pixel LOS offset used by synthesis."""
+    """Resolve the authoritative per-pixel detector spectral-frame offset."""
 
     if velocity_synthesis_mode == CARRINGTON_OBSERVER_RELATIVE_VELOCITY:
         return _spatial_los_offset(
@@ -105,54 +106,27 @@ def select_export_device(
     *,
     include_stokes: bool,
 ) -> torch.device:
-    """Select an evaluation device subject to polarized-synthesis constraints."""
+    """Select an evaluation device supporting the model precision."""
 
     if name == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")
-        mps = getattr(torch.backends, "mps", None)
-        if (
-            not include_stokes
-            and compute_dtype != torch.float64
-            and mps is not None
-            and mps.is_available()
-        ):
-            return torch.device("mps")
         return torch.device("cpu")
     device = torch.device(name)
-    if device.type == "mps" and compute_dtype == torch.float64:
-        raise ValueError(
-            "MPS does not support float64 export; use CPU/CUDA or a float32 model."
-        )
-    if device.type == "mps" and include_stokes:
-        raise ValueError(
-            "MPS cannot run polarized LTE synthesis; use CPU or CUDA with "
-            "include_stokes=True."
-        )
+    if device.type == "mps":
+        raise ValueError("LTE ray geometry requires float64; use CPU or CUDA for export.")
     return device
 
 
-def depth_grid(
-    module: Any,
-    depth_samples: int | None,
-) -> torch.Tensor:
-    """Build the requested fixed Stokes reference sampling grid."""
-
+def photospheric_height_grid(module: Any, sample_count: int | None = 101) -> torch.Tensor:
+    """Independent diagnostic height samples; these do not discretize transfer."""
+    if sample_count is None:
+        sample_count = 101
+    if type(sample_count) is not int or sample_count < 2:
+        raise ValueError("depth_samples must be an integer of at least two.")
     parameter = next(module.atmosphere_model.parameters())
-    if depth_samples is None:
-        depth = module.sample_depth_grid(randomize=False)
-    else:
-        if type(depth_samples) is not int or depth_samples < 2:
-            raise ValueError("depth_samples must be an integer of at least two.")
-        source = module.sample_depth_grid(randomize=False)
-        depth = torch.linspace(
-            source[0],
-            source[-1],
-            depth_samples,
-            dtype=parameter.dtype,
-            device=parameter.device,
-        )
-    return depth.to(device=parameter.device, dtype=parameter.dtype)
+    inner, outer = module.synthesis_window.height_bounds_m.detach().cpu().tolist()
+    return torch.linspace(outer, inner, sample_count, dtype=parameter.dtype, device=parameter.device)
 
 
 @torch.inference_mode()
@@ -160,7 +134,7 @@ def evaluate_atmosphere(
     module: Any,
     raster: ObservationRaster,
     *,
-    depth_grid: torch.Tensor,
+    height_grid_m: torch.Tensor,
     batch_size: int,
     storage_dtype: str,
 ) -> dict[str, np.ndarray]:
@@ -170,7 +144,7 @@ def evaluate_atmosphere(
         raise ValueError("batch_size must be positive.")
     torch_dtype, numpy_dtype = resolve_storage_dtype(storage_dtype)
     model = module.atmosphere_model
-    continuum_opacity = module.synthesizer.continuum_opacity
+    continuum_opacity = module.synthesis_window.coefficients.plasma_provider
     parameter = next(model.parameters())
     mode = resolve_velocity_synthesis_mode(module.velocity_synthesis_mode).value
     validate_raster_velocity_contract(raster, mode)
@@ -191,8 +165,17 @@ def evaluate_atmosphere(
     bases = read_flat_samples(raster.stokes_basis, flat_indices)
     spatial_shape = raster.spatial_shape
     observation_los_offset = _observation_los_offset(raster, mode)
-    flat_observation_los_offset = observation_los_offset.reshape(-1)
-    depth = int(depth_grid.numel())
+    # Observer/registration and instrument shifts act on detector wavelengths;
+    # they are never added to the local material-velocity vector.
+    beta_observer = observation_los_offset.to(torch.float64) / SPEED_OF_LIGHT
+    beta_calibration = line_of_sight_velocity_correction / SPEED_OF_LIGHT
+    if torch.any(beta_observer.abs() >= 1) or abs(beta_calibration) >= 1:
+        raise ArtifactExportError("Spectral-frame velocities must be subluminal.")
+    wavelength_factor = (
+        torch.sqrt((1 - beta_observer) / (1 + beta_observer))
+        * math.sqrt((1 - beta_calibration) / (1 + beta_calibration))
+    )
+    depth = int(height_grid_m.numel())
     flat_size = int(valid_flat.numel())
 
     scalar_fields = {
@@ -220,8 +203,6 @@ def evaluate_atmosphere(
             "inertial_velocity_spherical",
             "magnetic_observer",
             "corotating_velocity_observer",
-            "synthesis_velocity_observer",
-            "velocity_observer",
             "inertial_velocity_observer",
         )
     }
@@ -230,10 +211,13 @@ def evaluate_atmosphere(
     try:
         for start in range(0, coordinates.shape[0], batch_size):
             stop = min(start + batch_size, coordinates.shape[0])
+            module.synthesis_window.boundary_queries(
+                coordinates[start:stop].to(parameter), rays[start:stop].to(parameter)
+            )
             atmosphere, trace = model.trace_rays(
                 coordinates[start:stop].to(parameter),
                 rays[start:stop].to(parameter),
-                module.forward_composition.sampling_heights(depth_grid),
+                height_grid_m,
             )
             selected = flat_indices[start:stop].cpu().numpy()
 
@@ -318,18 +302,7 @@ def evaluate_atmosphere(
                 inertial_spherical, spherical, observer_basis, torch
             )
             store_vector("inertial_velocity_observer", inertial_observer)
-            synthesis_observer = inertial_observer.clone()
-            # Positive correction is positive-redshift v_los, opposite the
-            # third Stokes-basis axis that points toward the observer.
-            synthesis_observer[..., 2] -= line_of_sight_velocity_correction
-            observation_observer = synthesis_observer.clone()
-            batch_los_offset = flat_observation_los_offset.index_select(
-                0, flat_indices[start:stop].cpu()
-            )
-            observation_observer[..., 2] -= batch_los_offset.to(parameter)[:, None]
             store_vector("corotating_velocity_observer", corotating_observer)
-            store_vector("synthesis_velocity_observer", synthesis_observer)
-            store_vector("velocity_observer", observation_observer)
     finally:
         model.train(was_training)
 
@@ -343,18 +316,12 @@ def evaluate_atmosphere(
     magnetic_scene = np.einsum(
         "ij,ndj->ndi", scene_basis_matrix, vector_fields["magnetic"]
     )
-    observer_velocity = vector_fields["velocity_observer"].reshape(vector_shape)
     inertial_observer_velocity = vector_fields["inertial_velocity_observer"].reshape(
         vector_shape
     )
-    synthesis_observer_velocity = vector_fields["synthesis_velocity_observer"].reshape(
-        vector_shape
-    )
     solar_inertial_los = -inertial_observer_velocity[..., 2]
-    instrument_corrected_los = -synthesis_observer_velocity[..., 2]
-    observation_los = -observer_velocity[..., 2]
     result = {
-        "stokes_reference_log_tau500": depth_grid.detach()
+        "photospheric_height_grid_m": height_grid_m.detach()
         .to(torch_dtype)
         .cpu()
         .numpy(),
@@ -385,13 +352,10 @@ def evaluate_atmosphere(
         "velocity_field_corotating_observer_m_per_s": vector_fields[
             "corotating_velocity_observer"
         ].reshape(vector_shape),
-        "velocity_field_synthesis_observer_m_per_s": vector_fields[
-            "synthesis_velocity_observer"
-        ].reshape(vector_shape),
-        "velocity_field_observer_m_per_s": observer_velocity,
+        "velocity_field_inertial_observer_m_per_s": inertial_observer_velocity,
         "v_los_solar_inertial_m_per_s": solar_inertial_los,
-        "v_los_instrument_corrected_m_per_s": instrument_corrected_los,
-        "v_los_m_per_s": observation_los,
+        "detector_to_inertial_wavelength_factor": wavelength_factor.to(torch_dtype)
+        .numpy().astype(numpy_dtype, copy=True),
         "magnetic_field_gauss": vector_fields["magnetic"].reshape(vector_shape),
         "magnetic_field_scene_gauss": magnetic_scene.reshape(vector_shape),
         "magnetic_field_spherical_gauss": vector_fields["magnetic_spherical"].reshape(
@@ -408,14 +372,15 @@ def evaluate_atmosphere(
             shape
         ),
         "valid_mask": materialize_array(raster.valid_mask).detach().cpu().numpy(),
-        "carrington_chart_x_mm": coordinates_grid[..., 0].astype(
+        "carrington_chart_x_megameter": coordinates_grid[..., 0].astype(
             numpy_dtype, copy=False
         ),
-        "carrington_chart_y_mm": coordinates_grid[..., 1].astype(
+        "carrington_chart_y_megameter": coordinates_grid[..., 1].astype(
             numpy_dtype, copy=False
         ),
         "time_hours": coordinates_grid[..., 2].astype(numpy_dtype, copy=False),
     }
+    result["detector_to_inertial_wavelength_factor"][~result["valid_mask"]] = np.nan
     if mode == CARRINGTON_OBSERVER_RELATIVE_VELOCITY:
         observer_los = (
             observation_los_offset.to(torch_dtype)
@@ -436,7 +401,7 @@ def evaluate_atmosphere(
 
 
 __all__ = [
-    "depth_grid",
+    "photospheric_height_grid",
     "evaluate_atmosphere",
     "resolve_storage_dtype",
     "select_export_device",

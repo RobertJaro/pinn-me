@@ -102,14 +102,14 @@ class HinodeDataModule(ObservationDataModule):
         spatial = raster.coordinates[..., :2][raster.valid_mask]
         spacing = float(
             raster.metadata["coordinates"]["network_affine"][
-                "native_neighbor_spacing_mm"
+                "native_neighbor_spacing_megameter"
             ]
         )
         affine = raster.metadata["coordinates"]["network_affine"]
-        affine["center_mm"] = (
+        affine["center_megameter"] = (
             0.5 * (spatial.amin(dim=0) + spatial.amax(dim=0))
         ).tolist()
-        affine["scale_mm"] = [HINODE_COORDINATE_NORMALIZATION_PIXELS * spacing] * 2
+        affine["scale_megameter"] = [HINODE_COORDINATE_NORMALIZATION_PIXELS * spacing] * 2
 
         self.raster = raster
         self.rasters = [raster]

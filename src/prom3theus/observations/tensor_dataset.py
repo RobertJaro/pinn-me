@@ -175,6 +175,19 @@ class TensorDiskDataset(Dataset):
                 )
         return result
 
+    def read_indices_into(self, indices, destination, *, offset=0):
+        """Gather aligned samples from every field into a preallocated batch."""
+        from .arrays import process_reader
+
+        reader = process_reader()
+        for record, ref in zip(self.files, self.arrays, strict=True):
+            node = destination
+            for key in record["keys"][:-1]:
+                node = node[key]
+            node[record["keys"][-1]][offset : offset + len(indices)].copy_(
+                reader.read(ref, indices)
+            )
+
     def allocate(self, count, *, pin_memory=False):
         result = {}
         for record, ref in zip(self.files, self.arrays, strict=True):

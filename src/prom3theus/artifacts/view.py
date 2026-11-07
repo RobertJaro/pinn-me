@@ -1,8 +1,10 @@
-"""Per-stream scientific evaluation facade over a reconstructed model."""
+"""Per-stream scientific evaluation facade over a reconstructed LTE model."""
 from torch import nn
 
 
 class StreamEvaluationView(nn.Module):
+    """Expose physical fields and observation prediction through formal LTE integration."""
+
     def __init__(self, model, stream_id):
         super().__init__()
         self.model = model
@@ -17,12 +19,12 @@ class StreamEvaluationView(nn.Module):
         return self.model.terms[self.stream_id]
 
     @property
-    def synthesizer(self):
-        return self.term.synthesizer
+    def synthesis_window(self):
+        return self.term.synthesis_window
 
     @property
-    def forward_composition(self):
-        return self.term._composition
+    def local_coefficients(self):
+        return self.synthesis_window.coefficients
 
     @property
     def velocity_synthesis_mode(self):
@@ -32,12 +34,6 @@ class StreamEvaluationView(nn.Module):
     def instrument_line_of_sight_velocity_correction_m_per_s(self):
         return self.term.instrument_line_of_sight_velocity_correction_m_per_s
 
-    def sample_depth_grid(self, *, randomize=False):
-        return self.forward_composition.sample_depth_grid(
-            self.term.coarse_depth_grid, randomize=randomize
-        )
-
-    def synthesize(self, coordinates, **kwargs):
-        return self.forward_composition.synthesize(
-            coordinates, runtime=self.term._runtime(), **kwargs
-        )
+    def predict(self, batch):
+        """Query outgoing radiation and apply the stream's instrument operator."""
+        return self.term.predict(batch)

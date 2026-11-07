@@ -79,13 +79,13 @@ def potential_boundary_figure(term):
                 if name in ("east", "west")
                 else np.linspace(*lon_bounds, shape[1] + 1)
             )
-            y = np.linspace(0, domain.height_bounds_Mm[1], shape[0] + 1)
+            y = np.linspace(0, domain.height_bounds_megameter[1], shape[0] + 1)
             xlabel = (
                 "Latitude [deg]"
                 if name in ("east", "west")
                 else "Carrington longitude [deg]"
             )
-            ylabel = "Height [Mm]"
+            ylabel = "Height [megameter]"
         for row, component in enumerate(COMPONENTS):
             ax = axes[row, column]
             data = (

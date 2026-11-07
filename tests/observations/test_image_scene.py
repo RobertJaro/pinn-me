@@ -16,8 +16,8 @@ def _scene(**changes) -> SceneContract:
         "scene_basis": torch.eye(3, dtype=torch.float64),
         "solar_radius_m": SOLAR_RADIUS_M,
         "reference_time_tai_seconds": 1_700_000_000.0,
-        "spatial_coordinate_center_mm": (1.0, -2.0),
-        "spatial_coordinate_scale_mm": (10.0, 20.0),
+        "spatial_coordinate_center_megameter": (1.0, -2.0),
+        "spatial_coordinate_scale_megameter": (10.0, 20.0),
         "time_coordinate_center_hours": 0.25,
         "time_coordinate_scale_hours": 2.0,
         "height_bounds_m": (-1.0e5, 5.0e7),
@@ -60,7 +60,7 @@ def test_scene_transform_maps_physical_position_and_absolute_time():
     torch.testing.assert_close(height, torch.tensor([1.0e6], dtype=torch.float64))
 
     metadata = scene.atmosphere_coordinate_metadata
-    assert metadata["spatial_coordinate_center_mm"] == [1.0, -2.0]
+    assert metadata["spatial_coordinate_center_megameter"] == [1.0, -2.0]
     assert metadata["time_coordinate_scale_hours"] == 2.0
     assert metadata["scene_geometry_config"]["scene_basis"] == torch.eye(3).tolist()
     assert metadata["time_reference"]["representation"] == "unix_tai"
@@ -74,7 +74,7 @@ def test_scene_validates_full_image_ray_support_to_outer_shell():
     assert summary["height_bounds_m"] == [-1.0e5, 5.0e7]
     assert summary["time_hours"] == [0.5, 0.5]
     assert summary["outer_support_distance_m"][0] >= 5.0e7
-    assert summary["chart_x_mm"][0] < 0 < summary["chart_x_mm"][1]
+    assert summary["chart_x_megameter"][0] < 0 < summary["chart_x_megameter"][1]
 
 
 def test_scene_rejects_incompatible_radius_and_noncoronal_height_domain():

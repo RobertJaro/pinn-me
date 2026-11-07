@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
@@ -111,7 +113,7 @@ def test_warmup_requires_nonnegative_integer(value):
 
     from prom3theus.config import load_config
 
-    config = load_config("configs/hmi_aia_dynamic.yaml")
+    config = load_config("configs/sdo/hmi_aia_dynamic.yaml")
     objective = config.streams[0].data_term.objective
     assert objective.qu_warmup_steps == 0
     with pytest.raises(ValueError, match="qu_warmup_steps"):
@@ -132,8 +134,14 @@ def test_training_lifecycle_sets_observation_and_shared_steps():
         assert stokes._qu_weight_factor() == (0 if step < 8000 else 1)
 
 
-@pytest.mark.parametrize("name", ["hmi_aia_mhs", "hmi_aia_dynamic", "hmi_lte_dynamic"])
-def test_presets_default_to_no_warmup(name):
+@pytest.mark.parametrize("path", sorted(
+    path for path in Path("configs").rglob("*.yaml") if path.name != "synthesis.yaml"
+))
+def test_presets_default_to_no_warmup(path):
     from prom3theus.config import load_config
-    config = load_config(f"configs/{name}.yaml")
-    assert config.streams[0].data_term.objective.qu_warmup_steps == 0
+    from prom3theus.muram import config as _register_muram_schema
+
+    config = load_config(path)
+    for stream in config.streams:
+        if stream.data_term.type == "lte_stokes":
+            assert stream.data_term.objective.qu_warmup_steps == 0

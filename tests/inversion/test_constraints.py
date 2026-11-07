@@ -28,7 +28,7 @@ class _Opacity:
 
 def _model():
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(1.5, -0.1),
         scene_geometry_config={
             "solar_radius_m": 695_700_000.0,
             "scene_basis": torch.eye(3),
@@ -45,7 +45,7 @@ def _model():
 
 def _time_model():
     return StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(1.5, -0.1),
         time_dependent=True,
         time_coordinate_center_hours=12.0,
         time_coordinate_scale_hours=12.0,
@@ -434,7 +434,7 @@ def test_upper_boundary_pressure_prior_matches_reference_initially_and_backpropa
         {"upper_boundary_gas_pressure_prior": {"enabled": True, "weight": 1e-4}},
     )
     height = coords.new_full(
-        (coords.shape[0],), model.shell_height_bounds_Mm[0] * 1.0e6
+        (coords.shape[0],), model.shell_height_bounds_megameter[0] * 1.0e6
     )
     position_m = model.position_from_coords_height(coords, height)
     result = module.upper_boundary_gas_pressure_prior(
@@ -885,8 +885,8 @@ def test_induction_and_continuity_match_an_exact_expanding_flow_solution():
 
 def test_upper_domain_and_boundary_losses_backpropagate():
     model = StratifiedAtmosphereModel(
-        shell_height_bounds_Mm=(3.0, -0.1),
-        line_formation_height_bounds_Mm=(1.5, -0.1),
+        shell_height_bounds_megameter=(3.0, -0.1),
+        line_formation_height_bounds_megameter=(1.5, -0.1),
         upper_atmosphere_config={
             "type": "hydrostatic_corona",
             "transition_region_top_megameter": 2.5,
@@ -1270,3 +1270,74 @@ def test_equation_diagnostics_reconstruct_training_loss(equation):
     torch.testing.assert_close(sum(data['normalized_terms'].values()), data['normalized_residual'])
     torch.testing.assert_close(data['normalized_residual'].square().mean(), result.losses[equation])
     assert not data['normalized_residual'].requires_grad
+
+
+@pytest.mark.parametrize("time_scale_s", [1.0, 3600.0, 7200.0])
+def test_normalized_centrifugal_force_matches_physical_units(time_scale_s):
+    model = _time_model().double()
+    with torch.no_grad():
+        # Place the chart origin on the equator so centrifugal acceleration is
+        # nonzero, and remove all inertial terms except the rotating-frame one.
+        model.scene_basis.copy_(torch.tensor(
+            [[0., 1., 0.], [0., 0., 1.], [1., 0., 0.]], dtype=torch.float64
+        ))
+        model.network.out_layer.weight[1:7].zero_()
+        model.network.out_layer.bias[1:7].zero_()
+    constraints = MagnetofluidConstraints(
+        {"momentum": {"enabled": True}},
+        gravity_m_per_s2=274.0,
+        vector_basis_matches_spatial_coordinates=True,
+        normalization={"time_s": time_scale_s, "force_balance_pressure_scale_pa": 1.e4},
+    )
+    coords = torch.tensor([[0., 0., 12.]], dtype=torch.float64)
+    position = model.position_from_coords_height(coords, torch.zeros(1, dtype=torch.float64))
+    arguments = dict(
+        height_group_shape=(1, 1), create_graph=False,
+        return_state=True, return_diagnostics=True,
+    )
+    normalized = constraints._volume_normalized(model, position, coords[:, 2:3], **arguments)
+    physical = constraints._volume_physical(model, position, coords[:, 2:3], **arguments)
+    actual = normalized.equation_diagnostics["momentum"]["terms"]["inertial"]
+    physical_force = physical.equation_diagnostics["momentum"]["terms"]["centrifugal"]
+    expected = physical_force * model.height_input_scale_m / model.gas_pressure_scale_pa
+    assert expected.abs().max() > 1.e-6
+    torch.testing.assert_close(actual, expected, rtol=1.e-7, atol=1.e-12)
+    acceleration = physical_force / physical.state.mass_density[:, None]
+    expected_acceleration = torch.tensor(
+        [[-CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S**2 * float(model.solar_radius_m), 0., 0.]],
+        dtype=torch.float64,
+    )
+    torch.testing.assert_close(acceleration, expected_acceleration, rtol=1.e-10, atol=1.e-12)
+
+
+@pytest.mark.parametrize("equation", ["momentum", "induction", "continuity", "adiabatic_pressure"])
+@pytest.mark.parametrize("time_scale_s", [73.0, 3600.0])
+def test_normalized_transport_and_momentum_match_physical_residuals(equation, time_scale_s):
+    torch.manual_seed(25)
+    model = _time_model().double()
+    constraints = MagnetofluidConstraints(
+        {equation: {"enabled": True}},
+        gravity_m_per_s2=274.0,
+        vector_basis_matches_spatial_coordinates=True,
+        normalization={
+            "time_s": time_scale_s,
+            "magnetic_field_scale_gauss": 100.0,
+            "force_balance_pressure_scale_pa": 1.e4,
+        },
+    )
+    coords = torch.tensor([[12., -8., 10.], [-20., 15., 15.]], dtype=torch.float64)
+    height = torch.tensor([0., 2.e5], dtype=torch.float64)
+    position = model.position_from_coords_height(coords, height)
+    arguments = dict(height_group_shape=(1, 2), create_graph=False, return_diagnostics=True)
+    normalized = constraints._volume_normalized(model, position, coords[:, 2:3], **arguments)
+    physical = constraints._volume_physical(model, position, coords[:, 2:3], **arguments)
+    for result in (normalized, physical):
+        assert torch.isfinite(result.losses[equation])
+    torch.testing.assert_close(
+        normalized.losses[equation], physical.losses[equation], rtol=1.e-9, atol=1.e-12
+    )
+    torch.testing.assert_close(
+        normalized.equation_diagnostics[equation]["normalized_residual"],
+        physical.equation_diagnostics[equation]["normalized_residual"],
+        rtol=1.e-9, atol=1.e-12,
+    )

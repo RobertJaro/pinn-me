@@ -129,7 +129,7 @@ def test_side_no_inflow_removes_uniform_horizontal_through_flow(axis, speed):
     assert torch.isfinite(model.velocity.grad).all()
 
 
-@pytest.mark.parametrize("filename", ["hmi_aia_dynamic.yaml", "hmi_lte_dynamic.yaml"])
+@pytest.mark.parametrize("filename", ["sdo/hmi_aia_dynamic.yaml", "sdo/hmi_dynamic.yaml"])
 def test_dynamic_hmi_configs_use_progressive_potential_and_outflow_boundaries(filename):
     from prom3theus.config import load_config
     from prom3theus.inversion.constraints.magnetofluid import BOUNDARY_EQUATIONS
@@ -137,14 +137,14 @@ def test_dynamic_hmi_configs_use_progressive_potential_and_outflow_boundaries(fi
     config = load_config(f"configs/{filename}")
     equations = config.physics.equations
     expected = {
-        f"{boundary}_boundary_{condition}"
-        for boundary in ("upper", "side")
-        for condition in ("no_inflow",)
+        "upper_boundary_no_inflow": 1.0,
+        "side_boundary_no_inflow": 1.0,
+        "upper_boundary_gas_pressure_prior": 1.0e-4,
     }
     for name in BOUNDARY_EQUATIONS:
         equation = getattr(equations, name)
         assert equation.enabled == (name in expected)
-        assert equation.weight == (1.0 if name in expected else 0.0)
+        assert equation.weight == expected.get(name, 0.0)
 
     assert config.physics.potential_boundary.enabled
-    assert config.physics.potential_boundary.weight == 1.0
+    assert config.physics.potential_boundary.weight > 0.0

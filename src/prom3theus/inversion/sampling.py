@@ -20,7 +20,7 @@ class SphericalShellDomain:
     longitude_offset_bounds_rad: tuple[float, float]
     latitude_bounds_rad: tuple[float, float]
     time_bounds_hours: tuple[float, float]
-    height_bounds_Mm: tuple[float, float]
+    height_bounds_megameter: tuple[float, float]
     solar_radius_m: float
 
     def __post_init__(self):
@@ -28,7 +28,7 @@ class SphericalShellDomain:
             "longitude_offset_bounds_rad",
             "latitude_bounds_rad",
             "time_bounds_hours",
-            "height_bounds_Mm",
+            "height_bounds_megameter",
         ):
             bounds = tuple(map(float, getattr(self, name)))
             if len(bounds) != 2 or not all(map(math.isfinite, bounds)):
@@ -36,7 +36,7 @@ class SphericalShellDomain:
             if bounds[1] < bounds[0]:
                 raise ValueError(f"{name} must be increasing.")
             object.__setattr__(self, name, bounds)
-        if self.height_bounds_Mm[1] <= self.height_bounds_Mm[0]:
+        if self.height_bounds_megameter[1] <= self.height_bounds_megameter[0]:
             raise ValueError("The spherical shell must have positive radial extent.")
         if not (
             -0.5 * math.pi
@@ -54,7 +54,7 @@ class SphericalShellDomain:
             raise ValueError("longitude_center_rad must be finite.")
         if not math.isfinite(self.solar_radius_m) or self.solar_radius_m <= 0:
             raise ValueError("solar_radius_m must be finite and positive.")
-        if self.solar_radius_m + self.height_bounds_Mm[0] * 1.0e6 <= 0:
+        if self.solar_radius_m + self.height_bounds_megameter[0] * 1.0e6 <= 0:
             raise ValueError("The inner shell radius must be positive.")
 
     @classmethod
@@ -65,7 +65,7 @@ class SphericalShellDomain:
             "surface_longitude_offset_rad",
             "surface_latitude_rad",
             "time_hours",
-            "height_Mm",
+            "height_megameter",
             "solar_radius_m",
         }
         missing = expected - set(options)
@@ -80,7 +80,7 @@ class SphericalShellDomain:
             longitude_offset_bounds_rad=options["surface_longitude_offset_rad"],
             latitude_bounds_rad=options["surface_latitude_rad"],
             time_bounds_hours=options["time_hours"],
-            height_bounds_Mm=options["height_Mm"],
+            height_bounds_megameter=options["height_megameter"],
             solar_radius_m=options["solar_radius_m"],
         )
 
@@ -88,16 +88,16 @@ class SphericalShellDomain:
     def from_observation_bounds(
         cls,
         value: Mapping,
-        shell_height_bounds_Mm,
+        shell_height_bounds_megameter,
     ) -> "SphericalShellDomain":
         """Combine cached angular/time support with one atmosphere shell."""
 
-        if shell_height_bounds_Mm is None:
-            raise ValueError("Physics sampling requires shell_height_bounds_Mm.")
-        shell_bounds = tuple(map(float, shell_height_bounds_Mm))
+        if shell_height_bounds_megameter is None:
+            raise ValueError("Physics sampling requires shell_height_bounds_megameter.")
+        shell_bounds = tuple(map(float, shell_height_bounds_megameter))
         if len(shell_bounds) != 2:
             raise ValueError(
-                "shell_height_bounds_Mm must contain [outer_height, inner_height]."
+                "shell_height_bounds_megameter must contain [outer_height, inner_height]."
             )
         outer, inner = shell_bounds
         if not outer > inner:
@@ -107,7 +107,7 @@ class SphericalShellDomain:
             longitude_offset_bounds_rad=value["surface_longitude_offset_rad"],
             latitude_bounds_rad=value["surface_latitude_rad"],
             time_bounds_hours=value["time_hours"],
-            height_bounds_Mm=(inner, outer),
+            height_bounds_megameter=(inner, outer),
             solar_radius_m=value["solar_radius_m"],
         )
 
@@ -119,12 +119,12 @@ class SphericalShellDomain:
             "surface_longitude_offset_rad": list(self.longitude_offset_bounds_rad),
             "surface_latitude_rad": list(self.latitude_bounds_rad),
             "time_hours": list(self.time_bounds_hours),
-            "height_Mm": list(self.height_bounds_Mm),
+            "height_megameter": list(self.height_bounds_megameter),
             "solar_radius_m": self.solar_radius_m,
         }
 
     def with_height_bounds(
-        self, height_bounds_Mm: tuple[float, float]
+        self, height_bounds_megameter: tuple[float, float]
     ) -> "SphericalShellDomain":
         """Return an angular/time-identical radial subdomain."""
 
@@ -133,7 +133,7 @@ class SphericalShellDomain:
             longitude_offset_bounds_rad=self.longitude_offset_bounds_rad,
             latitude_bounds_rad=self.latitude_bounds_rad,
             time_bounds_hours=self.time_bounds_hours,
-            height_bounds_Mm=height_bounds_Mm,
+            height_bounds_megameter=height_bounds_megameter,
             solar_radius_m=self.solar_radius_m,
         )
 
@@ -158,7 +158,7 @@ class SphericalShellDomain:
                 ],
                 "radius_Rsun": [
                     (self.solar_radius_m + height * 1.0e6) / self.solar_radius_m
-                    for height in self.height_bounds_Mm
+                    for height in self.height_bounds_megameter
                 ],
                 "support": (
                     "initialized spherical shell with random Carrington longitude, "
@@ -206,7 +206,7 @@ class SphericalShellDomain:
 
     def _positions(
         self,
-        heights_Mm: torch.Tensor,
+        heights_megameter: torch.Tensor,
         longitude_fraction: torch.Tensor,
         latitude_fraction: torch.Tensor,
         time_fraction: torch.Tensor,
@@ -216,7 +216,7 @@ class SphericalShellDomain:
     ) -> dict[str, torch.Tensor]:
         spatial_dtype = torch.float64 if dtype is None else dtype
         time_dtype = torch.float32 if dtype is None else dtype
-        heights = torch.as_tensor(heights_Mm, dtype=spatial_dtype, device=device)
+        heights = torch.as_tensor(heights_megameter, dtype=spatial_dtype, device=device)
         longitude_fraction = torch.as_tensor(
             longitude_fraction, dtype=spatial_dtype, device=device
         )
@@ -291,8 +291,8 @@ class SphericalShellDomain:
             + spatial_random[:, 0]
         ) / height_count
         height_fraction = height_fraction.pow(power)
-        heights = self.height_bounds_Mm[0] + height_fraction * (
-            self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
+        heights = self.height_bounds_megameter[0] + height_fraction * (
+            self.height_bounds_megameter[1] - self.height_bounds_megameter[0]
         )
         longitude_fraction = spatial_random[:, 1 : 1 + points_per_height]
         latitude_fraction = spatial_random[
@@ -337,7 +337,7 @@ class SphericalShellDomain:
         return self._positions(
             torch.full(
                 (1,),
-                self.height_bounds_Mm[1],
+                self.height_bounds_megameter[1],
                 dtype=spatial_dtype,
                 device=device,
             ),
@@ -350,7 +350,7 @@ class SphericalShellDomain:
 
     def _side_positions(
         self,
-        heights_Mm: torch.Tensor,
+        heights_megameter: torch.Tensor,
         along_fraction: torch.Tensor,
         time_fraction: torch.Tensor,
         *,
@@ -361,7 +361,7 @@ class SphericalShellDomain:
 
         flatten = along_fraction.ndim == 1
         if flatten:
-            heights_Mm = heights_Mm.unsqueeze(0)
+            heights_megameter = heights_megameter.unsqueeze(0)
             along_fraction = along_fraction.unsqueeze(0)
             time_fraction = time_fraction.unsqueeze(0)
         if along_fraction.ndim != 2 or along_fraction.shape[1] % 4 != 0:
@@ -401,7 +401,7 @@ class SphericalShellDomain:
             dim=1,
         )
         result = self._positions(
-            heights_Mm,
+            heights_megameter,
             longitude_fraction,
             latitude_fraction,
             time_fraction,
@@ -485,8 +485,8 @@ class SphericalShellDomain:
         random = torch.rand(
             (2 if dtype is None else 3, point_count), dtype=spatial_dtype, device=device
         )
-        heights = self.height_bounds_Mm[0] + random[0].pow(power) * (
-            self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
+        heights = self.height_bounds_megameter[0] + random[0].pow(power) * (
+            self.height_bounds_megameter[1] - self.height_bounds_megameter[0]
         )
         along_fraction = random[1]
         time_fraction = (
@@ -504,14 +504,14 @@ class SphericalShellDomain:
 
     def _deterministic_at_heights(
         self,
-        heights_Mm: torch.Tensor,
+        heights_megameter: torch.Tensor,
         point_count: int,
         *,
         device: torch.device | str | None,
         dtype: torch.dtype | None,
     ) -> dict[str, torch.Tensor]:
         spatial_dtype = torch.float64 if dtype is None else dtype
-        height_count = int(heights_Mm.numel())
+        height_count = int(heights_megameter.numel())
         index = torch.arange(point_count, dtype=spatial_dtype, device=device) + 0.5
         longitude = (index / point_count).expand(height_count, -1)
         latitude = torch.frac(index * ((math.sqrt(5.0) - 1.0) / 2.0)).expand(
@@ -521,7 +521,7 @@ class SphericalShellDomain:
         if dtype is None:
             time = time.to(torch.float32)
         return self._positions(
-            heights_Mm,
+            heights_megameter,
             longitude,
             latitude,
             time.expand(height_count, -1),
@@ -547,8 +547,8 @@ class SphericalShellDomain:
             )
         spatial_dtype = torch.float64 if dtype is None else dtype
         heights = torch.linspace(
-            self.height_bounds_Mm[0],
-            self.height_bounds_Mm[1],
+            self.height_bounds_megameter[0],
+            self.height_bounds_megameter[1],
             height_count,
             dtype=spatial_dtype,
             device=device,
@@ -575,7 +575,7 @@ class SphericalShellDomain:
         spatial_dtype = torch.float64 if dtype is None else dtype
         heights = torch.full(
             (1,),
-            self.height_bounds_Mm[1],
+            self.height_bounds_megameter[1],
             dtype=spatial_dtype,
             device=device,
         )
@@ -610,8 +610,8 @@ class SphericalShellDomain:
         height_fraction = torch.frac(index * ((math.sqrt(7.0) - 1.0) / 2.0)).pow(
             _RANDOM_HEIGHT_POWER
         )
-        heights = self.height_bounds_Mm[0] + height_fraction * (
-            self.height_bounds_Mm[1] - self.height_bounds_Mm[0]
+        heights = self.height_bounds_megameter[0] + height_fraction * (
+            self.height_bounds_megameter[1] - self.height_bounds_megameter[0]
         )
         points_per_face = point_count // 4
         index = torch.arange(points_per_face, dtype=spatial_dtype, device=device) + 0.5

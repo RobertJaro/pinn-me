@@ -20,6 +20,7 @@ def _build_data(config: Mapping) -> HMIDataModule:
     """Translate the exact typed HMI section into runtime arguments."""
 
     raw = dict(config)
+    binning = raw.pop("binning", 1)
     expected = {"directory", "selection", "loader", "calibration"}
     if set(raw) != expected:
         raise TypeError(
@@ -60,6 +61,7 @@ def _build_data(config: Mapping) -> HMIDataModule:
             )
     return HMIDataModule(
         directory=raw["directory"],
+        binning=binning,
         acquisition_indices=selection["acquisition_indices"],
         validation_raster=selection["validation_raster"],
         transmission_profile_directory=calibration.pop(

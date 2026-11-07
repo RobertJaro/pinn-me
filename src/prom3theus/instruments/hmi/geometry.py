@@ -268,8 +268,12 @@ def build_geometry(
     ray = surface_xyz - observer_xyz
     ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
     los = -ray
-    observer_los_velocity = project_observer_velocity_to_los(
-        observer_xyz, los, observer_velocity_rwn_m_per_s
+    # Off-disk WCS coordinates have no surface intersection and carry NaNs.
+    # Keep those pixels invalid while projecting the finite on-disk rays.
+    finite_los = np.isfinite(los).all(axis=-1)
+    observer_los_velocity = np.full(los.shape[:-1], np.nan, dtype=np.float64)
+    observer_los_velocity[finite_los] = project_observer_velocity_to_los(
+        observer_xyz, los[finite_los], observer_velocity_rwn_m_per_s
     )
 
     probes = (

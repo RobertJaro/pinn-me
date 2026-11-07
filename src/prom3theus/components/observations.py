@@ -211,7 +211,19 @@ def _load_hinode(stream, resources, work_directory, *, rebuild_observations, bou
     )
 
 
+def _load_muram(stream, resources, work_directory, *, rebuild_observations, bounds):
+    if bounds is not None:
+        raise ValueError("Select MURaM iterations when synthesizing the stored sequence.")
+    return _load_stokes_stream(
+        stream, resources, work_directory, rebuild_observations=rebuild_observations
+    )
+
+
 _PROVIDERS = {
+    "muram_stored": ObservationProvider(
+        _load_muram,
+        lambda stream: (LEGACY_LTE_RESOURCE_SET_ID,),
+    ),
     "hmi_stokes": ObservationProvider(
         _load_hmi, lambda stream: (LEGACY_LTE_RESOURCE_SET_ID,)
     ),

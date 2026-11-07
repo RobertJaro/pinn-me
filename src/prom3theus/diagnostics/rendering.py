@@ -90,12 +90,12 @@ class AtmosphereRenderer:
             pl_module, raster, rows=rows, columns=columns
         )
         paths = []
-        outer_height_Mm, inner_height_Mm = (
-            pl_module.atmosphere_model.shell_height_bounds_Mm
+        outer_height_megameter, inner_height_megameter = (
+            pl_module.atmosphere_model.shell_height_bounds_megameter
         )
         slice_heights = self.log_spaced_slice_heights(
-            inner_height_Mm * 1.0e6,
-            outer_height_Mm * 1.0e6,
+            inner_height_megameter * 1.0e6,
+            outer_height_megameter * 1.0e6,
             self.evaluator.slice_layer_count,
         )
         evaluated = self.evaluator.evaluate_shell_layers(
@@ -257,36 +257,15 @@ class AtmosphereRenderer:
             "Stokes comparison",
         )
 
-    def render_disambiguation_phase(
-        self,
-        trainer,
-        outputs,
-        raster,
-        label: str,
-        *,
-        rows: np.ndarray,
-        columns: np.ndarray,
-        step: int,
-        cold_steps: int,
-        handoff_step: int,
-    ) -> Path:
-        """Render and save the validation phase map used by Stokes fitting."""
-
+    def render_stokes_profiles(self, trainer, outputs, wavelength_angstrom, label):
+        """Show individual signed profiles in atlas units, without loss scaling."""
         return self._save_figure(
             trainer,
-            self.stokes_plots.phase_figure(
-                outputs,
-                raster,
-                label,
-                rows=rows,
-                columns=columns,
-                step=step,
-                cold_steps=cold_steps,
-                handoff_step=handoff_step,
-            ),
-            f"{label}_disambiguation_phase.png",
-            "Disambiguation phase",
+            self.stokes_plots.individual_profiles_figure(outputs, wavelength_angstrom, label),
+            f"{label}_stokes_individual_profiles.png",
+            "Stokes individual profiles",
         )
+
 
 
 __all__ = ["AtmosphereRenderer"]
