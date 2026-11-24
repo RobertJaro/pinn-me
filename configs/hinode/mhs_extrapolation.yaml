@@ -3,8 +3,8 @@
 schema_version: 5
 solver:
   kind: joint
-  output_directory: /glade/work/rjarolim/lte/hinode_mhs_extrapolation_v01
-  work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_extrapolation_v01
+  output_directory: /glade/work/rjarolim/lte/hinode_mhs_extrapolation_v02
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hinode_mhs_extrapolation_v02
 scene:
   reference_stream: photospheric_stokes
 atmosphere:
@@ -49,8 +49,7 @@ synthesis:
         - 6307.0
       radiance_scale: 25000000000000.0
       depth_count: 257
-      jitter_fraction: 1.0
-      transfer_precision: float32
+      jitter_fraction: 0.5
       shell_height_bounds_megameter:
         - -0.5
         - 1.5
@@ -59,13 +58,9 @@ physics:
   vector_basis_matches_spatial_coordinates: true
   collocation:
     volume_points_per_step: 2048
-    height_layers_per_step: 64
     upper_boundary_points_per_step: 256
     validation_height_layers: 12
     validation_points_per_height: 32
-    upper_volume_points_per_step: 1024
-    upper_height_layers_per_step: 32
-    validation_upper_height_layers: 6
     volume_sampling: fully_random
     hard_example_enabled: true
     hard_example_count: 256
@@ -76,9 +71,6 @@ physics:
     force_balance_pressure_floor_pa: 1.0
   equations:
     magnetohydrostatic_equilibrium:
-      enabled: true
-      weight: 0.001
-    magnetic_divergence:
       enabled: true
       weight: 0.001
     upper_boundary_gas_pressure_prior:
@@ -96,7 +88,6 @@ physics:
   loss_start_step: 500
   loss_ramp_steps: 2000
   robust_loss_delta: 1.0
-atmosphere_regularization: []
 streams:
   - id: photospheric_stokes
     observation:
@@ -107,11 +98,11 @@ streams:
           start: 0
           stop: 512
       loader:
+        workers: 4
         batch_size: 128
         validation_batch_size: 64
         validation_stride: 16
         preparation_workers: 8
-        workers: 8
       calibration:
         continuum_edge_samples: 8
         quiet_sun_max_fractional_polarization: 0.01
@@ -128,12 +119,11 @@ streams:
         spectral_psf:
           type: gaussian
           fwhm_angstrom: 0.025
-          oversample: 4
+          oversample: 2
           truncate_sigma: 4.0
       objective:
         type: mse
         stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
-        qu_warmup_steps: 0
         continuum_normalization: true
         stokes_scales: {I: 1.0, Q: 0.1, U: 0.1, V: 0.1}
       excluded_wavelength_windows_angstrom:
@@ -141,7 +131,6 @@ streams:
           - 6302.14
 diagnostics:
   visualization:
-    enabled: true
     ray_sampling:
       batch_size: 1024
       max_pixels: 16384
@@ -158,12 +147,6 @@ training:
   final_learning_rate: 1.0e-05
   optimizer: muon
   max_epochs: 500
-  reference_stream: photospheric_stokes
-  loss_balance:
-    enabled: false
-    included_objectives:
-      - shared.physics.magnetohydrostatic_equilibrium
-      - shared.physics.magnetic_divergence
 logging:
   type: wandb
   project: PROM3THEUS

@@ -149,7 +149,7 @@ def test_training_and_joint_stokes_reductions_match_values_and_gradients(shape, 
         wavelength_weights=spectral,
         stokes_weights=components,
     )
-    joint_components, joint_loss = StokesObservationTerm._score(
+    joint_components, joint_loss = StokesObservationTerm._loss(
         harness, prediction, target
     )
     # Independent reference through PyTorch's MSE loss and explicit sample means.

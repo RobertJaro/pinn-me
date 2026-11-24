@@ -5,6 +5,11 @@ import torch
 from prom3theus.core.nn import MLPModel, SIRENModel
 
 
+def exponential_lr_factor(completed_steps, initial_lr, final_lr, decay_steps):
+    progress = min(max(completed_steps / max(decay_steps, 1), 0.0), 1.0)
+    return (final_lr / initial_lr) ** progress
+
+
 class MuonAdamW(torch.optim.Optimizer):
     """Share state and groups so Lightning clips and schedules both algorithms.
 

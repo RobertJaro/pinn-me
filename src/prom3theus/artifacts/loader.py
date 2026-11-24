@@ -51,6 +51,9 @@ class P3SLoader:
         self.device_name = str(device)
         self._data_module = None
         configuration = deepcopy(self.state.context["configuration"])
+        configuration.pop("dry_run", None)  # Older P3S files included setup-only options.
+        for window in configuration.get("synthesis", {}).get("windows", ()):
+            window.pop("wavelength_chunk_size", None)
         self._config = parse_config(configuration, base_directory=self.state.path.parent)
         self.stream_id = stream_id or self._config.scene.reference_stream
         if self.stream_id not in self.state.module.terms:
@@ -184,7 +187,7 @@ class P3SLoader:
                     batch_size=int(loader_config["batch_size"]),
                     validation_batch_size=int(loader_config["validation_batch_size"]),
                     validation_stride=int(loader_config["validation_stride"]),
-                    num_workers=max(1, int(loader_config.get("workers", 2))),
+                    num_workers=int(loader_config.get("workers", 4)),
                     pin_memory=False,
                 )
                 data.observation_store_path = store_path

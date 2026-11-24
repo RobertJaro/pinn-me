@@ -3,15 +3,15 @@
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import os
 
+from tqdm.auto import tqdm
 
-def parallel_map(function, items, *, description):
+
+def parallel_map(function, items, *, description, progress=True):
     """Share inputs between threads; return results in deterministic input order.
 
     Limit full-disk working memory with PROM3THEUS_PREP_WORKERS (default 16).
     Exceptions propagate only after running workers finish, allowing safe cleanup.
     """
-    from tqdm.auto import tqdm
-
     items = list(items)
     workers = int(os.environ.get("PROM3THEUS_PREP_WORKERS", "16"))
     if workers < 1:
@@ -30,12 +30,12 @@ def parallel_map(function, items, *, description):
         for _ in range(min(workers, len(items))):
             submit_next()
         try:
-            with tqdm(total=len(items), desc=description, unit="item") as progress:
+            with tqdm(total=len(items), desc=description, unit="item", disable=not progress) as bar:
                 while futures:
                     done, _ = wait(futures, return_when=FIRST_COMPLETED)
                     for future in done:
                         results[futures.pop(future)] = future.result()
-                        progress.update()
+                        bar.update()
                         submit_next()
         except BaseException:
             for future in futures:

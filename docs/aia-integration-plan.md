@@ -1,6 +1,6 @@
 # Initial HMI + AIA integration plan
 
-> Historical design for the initial setup-only milestone. Its schema-v2
+> Historical design for the retired setup-only milestone. Its schema-v2
 > preservation and compatibility requirements were superseded by the explicit
 > breaking-change decision on 2026-09-07. The current pipeline and acceptance
 > evidence are maintained in [modular-runner-plan.md](modular-runner-plan.md)
@@ -65,9 +65,6 @@ narrower scientific scope than the later target design in this document:
   resumable checkpoints. The maintained YAML sets AIA weight to zero: HMI and
   physics train while AIA renders. Positive AIA weight enables image fitting
   and calibration priors, including after a checkpoint resume.
-- Pure internal evaluation helpers check stream/shared-loss gradients and LOS
-  quadrature without optimization. Their AIA evaluators and renderers are also
-  used by training diagnostics; there is no separate setup-only CLI command.
 
 Sections below retain the fuller integration target. Where they call for
 component tables, smooth analytic tails, a shared footprint/pairing manifest,
@@ -875,13 +872,12 @@ physics: PhysicsConfig                    # one shared physics evaluator
 atmosphere_regularization: tuple[AtmosphereRegularizationConfig, ...]
 streams: tuple[ObservationStreamConfig, ...]
 diagnostics: JointDiagnosticsConfig       # enabled renderers and bounded sampling
-dry_run: DryRunConfig                     # device, gradients, quadrature study, report
 ```
 
 Reuse the existing pure-data `AtmosphereConfig`, `PhysicsConfig`, and applicable
 diagnostic sampling nodes directly; do not inherit `InversionConfig` or nest
 shared physics under the HMI stream. `JointSolverConfig`,
-`AtmosphereRegularizationConfig`, `JointDiagnosticsConfig`, and `DryRunConfig`
+`AtmosphereRegularizationConfig`, and `JointDiagnosticsConfig`
 are new data-only nodes. Training schedule/runtime/logging fields are
 intentionally absent until schema-v3 fitting is enabled.
 
@@ -987,13 +983,7 @@ loss normalization. Do not let a `CombinedLoader` choice implicitly set these
 quantities.
 
 The initial milestone does not modify `p3s_context()`, any P3S parser, or any
-artifact reconstruction path. `JointRuntime` writes only `dry_run.json`, which
-records both observation descriptors/source signatures, AIA response and
-calibration digests, exact channel times, LOS quadrature settings, and initial
-calibration parameters. A future joint-fitting phase must design and version a
-new artifact contract before saving these fields or learned gains. Existing
-`LTEInversionModule`, `run_inversion()`, schema-v2 cache keys, and P3S
-reconstruction remain unchanged.
+artifact reconstruction path.
 
 ## 10. Stream diagnostics and callbacks
 
@@ -1044,16 +1034,9 @@ changing their assumptions.
 ## 11. Inversion entry point and internal evaluation
 
 `src/prom3theus/application/runner.py::run_inversion()` remains the schema-v2
-compatibility path. Joint assembly and evaluation provide:
-
-- `build_joint_runtime()` — resolve all configured factories, derive and
-  validate their exact resource-set dependency union, load typed observation
-  streams, assemble the scene, create the one shared
-  `JointForwardModel` and physics evaluator, and return a plain `JointRuntime`;
-  and
-- `dry_run_joint_inversion()` — an internal library helper to evaluate that runtime through pure
-  methods and return without constructing a Trainer, callback, optimizer, or
-  checkpoint writer.
+compatibility path. `build_joint_runtime()` validates resources, loads the
+configured streams and assembles their shared scene, forward model and physics
+terms.
 
 `JointRuntime` contains no Lightning lifecycle state.
 `application.joint_training.run_joint_inversion()` composes it with the stream
@@ -1073,38 +1056,7 @@ keeps forward rendering and diagnostics while disabling likelihood and
 calibration-prior gradients. A union-returning `load_config()` is never passed
 blindly to the legacy runner.
 
-The internal evaluation helper performs:
-
-1. strict config and resource validation;
-2. independent HMI and AIA cache preparation/loading through the adapter
-   lifecycle;
-3. joint timeline, calibration-convention, geometry, ray-orientation, and full
-   LOS-domain validation;
-4. one deterministic synthesis batch through every configured observation
-   term, including at least one batch for every AIA channel;
-5. separate data/component losses and exactly one calibration-prior evaluation;
-6. one deterministic physics-validation evaluation;
-7. optional `torch.autograd.grad` smoke checks without applying gradients;
-8. 96/192/384-node AIA quadrature comparison;
-9. direct invocation of the registered AIA evaluator/renderer; and
-10. atomic `dry_run.json` output.
-
-The internal evaluation helper never calls a Lightning `_shared_step()`: that method mixes
-random physics sampling, reduction, and logging. It uses the same pure term and
-diagnostics APIs used by the joint training runtime.
-
-`dry_run.json` includes resource/store digests, shapes, units, time offsets,
-valid fractions, observed/predicted ranges, loss components, gain values,
-finite-gradient flags and norms, quadrature errors, device, peak memory, and
-timings.
-
-Prove non-training behavior by hashing the complete
-`runtime.model.state_dict()`
-(parameters and persistent buffers) after setup and before evaluation, then
-again afterward. Evaluation tests fail if any hash changes, if a Trainer or
-optimizer is instantiated, or if checkpoint/P3S files appear.
-
-The initial milestone is complete only when the real sample dry run shows:
+Scientific acceptance criteria for the initial sample included:
 
 - finite HMI Stokes and AIA intensities/losses;
 - nonzero AIA sensitivity to temperature and pressure/density;
@@ -1178,7 +1130,7 @@ no application imports, the joint coordinator has no AIA/HMI conditional or
 import, and adding the isolated AIA resource set cannot change a schema-v2 HMI
 cache signature or artifact reconstruction.
 
-## 13. Next steps after the initial dry run
+## 13. Follow-up scientific work
 
 The setup-only milestone establishes a valid AIA likelihood, but it cannot yet
 demonstrate an improved magnetic extrapolation. Before full integration:

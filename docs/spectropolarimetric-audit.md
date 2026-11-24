@@ -165,7 +165,7 @@ intrinsically cannot learn Q/U.
 Reproduce from the repository root:
 
 ```bash
-PYTHONPATH=src python scripts/diagnostics/check_stokes_recovery.py \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.check_stokes_recovery \
   --representation vector_potential --warmup 1000 --steps 300
 ```
 

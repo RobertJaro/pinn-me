@@ -6,14 +6,14 @@ from dataclasses import dataclass
 
 import torch
 
-from prom3theus.core.validation import require_tensor
+from prom3theus.core.validation import require_tensor, tensor_validation_enabled
 
 
 def _unit(value: torch.Tensor, *, name: str) -> torch.Tensor:
     value = torch.as_tensor(value)
     norm = torch.linalg.vector_norm(value, dim=-1, keepdim=True)
     require_tensor(
-        torch.isfinite(value).all() & (norm > 0).all(),
+        lambda: torch.isfinite(value).all() & (norm > 0).all(),
         f'{name} must contain finite non-zero vectors.')
     return value / norm
 
@@ -27,10 +27,12 @@ def validate_scene_basis(value: torch.Tensor) -> torch.Tensor:
     if basis.shape != (3, 3):
         raise ValueError('scene_basis must be a finite [3, 3] matrix.')
     require_tensor(
-        torch.isfinite(basis).all(),
+        lambda: torch.isfinite(basis).all(),
         'scene_basis must be a finite [3, 3] matrix.')
     if basis.dtype not in (torch.float32, torch.float64):
         raise TypeError("scene_basis must use float32 or float64.")
+    if not tensor_validation_enabled():
+        return basis
     # Do not form this tiny Gram matrix with ``basis @ basis.T``. CUDA may use
     # TF32 for that float32 matmul when the application requests high matmul
     # performance, making a valid basis fail this geometry invariant on one GPU
@@ -39,11 +41,11 @@ def validate_scene_basis(value: torch.Tensor) -> torch.Tensor:
     gram = (basis[:, None, :] * basis[None, :, :]).sum(dim=-1)
     identity = torch.eye(3, dtype=basis.dtype, device=basis.device)
     require_tensor(
-        torch.isclose(gram, identity, rtol=0.0, atol=2e-05).all(),
+        lambda: torch.isclose(gram, identity, rtol=0.0, atol=2e-05).all(),
         'scene_basis rows must be orthonormal.')
     orientation = (torch.linalg.cross(basis[0], basis[1], dim=0) * basis[2]).sum()
     require_tensor(
-        (orientation > 0).all(),
+        lambda: (orientation > 0).all(),
         'scene_basis must be right handed.')
     return basis
 
@@ -59,11 +61,11 @@ def direction_to_chart_megameter(
     basis = validate_scene_basis(scene_basis).to(unit)
     local = torch.einsum("ij,...j->...i", basis, unit)
     require_tensor(
-        (local[..., 2] > 0).all(),
+        lambda: (local[..., 2] > 0).all(),
         'Directions lie outside the visible hemisphere of the scene chart.')
     radius = torch.as_tensor(solar_radius_m, dtype=unit.dtype, device=unit.device)
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'solar_radius_m must be finite and strictly positive.')
     return radius * local[..., :2] / local[..., 2:3] / 1.0e6
 
@@ -79,12 +81,12 @@ def chart_to_direction(
     if chart.shape[-1] != 2:
         raise ValueError('chart_xy_megameter must end in a finite two-vector.')
     require_tensor(
-        torch.isfinite(chart).all(),
+        lambda: torch.isfinite(chart).all(),
         'chart_xy_megameter must end in a finite two-vector.')
     basis = validate_scene_basis(scene_basis).to(chart)
     radius = torch.as_tensor(solar_radius_m, dtype=chart.dtype, device=chart.device)
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'solar_radius_m must be finite and strictly positive.')
     local = torch.cat((chart * 1.0e6 / radius, torch.ones_like(chart[..., :1])), dim=-1)
     return _unit(torch.einsum("ij,...j->...i", basis.T, local), name="chart direction")
@@ -103,13 +105,13 @@ def chart_height_to_position_m(
     if height.shape != direction.shape[:-1]:
         raise ValueError('height_m must match the chart leading dimensions.')
     require_tensor(
-        torch.isfinite(height).all(),
+        lambda: torch.isfinite(height).all(),
         'height_m must match the chart leading dimensions.')
     radius = torch.as_tensor(
         solar_radius_m, dtype=direction.dtype, device=direction.device
     )
     require_tensor(
-        (radius + height > 0).all(),
+        lambda: (radius + height > 0).all(),
         'solar_radius_m + height_m must remain strictly positive.')
     return direction * (radius + height)[..., None]
 
@@ -123,7 +125,7 @@ def position_to_chart_height(
     if position.shape[-1] != 3:
         raise ValueError('position_m must end in a finite three-vector.')
     require_tensor(
-        torch.isfinite(position).all(),
+        lambda: torch.isfinite(position).all(),
         'position_m must end in a finite three-vector.')
     radial_distance = torch.linalg.vector_norm(position, dim=-1)
     chart = direction_to_chart_megameter(position, scene_basis, solar_radius_m)
@@ -131,7 +133,7 @@ def position_to_chart_height(
         solar_radius_m, dtype=position.dtype, device=position.device
     )
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'solar_radius_m must be finite and strictly positive.')
     return chart, radial_distance - radius
 
@@ -147,7 +149,7 @@ def intersect_sphere_near_side(
     ray = _unit(torch.as_tensor(direction).to(observer), name="ray direction")
     radius = torch.as_tensor(radius_m, dtype=observer.dtype, device=observer.device)
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'radius_m must be finite and strictly positive.')
     projection = (observer * ray).sum(dim=-1)
     # Keep the solar-scale impact parameter explicit.  The algebraically
@@ -158,11 +160,11 @@ def intersect_sphere_near_side(
     )
     discriminant = radius.square() - impact.square()
     require_tensor(
-        (discriminant >= 0).all(),
+        lambda: (discriminant >= 0).all(),
         'At least one ray misses the requested spherical surface.')
     distance = -projection - torch.sqrt(discriminant.clamp_min(0.0))
     require_tensor(
-        (torch.isfinite(distance) & (distance > 0)).all(),
+        lambda: (torch.isfinite(distance) & (distance > 0)).all(),
         'Sphere intersection must lie in front of the observer.')
     return distance
 
@@ -183,7 +185,7 @@ def intersect_sphere_near_side_from_local_point(
     ray = _unit(torch.as_tensor(direction).to(point), name="ray direction")
     radius = torch.as_tensor(radius_rsun, dtype=point.dtype, device=point.device)
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'radius_rsun must be finite and strictly positive.')
     projection = (point * ray).sum(dim=-1)
     impact = torch.linalg.vector_norm(
@@ -191,11 +193,11 @@ def intersect_sphere_near_side_from_local_point(
     )
     discriminant = radius.square() - impact.square()
     require_tensor(
-        (discriminant >= 0).all(),
+        lambda: (discriminant >= 0).all(),
         'At least one local ray misses the requested spherical surface.')
     offset = -projection - torch.sqrt(discriminant.clamp_min(0.0))
     require_tensor(
-        torch.isfinite(offset).all(),
+        lambda: torch.isfinite(offset).all(),
         'Local sphere intersection must be finite.')
     return offset
 
@@ -219,7 +221,7 @@ def project_vectors_to_stokes(
     if value.shape[-1] != 3 or basis.shape[-2:] != (3, 3):
         raise ValueError("Vector and Stokes basis must end in [3] and [3, 3].")
     require_tensor(
-        torch.isfinite(value).all() & torch.isfinite(basis).all(),
+        lambda: torch.isfinite(value).all() & torch.isfinite(basis).all(),
         'Vector and Stokes basis must contain only finite values.')
     while basis.ndim < value.ndim + 1:
         basis = basis.unsqueeze(-3)

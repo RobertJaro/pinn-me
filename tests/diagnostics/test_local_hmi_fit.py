@@ -1,16 +1,14 @@
 """Acceptance checks must not mistake a collapsed magnetic fit for success."""
 
-from pathlib import Path
-import runpy
-
 import numpy as np
 import pytest
 
 
-recipe = runpy.run_path(
-    str(Path(__file__).resolve().parents[2] / "scripts/hmi/run_local.py")
+from prom3theus.diagnostics.commands.run_local_hmi import (
+    fit_report,
+    predict_stokes_sample,
+    representative_pixel_indices,
 )
-fit_report = recipe["fit_report"]
 
 
 def _profiles():
@@ -57,7 +55,7 @@ def test_nonfinite_and_mismatched_predictions_are_rejected():
 
 
 def test_representative_lattice_covers_crop_without_primary_sample_overlap():
-    indices = recipe["representative_pixel_indices"]((256, 256))
+    indices = representative_pixel_indices((256, 256))
     assert indices.shape == (1024, 2)
     assert len(np.unique(indices, axis=0)) == 1024
     for axis in (0, 1):
@@ -67,7 +65,7 @@ def test_representative_lattice_covers_crop_without_primary_sample_overlap():
     primary = {(row, column) for row in range(0, 256, 16) for column in range(0, 256, 16)}
     assert not primary.intersection(map(tuple, indices))
     with pytest.raises(ValueError, match="256 x 256"):
-        recipe["representative_pixel_indices"]((128, 256))
+        representative_pixel_indices((128, 256))
 
 
 def test_stokes_sample_prediction_uses_eval_mode_and_restores_training_mode():
@@ -84,7 +82,7 @@ def test_stokes_sample_prediction_uses_eval_mode_and_restores_training_mode():
     target = torch.arange(8 * 4 * 6).reshape(8, 4, 6).float()
     for training in (True, False):
         model.train(training)
-        prediction = recipe["predict_stokes_sample"](
+        prediction = predict_stokes_sample(
             model, "stokes", {"stokes": target}, batch_size=3,
         )
         np.testing.assert_array_equal(prediction, target.numpy())

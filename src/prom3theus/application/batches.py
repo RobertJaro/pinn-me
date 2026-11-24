@@ -128,10 +128,13 @@ def deterministic_validation_batch(
 ) -> dict[str, Any]:
     """Collect a stable, bounded, channel-balanced validation batch."""
 
+    sampled_loader = getattr(data_module, "sampled_validation_dataloader", None)
+    if callable(sampled_loader):
+        return _collect_loader(sampled_loader(max_samples), max_samples)
     loaders = _validation_loaders(data_module)
     if max_samples < len(loaders):
         raise ValueError(
-            "max_samples_per_stream must include at least one sample from every "
+            "validation_samples_per_stream must include at least one sample from every "
             "validation loader."
         )
     base, extra = divmod(max_samples, len(loaders))

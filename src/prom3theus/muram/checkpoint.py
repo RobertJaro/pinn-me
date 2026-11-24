@@ -9,9 +9,12 @@ import shutil
 import tempfile
 
 from prom3theus.observations.store import MANIFEST_FILENAME, ObservationStore
+from prom3theus.resources import AIA_TEMPERATURE_RESPONSE_RESOURCE
+from .provenance import synthesis_run_provenance
+from .atmosphere_builder import DEFAULT_STOKES_HEIGHT_MEGAMETERS
 
 
-def prepare_synthesis_output(args, options):
+def prepare_synthesis_output(args, options, *, instrument_types=None):
     """Open a resumable output, or explicitly replace it, without touching inputs."""
     destination = args.out.resolve()
     source = args.source_path.resolve()
@@ -21,6 +24,15 @@ def prepare_synthesis_output(args, options):
         raise ValueError("Synthesis output must not be a symbolic link.")
     if args.out.exists() and not args.out.is_dir():
         raise NotADirectoryError(args.out)
+    if instrument_types is None:
+        instrument_types = (("hmi_filter_profiles", "aia_euv") if args.output_format == "sdo-fits"
+                            else (options.get("instrument", {}).get("type", "hmi_filter_profiles"),))
+    generator = synthesis_run_provenance(
+        instrument_types,
+        aia_response_resource=options.get("response_resource", options.get("instrument", {}).get(
+            "response_resource", AIA_TEMPERATURE_RESPONSE_RESOURCE,
+        )),
+    )
     contract = {
         "muram_source_path": str(source),
         "output_format": args.output_format,
@@ -30,7 +42,10 @@ def prepare_synthesis_output(args, options):
         "vertical_axis": args.vertical_axis,
         "component_order": list(args.component_order),
         "options": options,
-        "depth_sampling": "native_cells",
+        "depth_sampling": "uniform_shell_ray_distance" if "uniform_shell_grid" in options else "native_cells",
+        "stokes_height_megameters": (getattr(args, "stokes_height_megameters", DEFAULT_STOKES_HEIGHT_MEGAMETERS)
+                             if any(name != "aia_euv" for name in instrument_types) else None),
+        "generator_provenance": generator,
     }
     # The CLI supplies lists; the Python SDO entry point also accepts NumPy grids.
     contract = json.loads(json.dumps(
@@ -57,6 +72,8 @@ def prepare_synthesis_output(args, options):
             raise ValueError(f"Unrecognized synthesis output: {args.out}; use --overwrite to replace it.")
     if recorded:
         recorded.setdefault("depth_sampling", "legacy_log_tau")
+        recorded.setdefault("generator_provenance", None)
+        recorded.setdefault("stokes_height_megameters", None)
     mismatches = [key for key in contract if key in recorded and recorded[key] != contract[key]]
     if mismatches:
         raise ValueError(
@@ -73,7 +90,7 @@ def prepare_synthesis_output(args, options):
             os.replace(temporary, contract_path)
         finally:
             temporary.unlink(missing_ok=True)
-    return previous
+    return {**previous, "generator_provenance": generator}
 
 
 def completed_store_iterations(destination, *, aia=False):

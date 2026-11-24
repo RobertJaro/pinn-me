@@ -270,18 +270,11 @@ def parse_config(
         raise ConfigError("config.schema_version is required") from error
     if type(schema_version) is not int:
         raise ConfigError("config.schema_version must be an integer")
-    targets = {
-        5: JointInversionConfig,
-    }
-    try:
-        target = targets[schema_version]
-    except KeyError as error:
-        raise ConfigError(
-            f"config.schema_version must be 5; legacy schemas are unsupported; got {schema_version!r}"
-        ) from error
+    if schema_version != 5:
+        raise ConfigError(f"config.schema_version must be 5; got {schema_version!r}")
     base = Path(base_directory).expanduser().resolve(strict=False)
     return _decode_dataclass(
-        target,
+        JointInversionConfig,
         document,
         context="config",
         base_directory=base,

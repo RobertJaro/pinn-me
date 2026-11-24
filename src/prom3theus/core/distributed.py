@@ -41,7 +41,7 @@ def distributed_mean(mean, count):
 
 
 def initialize_distributed(device, *, devices="auto"):
-    """Launch native Lightning DDP before any data/model initialization.
+    """Launch native Lightning DDP after data preparation and before model setup.
 
     Fabric supplies the public Lightning process-launch API; the Trainer owns
     model wrapping, gradient synchronization and optimization afterwards.

@@ -32,7 +32,7 @@ class MagneticAzimuthConvention:
             raise ValueError(
                 "physical_observer_field must be a floating tensor ending in three."
             )
-        require_tensor(torch.isfinite(field).all(),
+        require_tensor(lambda: torch.isfinite(field).all(),
                        "physical_observer_field must contain only finite values.")
         angle = math.radians(self.offset_deg)
         cosine = field.new_tensor(math.cos(angle))

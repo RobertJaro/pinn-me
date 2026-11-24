@@ -5,50 +5,33 @@ coefficients, formal Stokes integration and the instrument response. The learned
 radiation network, RT collocation dataset, PDE losses, monitoring policy and
 associated scripts have been removed. Non-LTE transport is future work.
 
-For a frozen layer, `I_out = S + A (I_in - S)`, with
-`A = exp(-K * ds)`. Adjacent maps `(A,b)` compose as
-`(A_near @ A_far, b_near + A_near @ b_far)`. Composition is associative but not
-commutative. The balanced tree preserves ray ordering and combines all pairs
-in each stage simultaneously. For N layers it needs ceil(log2 N) stages and
-O(N) total work; it does not compute all intermediate intensities. Ordinary
-PyTorch operations differentiate through the tree, including second derivatives.
+For each layer the polarized solver averages the seven independent propagation
+coefficients and the source at the two nodes. With `A = exp(-K ds)`, the exact
+constant-layer update is `outgoing = A @ incoming + (Id - A) @ source`.
+Each ray and wavelength sweeps from the lower boundary toward the observer.
+Working relative to the bottom Stokes vector preserves thermal equilibrium.
+A separately evaluated exponential increment retains emission in optically thin layers.
 
-This is the attenuated emission integral, not a dependency on previously solved
-intensities. With layer 0 nearest the observer, the outgoing intensity equals
-`(A_0 ... A_N-1) I_bottom + sum_i (A_0 ... A_i-1) b_i`, where
-`b_i = (identity - A_i) S_i` is emission integrated through the local layer.
-Local LTE emissivity is `j_i = K_i S_i`; no incoming intensity is needed to
-calculate it. The tree evaluates this sum by composing transmission/emission
-pairs, without explicitly forming every prefix product.
-
-`rt.formal_transfer` uses midpoint coefficients and sources. The affine emission
-terms use a stable exponential increment `exp(-K ds)-I` relative to the bottom
-boundary, preserving thin emission and a uniform thermal equilibrium. The
-polarized increment is analytic; general matrices use a masked thin-layer series.
-No inverse attenuation matrix is formed. Float32 transfer is the default, and
-outputs retain the local coefficient dtype. Explicit float64 transfer remains
-available for numerical reference comparisons.
-
-Production LTE matrices use an analytic seven-coefficient matrix exponential
-(`rt.polarized_exponential`), retaining the same frozen-layer solution. Its
-cubic matrix polynomial uses a small-invariant series at zero field and
-degenerate generators, and combines scalar attenuation with hyperbolic terms
-before exponentiation to avoid overflow in opaque layers. First and second
-derivatives are checked against the general matrix exponential. Arbitrary
-matrices passed to `formal_stokes` retain the general implementation unless
-`polarized=True` is explicitly requested. This constant-layer analytic approach
-is described in [Mościbrodzka & Gammie (2018)](https://arxiv.org/abs/1712.03057).
+On Triton-capable CUDA devices the solver applies the cubic polynomial for
+`A` directly to four-component vectors in registers. The backward sweep traverses
+the layers in reverse using the saved incident vectors. Other devices and
+higher derivatives use differentiable PyTorch matrix-vector operations.
+Both paths use the analytic polarized exponential, with stable scalar weights
+for weak fields and opaque layers. Float32 is the default, with explicit
+float64 transfer available for reference work. Arbitrary matrices passed to
+`formal_stokes` use a general matrix exponential and ordered transmission
+prefixes. The analytic constant-layer solution is described in
+[Mościbrodzka & Gammie (2018)](https://arxiv.org/abs/1712.03057).
 
 The atmosphere, plasma state, continuum-table interpolation, line populations,
 magnetic orientation, Doppler factors and widths, damping, Zeeman splitting and
-integrated line strengths are prepared once per ray batch. Spectral coordinates
-are prepared once for the full query and sliced into blocks. These are
+integrated line strengths are prepared once per sampling stage. Spectral coordinates
+are prepared once for the full ray batch and shared across stages. These are
 live differentiable tensors scoped to one forward call, not a persistent cache
 across optimizer updates. Per-ray wavelengths broadcast over the existing point
 state; continuum gathers allocate only requested spectral values, not wavelength
-copies of the full tables. Input validity flags are checked together at the
-prediction boundary, with immediate checking retained for standalone numerical
-APIs. See [the staged code flow](architecture.md#one-inversion-update). The fixed Voigt polynomial saves its analytic
+copies of the full tables. Optimizer batches skip numerical validation predicates. Diagnostics check their
+flags together at the prediction boundary, and standalone numerical APIs check immediately. See [the staged code flow](architecture.md#one-inversion-update). The fixed Voigt polynomial saves its analytic
 derivative for ordinary backward; higher derivatives remain supported.
 
 `inversion.lte.LTEWindow` evaluates true spherical-shell characteristics in
@@ -69,16 +52,16 @@ The endpoint offsets are zero. Computing `ds` from these local offsets avoids
 subtracting large float32 distances and preserves the true oblique line elements.
 One device-local random draw covers all coarse rays and depths. Optional
 `coarse_to_fine` refinement reuses the repository's inverse-CDF sampler. The
-Hinode Stokes-only preset uses `depth_count: 32` with `fine_sample_count: 32`
+Hinode Stokes-only preset uses `depth_count: 16` with `fine_sample_count: 16`
 and `uniform_weight_floor: 0.05`. Coarse local coefficients provide interval
 masses `exp(-tau_before) * (1 - exp(-delta_tau))` from scalar Stokes-I extinction.
 Each wavelength's masses are normalized separately and combined, covering
 continuum and Doppler/Zeeman-shifted line formation. This detached proposal is
 a sampling proxy; final polarized transfer still uses the complete matrix K.
 
-Only the 32 new fine points receive a second batched atmosphere/point-physics
-evaluation. Coarse coefficients and their gradients are reused. The merged 64
-points are sorted by physical ray distance; the 63 final interval differences
+Only the 16 new fine points receive a second batched atmosphere/point-physics
+evaluation. Coarse coefficients and their gradients are reused. The merged 32
+points are sorted by physical ray distance. The 31 final interval differences
 supply the formal integration. No second coarse integral or importance-probability
 weight is added. Fine-point spacing reserves an epsilon gap to both coarse
 endpoints and other fine points; coarse jitter reserves enough room even when
@@ -116,12 +99,12 @@ thickness and depth convergence must be assessed for the scientific setup.
 
 Schema v5 uses `synthesis.windows` and Stokes terms of type `lte_stokes` referencing
 `synthesis_window`. Numerical controls are `depth_count` (default 257),
-`jitter_fraction` (default 0, presets 1; training only),
-`wavelength_chunk_size` (16) and `transfer_precision` (`float32`). Wavelength
-chunking does not alter instrument sampling. The evaluation artifact is P3S v3;
+`jitter_fraction` (default 0, presets 1 during training) and `transfer_precision`
+(`float32`). The solver integrates every wavelength for the whole ray batch
+together. Reduce the observation loader batch size to lower peak memory. The evaluation artifact is P3S v3;
 checkpoints identify formal-transfer format v1. Previous learned-RT artifacts
 require a new run rather than silently restoring a different forward model.
-Changing wavelength chunk size, training jitter or transfer precision is allowed
+Changing training jitter or transfer precision is allowed
 on resume; the archived settings remain recorded. Depth count, wavelength bounds
 and physical shell bounds remain part of the checkpoint's scientific contract.
 Existing formal-LTE training checkpoints can therefore resume with the updated
@@ -131,18 +114,15 @@ The tests compare spectra and first/second derivatives to the independent serial
 solver with noncommuting matrices, odd/even layer counts and optical intervals
 from 1e-8 to about 32. Analytic slabs test thin, thick and equilibrium limits.
 Integration tests exercise atmosphere gradients, calibration gradients, per-ray
-wavelengths, chunking and detector basis rotations.
+wavelengths, full-spectrum batching and detector basis rotations.
 
-The tree trades sequential matrix-vector operations for batched matrix-matrix
-operations. It removes the depth dependency chain but does not remove opacity
-evaluation or matrix exponentials. Measure both forward and backward on the
-target GPU; CPU timing is not a GPU speedup estimate:
+Measure forward time, backward time and peak memory on the target GPU.
 
 ```bash
-PYTHONPATH=src python scripts/diagnostics/benchmark_formal_transfer.py --device cuda
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.benchmark_formal_transfer --device cuda
 ```
 
-The benchmark reports the reduction separately from complete formal transfer,
+The benchmark compares complete vector-sweep, matrix-prefix and serial transfer,
 including synchronized GPU timings and peak allocated memory. It excludes the
 atmosphere, local coefficient calculation and instrument response.
 
@@ -150,10 +130,10 @@ Measure the complete inversion graph on fixed stored pixels with a Stokes-only
 configuration (the command does not update model weights):
 
 ```bash
-PYTHONPATH=src python scripts/diagnostics/benchmark_lte_inversion.py CONFIG.yaml \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.benchmark_lte_inversion CONFIG.yaml \
   --pixels 0 1 --repeats 5 --output /tmp/lte-benchmark
 ```
 
 The report separates forward/backward time and counts network/plasma calls.
-`--chunk-size` compares spectral block sizes without changing the sampling;
+Vary the number of `--pixels` to compare ray batch sizes.
 `--profile` adds a separate operator profile after the unprofiled measurements.

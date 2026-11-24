@@ -25,6 +25,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIRECTORY = PROJECT_ROOT / "configs"
 
 
+@pytest.mark.parametrize("boundary", ["upper", "side"])
+def test_current_free_boundaries_allow_static_atmospheres(boundary):
+    document = yaml.safe_load(
+        (CONFIG_DIRECTORY / "muram/hinode/mhs.yaml").read_text()
+    )
+    document["atmosphere"]["geometry"]["time_dependent"] = False
+    name = f"{boundary}_boundary_current_free"
+    document["physics"]["equations"] = {
+        name: {"enabled": True, "weight": 0.0001},
+    }
+
+    config = parse_config(document, base_directory=CONFIG_DIRECTORY)
+
+    assert not config.atmosphere.geometry.time_dependent
+    assert getattr(config.physics.equations, name).enabled
+
+
 @pytest.mark.parametrize("devices", [0, -1, True, 1.5, "all"])
 def test_training_devices_requires_positive_integer(devices):
     from prom3theus.config.joint_schema import JointTrainingConfig
@@ -63,8 +80,9 @@ def test_learning_rate_decay_requires_positive_integer_steps(steps):
                             learning_rate_decay_steps=steps)
 
 
-def test_muram_induction_accepts_known_fixed_velocity_calibration():
-    config = load_config(CONFIG_DIRECTORY / "muram/sdo/joint.yaml")
+def test_induction_accepts_known_fixed_velocity_calibration(joint_document):
+    joint_document["streams"][0]["data_term"]["instrument"]["optimize_line_of_sight_velocity_correction"] = False
+    config = parse_config(joint_document, base_directory=CONFIG_DIRECTORY)
     assert config.physics.equations.induction.enabled
     instrument = config.streams[0].data_term.instrument
     assert not instrument.optimize_line_of_sight_velocity_correction
@@ -84,7 +102,7 @@ def test_loss_balance_rejects_invalid_inclusions(joint_document, names):
 
 
 @pytest.mark.parametrize("path", sorted(path for path in CONFIG_DIRECTORY.rglob("*.yaml")
-                                      if path.name != "synthesis.yaml"),
+                                      if path.name not in {"synthesis.yaml", "surrogate.yaml"}),
                          ids=lambda p: p.relative_to(CONFIG_DIRECTORY).as_posix())
 def test_presets_explicitly_include_only_nonboundary_objectives(path):
     config = load_config(path, environ={})
@@ -98,9 +116,9 @@ def test_presets_explicitly_include_only_nonboundary_objectives(path):
 
 
 def test_coronal_energy_requires_coronal_domain_and_dynamic_model():
-    document = load_config(CONFIG_DIRECTORY / "sdo/hmi_aia_dynamic.yaml").to_dict()
+    document = load_config(CONFIG_DIRECTORY / "sdo/hmi_aia_energy.yaml").to_dict()
     energy = document["physics"]["equations"]["coronal_energy"]
-    energy.update(enabled=True, weight=0.1)
+    energy.update(enabled=True, weight=0.1, minimum_height_megameter=4.0)
     config = parse_config(document, base_directory=CONFIG_DIRECTORY)
     assert config.physics.equations.coronal_energy.enabled
     energy["minimum_height_megameter"] = 2.0
@@ -110,13 +128,13 @@ def test_coronal_energy_requires_coronal_domain_and_dynamic_model():
 
 @pytest.fixture()
 def joint_document() -> dict:
-    legacy = load_config(CONFIG_DIRECTORY / "sdo/hmi_dynamic.yaml").to_dict()
+    legacy = load_config(CONFIG_DIRECTORY / "sdo/hmi_aia_dynamic.yaml").to_dict()
     return {
         "schema_version": 5,
         "solver": {
             "kind": "joint",
-            "output_directory": "../runs/hmi-aia-dry-run",
-            "work_directory": "../runs/hmi-aia-dry-run-work",
+            "output_directory": "../runs/hmi-aia",
+            "work_directory": "../runs/hmi-aia-work",
         },
         "scene": {"reference_stream": "photospheric_stokes"},
         "atmosphere": deepcopy(legacy["atmosphere"]),
@@ -211,14 +229,6 @@ def joint_document() -> dict:
                 "dpi": 120,
             }
         },
-        "dry_run": {
-            "device": "cpu",
-            "evaluate_gradients": True,
-            "gradient_sample_count": 16,
-            "max_samples_per_stream": 1024,
-            "quadrature_samples": [96, 192, 384],
-            "report_filename": "dry_run.json",
-        },
     }
 
 
@@ -232,18 +242,17 @@ def test_complete_joint_contract_is_typed_and_json_serializable(joint_document):
     assert isinstance(config, JointInversionConfig)
     assert config.schema_version == 5
     assert config.solver.kind == "joint"
-    assert config.solver.output_directory == PROJECT_ROOT / "runs/hmi-aia-dry-run"
+    assert config.solver.output_directory == PROJECT_ROOT / "runs/hmi-aia"
     assert config.scene.reference_stream == "photospheric_stokes"
     assert isinstance(config.streams[0].data_term, LTEStokesDataTermConfig)
     assert isinstance(config.streams[1].observation, AIAObservationConfig)
     assert isinstance(config.streams[1].data_term, AIAOpticallyThinDataTermConfig)
     assert config.streams[1].observation.channels_angstrom == (171, 193, 211)
-    assert config.dry_run.quadrature_samples == (96, 192, 384)
     assert config.atmosphere_regularization[0].id == "lte_support"
     json.dumps(config.to_dict())
 
 
-def test_load_config_dispatches_schema_four(tmp_path, joint_document):
+def test_load_config_reads_joint_yaml(tmp_path, joint_document):
     path = tmp_path / "joint.yaml"
     path.write_text(yaml.safe_dump(joint_document), encoding="utf-8")
 
@@ -252,7 +261,7 @@ def test_load_config_dispatches_schema_four(tmp_path, joint_document):
     assert isinstance(config, JointInversionConfig)
     assert (
         config.solver.output_directory
-        == (tmp_path / "../runs/hmi-aia-dry-run").resolve()
+        == (tmp_path / "../runs/hmi-aia").resolve()
     )
 
 
@@ -329,13 +338,9 @@ def test_joint_schema_rejects_mismatched_stokes_instrument(joint_document):
         parse_config(joint_document, base_directory=CONFIG_DIRECTORY, environ={})
 
 
-@pytest.mark.parametrize(
-    "filename", ["reports/dry_run.json", "dry_run.txt", "../x.json"]
-)
-def test_dry_run_report_is_a_local_json_basename(joint_document, filename):
-    joint_document["dry_run"]["report_filename"] = filename
-
-    with pytest.raises(ConfigError, match="JSON basename"):
+def test_removed_dry_run_options_are_rejected(joint_document):
+    joint_document["dry_run"] = {}
+    with pytest.raises(ConfigError, match="dry_run"):
         parse_config(joint_document, base_directory=CONFIG_DIRECTORY, environ={})
 
 

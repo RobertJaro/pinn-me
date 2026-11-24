@@ -1,4 +1,4 @@
-"""Typed schema-v5 contract for multimodal inversions and optional setup checks.
+"""Typed schema-v5 contract for multimodal inversions.
 
 This module contains configuration data and validation only.  It deliberately
 does not import observation adapters, resource loaders, forward operators, or
@@ -137,7 +137,7 @@ class ImageDataLoaderConfig(ConfigNode):
 
     batch_size: int
     validation_batch_size: int
-    workers: int = 2
+    workers: int = 4
     pin_memory: bool = False
 
     def __post_init__(self) -> None:
@@ -474,51 +474,6 @@ class JointDiagnosticsConfig(ConfigNode):
 
 
 @dataclass(frozen=True, slots=True)
-class DryRunConfig(ConfigNode):
-    """Evaluation controls which cannot start optimization."""
-
-    device: str = "auto"
-    evaluate_gradients: bool = True
-    gradient_sample_count: int = 32
-    max_samples_per_stream: int = 4096
-    quadrature_samples: tuple[int, ...] = (96, 192, 384)
-    report_filename: str = "dry_run.json"
-
-    def __post_init__(self) -> None:
-        _require_nonempty(self.device, "dry_run.device")
-        _require_bool(self.evaluate_gradients, "evaluate_gradients")
-        _require_positive_integer(
-            self.gradient_sample_count,
-            "gradient_sample_count",
-        )
-        _require_positive_integer(
-            self.max_samples_per_stream,
-            "max_samples_per_stream",
-        )
-        if self.gradient_sample_count > self.max_samples_per_stream:
-            raise ValueError(
-                "gradient_sample_count must not exceed max_samples_per_stream"
-            )
-        samples = self.quadrature_samples
-        if (
-            not samples
-            or any(type(value) is not int or value < 2 for value in samples)
-            or tuple(sorted(set(samples))) != samples
-        ):
-            raise ValueError(
-                "quadrature_samples must be unique increasing integers of at least two"
-            )
-        _require_nonempty(self.report_filename, "report_filename")
-        report = Path(self.report_filename)
-        if (
-            report.name != self.report_filename
-            or report.suffix.lower() != ".json"
-            or self.report_filename in {".", ".."}
-        ):
-            raise ValueError("report_filename must be a JSON basename")
-
-
-@dataclass(frozen=True, slots=True)
 class JointTrainingConfig(ConfigNode):
     """Joint optimization controls. A limit of -1 disables that stopping limit.
 
@@ -544,7 +499,7 @@ class JointTrainingConfig(ConfigNode):
     resume_from_checkpoint: Path | None = None
     migrate_data_order: bool = False
     gpu_prefetch: bool = True
-    reader_workers: int = 2
+    reader_workers: int = 4
     loader_block_bytes: int = 33554432
     loader_cache_bytes: int = 134217728
     loader_prefetch_batches: int = 2
@@ -665,11 +620,10 @@ class JointInversionConfig(ConfigNode):
     scene: SceneConfig
     atmosphere: AtmosphereConfig
     synthesis: LTESynthesisConfig
-    physics: PhysicsConfig
-    atmosphere_regularization: tuple[AtmosphereRegularizationConfig, ...]
     streams: tuple[ObservationStreamConfig, ...]
     diagnostics: JointDiagnosticsConfig
-    dry_run: DryRunConfig = field(default_factory=DryRunConfig)
+    physics: PhysicsConfig | None = None
+    atmosphere_regularization: tuple[AtmosphereRegularizationConfig, ...] = ()
     training: JointTrainingConfig | None = None
     logging: LoggingConfig = field(
         default_factory=lambda: LoggingConfig(type="disabled")
@@ -717,6 +671,8 @@ class JointInversionConfig(ConfigNode):
         )
         if len(set(regularization_ids)) != len(regularization_ids):
             raise ValueError("atmosphere regularization ids must be unique")
+        if self.physics is None:
+            return
         if self.physics.potential_boundary.enabled:
             if "potential_boundary" in (*stream_ids, *regularization_ids):
                 raise ValueError("potential_boundary is reserved for the progressive boundary objective")
@@ -744,7 +700,6 @@ class JointInversionConfig(ConfigNode):
             self.physics.equations.continuity,
             self.physics.equations.adiabatic_pressure,
             self.physics.equations.coronal_energy,
-            self.physics.equations.upper_boundary_current_free,
             self.physics.equations.upper_boundary_no_inflow,
         )
         self.physics.equations.coronal_energy.validate_domain(self.atmosphere)
@@ -798,7 +753,6 @@ __all__ = [
     "AtmosphereRegularizationConfig",
     "Configuration",
     "DataWeightScheduleConfig",
-    "DryRunConfig",
     "ImageDataLoaderConfig",
     "JointDataTermConfig",
     "JointDiagnosticsConfig",

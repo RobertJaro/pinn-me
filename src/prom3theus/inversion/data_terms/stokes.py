@@ -94,7 +94,7 @@ class StokesObservationTerm(ObservationDataTerm):
     def _qu_weight_factor(self):
         return 0. if self.training and self.step < self.qu_warmup_steps else 1.
 
-    def _score(self, prediction, target):
+    def _loss(self, prediction, target):
         comparison = self.objective.compare(prediction, target)
         weights = self.stokes_weights
         if self._qu_weight_factor() == 0:
@@ -103,9 +103,6 @@ class StokesObservationTerm(ObservationDataTerm):
             (comparison.prediction - comparison.target).square(),
             wavelength_weights=self.wavelength_weights, stokes_weights=weights)
         return component, total
-
-    def _loss(self, prediction, target):
-        return self._score(prediction, target)
 
     def spectral_queries(self, batch):
         coordinates = batch["coordinates"]
@@ -119,7 +116,7 @@ class StokesObservationTerm(ObservationDataTerm):
 
         def inverse_doppler_delta(velocity):
             beta = velocity / SPEED_OF_LIGHT
-            require_tensor((torch.isfinite(beta) & (beta.abs() < 1)).all(),
+            require_tensor(lambda: (torch.isfinite(beta) & (beta.abs() < 1)).all(),
                            "Spectral shifts must be finite and subluminal")
             inverse = torch.sqrt((1 - beta) / (1 + beta))
             # Rationalize inverse-1: direct subtraction loses velocities of
@@ -157,7 +154,7 @@ class StokesObservationTerm(ObservationDataTerm):
         canonical = (self.synthesis_window.basis(direction)
                      if canonical_basis is None else canonical_basis)
         detector = batch["stokes_basis"].to(canonical)
-        require_tensor(torch.isclose(detector[..., 2, :], direction, atol=2e-5, rtol=0).all(),
+        require_tensor(lambda: torch.isclose(detector[..., 2, :], direction, atol=2e-5, rtol=0).all(),
                        "Detector Stokes axis must point along photon propagation")
         cosine = (detector[..., 0, :] * canonical[..., 0, :]).sum(-1)
         sine = (detector[..., 0, :] * canonical[..., 1, :]).sum(-1)
@@ -189,7 +186,7 @@ class StokesObservationTerm(ObservationDataTerm):
 
     def _evaluate_batch(self, batch, *, diagnostics):
         prediction, physical = self._prediction_and_stokes(batch)
-        component, total = self._score(prediction, batch["stokes"])
+        component, total = self._loss(prediction, batch["stokes"])
         metrics = (self._fit_metrics(prediction, batch["stokes"], physical)
                    if diagnostics else {})
         return DataTermBatchResult(

@@ -359,11 +359,13 @@ def test_regularization_reports_only_enabled_components_even_at_zero():
     assert not result.active and result.component_losses == {}
 
 
-@pytest.mark.parametrize("final_factor", [0.0, 0.1, 1.0])
+@pytest.mark.parametrize("steps, final_factor, late_factor", [
+    (0, 0.0, 1.0), (2, 0.0, 0.0), (2, 0.1, 0.1), (2, 1.0, 1.0),
+])
 @pytest.mark.parametrize("training", [False, True])
-def test_current_schedule_retains_configured_final_penalty(final_factor, training):
+def test_current_penalty_with_and_without_schedule(steps, final_factor, late_factor, training):
     assembly = _assembly()
-    assembly.magnetic_current_free_steps = 2
+    assembly.magnetic_current_free_steps = steps
     assembly.magnetic_current_free_final_factor = final_factor
     constraints = assembly.constraints
     constraints.loss_weights = {"magnetic_current_free": 1.0}
@@ -379,7 +381,7 @@ def test_current_schedule_retains_configured_final_penalty(final_factor, trainin
     for step in (2, 10000):
         term.set_step(step)
         result = term.evaluate(_DerivativeAtmosphere())
-        assert result.active == (final_factor > 0)
-        if final_factor == 0:
+        assert result.active == (late_factor > 0)
+        if late_factor == 0:
             assert result.component_losses == {}
-        torch.testing.assert_close(result.loss, torch.tensor(4.0 * final_factor))
+        torch.testing.assert_close(result.loss, torch.tensor(4.0 * late_factor))

@@ -174,7 +174,7 @@ def test_aia_fits_roundtrip_through_sdo_preparation(tmp_path):
     assert ImageObservationStore.load_sequence(tmp_path / "prepared")[0][0].spatial_shape == (4, 4)
 
 
-def test_sdo_cli_and_joint_training_runtime(tmp_path, monkeypatch):
+def test_sdo_cli_and_joint_training_runtime(tmp_path, monkeypatch, capsys):
     import json
     import weakref
     from prom3theus.muram.cli import main
@@ -196,18 +196,19 @@ def test_sdo_cli_and_joint_training_runtime(tmp_path, monkeypatch):
                     source / f"{_FIELD_IDS[name]}.{iteration:06d}"
                 )
     previous = []
-    original = sdo.synthesize_hmi
+    original = sdo.synthesize_sdo
 
     def checked(proxy, **kwargs):
         assert all(ref() is None for ref in previous)
         result = original(proxy, **kwargs)
         previous[:] = [
             weakref.ref(proxy.synthesis_ready_quantities()["temperature"]),
-            weakref.ref(result),
+            weakref.ref(result[0]),
+            weakref.ref(result[1]),
         ]
         return result
 
-    monkeypatch.setattr(sdo, "synthesize_hmi", checked)
+    monkeypatch.setattr(sdo, "synthesize_sdo", checked)
     root = tmp_path / "sdo"
     main(
         [
@@ -221,20 +222,44 @@ def test_sdo_cli_and_joint_training_runtime(tmp_path, monkeypatch):
             "20",
             "--stride",
             "2",
+            "--stokes-height-megameters",
+            "0.15",
             "--no-progress",
             "--device",
             "cpu",
         ]
     )
     assert all(ref() is None for ref in previous)
+    output = capsys.readouterr()
+    assert "Synthesis device=cpu" in output.err
+    assert "Iteration 10: preparing native columns" in output.err
+    assert "Preparing AIA training store from 6 saved FITS files" in output.err
+    assert "All 2 requested snapshots complete" in output.err
+    assert "\r" not in output.err  # --no-progress includes AIA preparation/checksums.
     assert len(list((root / "hmi" / "prepared").glob("*.fits"))) == 48
     assert len(list((root / "hmi" / "responses").glob("*.npz"))) == 2
     assert len(list((root / "aia" / "fits").glob("*.fits"))) == 6
-    assert not list(root.rglob("*.jpg"))
+    assert len(list((root / "diagnostics").glob("*.jpg"))) == 2
+    assert len(list((root / "diagnostics").glob("*.npz"))) == 2
+    from prom3theus.muram.fits import read_metadata, load_aia_fits
+    for path in (root / "hmi" / "prepared").glob("*.I0.fits"):
+        with fits.open(path) as hdus:
+            synthesis_metadata = read_metadata(hdus)["muram_synthesis"]
+            reference = synthesis_metadata["native_reference"]
+            assert reference["iteration"] == hdus[0].header["MURAMIT"]
+            assert synthesis_metadata["stokes_height_megameters"] == 0.15
+            assert synthesis_metadata["stokes_depth_samples"] == 16
+            assert synthesis_metadata["native_depth_samples"] == 30
+    for path in (root / "aia" / "fits").glob("*.fits"):
+        reference = load_aia_fits(path).provenance["native_reference"]
+        assert reference["source_path"] == str(source.resolve())
     assert (
         json.loads((root / "synthesis_status.json").read_text())["state"] == "complete"
     )
-    raw = load_config("configs/muram/sdo/joint.yaml").to_dict()
+    raw = load_config("configs/sdo/hmi_aia_dynamic.yaml").to_dict()
+    raw["scene"]["time_window"] = None
+    raw["streams"][0]["data_term"]["instrument"]["optimize_line_of_sight_velocity_correction"] = False
+    raw["streams"][1]["data_term"]["weight"] = 1.0
     raw["solver"].update(
         output_directory=str(tmp_path / "run"), work_directory=str(tmp_path / "work")
     )
@@ -253,6 +278,7 @@ def test_sdo_cli_and_joint_training_runtime(tmp_path, monkeypatch):
         else:
             obs["directory"] = str(root / "aia" / "prepared")
             obs["selection"]["validation_exposure_group"] = "muram_000010"
+    raw["training"]["device"] = "cpu"
     runtime = build_joint_runtime(parse_config(raw, base_directory=tmp_path))
     from prom3theus.instruments.hmi.calibration import hmi_continuum_radiance
     from prom3theus.rt.radiometry import load_solar_reference
@@ -299,7 +325,9 @@ def test_sdo_keeps_completed_fits_when_next_snapshot_fails(tmp_path, monkeypatch
     assert len(list((root / "hmi" / "prepared").glob("*.fits"))) == 24
     assert len(list((root / "hmi" / "responses").glob("*.npz"))) == 1
     assert len(list((root / "aia" / "fits").glob("*.fits"))) == 3
-    assert not list(root.rglob("*.jpg"))
+    assert (root / "diagnostics" / "muram_000010.jpg").is_file()
+    assert (root / "diagnostics" / "muram_000010.npz").is_file()
+    assert not (root / "diagnostics" / "muram_000020.npz").exists()
 
 
 def test_equatorial_geometry_produces_finite_area_shell_maps(tmp_path, monkeypatch):

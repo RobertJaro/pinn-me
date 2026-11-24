@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from prom3theus.rt.formal_transfer import formal_stokes, affine_transfer_reduce
+from prom3theus.rt.formal_transfer import _transmission_above, formal_stokes, affine_transfer_reduce
 from prom3theus.validation.reference_transfer import PolarizedFormalSolver, RayDistancePath
 
 
@@ -74,7 +74,19 @@ def test_nonmonotonic_distance_is_rejected():
         formal_stokes(torch.eye(4).expand(3, 1, 4, 4), torch.zeros(3, 1, 4), torch.tensor([0., 1., .5]))
 
 
-def test_tree_is_sum_of_local_emission_attenuated_by_overlying_layers():
+@pytest.mark.parametrize("count", [1, 2, 6, 31, 32])
+def test_transmission_above_each_layer_excludes_its_own_attenuation(count):
+    rng = torch.Generator().manual_seed(42)
+    identity = torch.eye(4, dtype=torch.float64)
+    layers = identity + 0.1 * torch.randn(count, 2, 3, 4, 4, dtype=identity.dtype, generator=rng)
+    above = _transmission_above(layers)
+    expected = identity.expand_as(layers[0])
+    for i, layer in enumerate(layers):
+        torch.testing.assert_close(above[i], expected)
+        expected = expected @ layer
+
+
+def test_prefix_integral_is_sum_of_local_emission_attenuated_by_overlying_layers():
     torch.manual_seed(15)
     k = torch.eye(4, dtype=torch.float64) + .1*torch.randn(7, 2, 4, 4, dtype=torch.float64)
     attenuation = torch.matrix_exp(-k)
@@ -208,7 +220,10 @@ def test_supplied_uniform_intervals_match_zero_jitter_analytic_slab(tau):
     torch.testing.assert_close(actual, expected, rtol=4e-6, atol=2e-7)
 
 
-def test_float32_stiff_polarized_transfer_preserves_profiles_and_gradients():
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_float32_stiff_polarized_transfer_preserves_profiles_and_gradients(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Requires CUDA")
     # Passive, noncommuting layers with dichroism and dispersion spanning thin
     # through opaque conditions. Compare arithmetic at identical input values,
     # keeping each Stokes component visible instead of letting I dominate.
@@ -217,14 +232,14 @@ def test_float32_stiff_polarized_transfer_preserves_profiles_and_gradients():
     coefficients = torch.randn(3, count, 3, 7)
     coefficients[..., 0] = coefficients[..., 1:4].norm(dim=-1) + .2
     coefficients *= torch.logspace(-8, 4, count)[None, :, None, None]
-    coefficients.requires_grad_()
+    coefficients = coefficients.to(device).requires_grad_()
     diagonal, a, b, c, x, y, z = coefficients.unbind(-1)
     propagation = torch.stack((diagonal, a, b, c, a, diagonal, z, -y,
                                b, -z, diagonal, x, c, y, -x, diagonal), -1)
     propagation = propagation.reshape(*coefficients.shape[:-1], 4, 4)
     source = torch.zeros(3, count, 3, 4)
     source[..., 0] = torch.linspace(.5, 2, count)[None, :, None]
-    source.requires_grad_()
+    source = source.to(device).requires_grad_()
     distance = torch.linspace(0, 10, count)
     values, gradients = [], []
     for precision in ('float32', 'float64'):
@@ -239,3 +254,80 @@ def test_float32_stiff_polarized_transfer_preserves_profiles_and_gradients():
     for actual_gradient, expected_gradient in zip(*gradients):
         assert torch.isfinite(actual_gradient).all()
         assert (actual_gradient - expected_gradient).norm() < 8e-6 * expected_gradient.norm()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_ordered_transmission_adjoint_and_higher_derivative(device):
+    from prom3theus.rt.transmission import _ordered_products
+    if device == "cuda":
+        from torch.utils._triton import has_triton
+        if not torch.cuda.is_available() or not has_triton():
+            pytest.skip("CUDA transmission kernel requires a Triton-capable GPU")
+
+    torch.manual_seed(14)
+    # Ray-major storage, an odd layer count, and an incomplete GPU tile.
+    layers = (torch.eye(4, dtype=torch.float64, device=device) +
+              .1 * torch.randn(2, 7, 3, 4, 4, dtype=torch.float64, device=device))
+    layers = layers.movedim(1, 0).requires_grad_()
+    reference = [torch.eye(4, dtype=layers.dtype, device=device).expand_as(layers[0])]
+    for layer in layers[:-1]:
+        reference.append(reference[-1] @ layer)
+    reference = torch.stack(reference)
+    actual = _transmission_above(layers)
+    torch.testing.assert_close(actual, reference)
+    weights = torch.randn_like(actual).transpose(-1, -2)
+
+    def gradient(value, create_graph):
+        return torch.autograd.grad((weights * value.square()).sum(), layers,
+                                   create_graph=create_graph, retain_graph=True)[0]
+
+    expected = gradient(reference, True)
+    torch.testing.assert_close(gradient(actual, False), expected)
+    # Exercise the adjoint recurrence even on machines without CUDA.
+    adjoints = _ordered_products(layers, 2 * weights * reference)
+    torch.testing.assert_close(reference.transpose(-1, -2) @ adjoints, expected)
+    differentiable = gradient(actual, True)
+    torch.testing.assert_close(differentiable, expected)
+    second = torch.autograd.grad(differentiable.square().sum(), layers)[0]
+    torch.testing.assert_close(second, torch.autograd.grad(expected.square().sum(), layers)[0])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("fixed_boundary", [False, True])
+def test_packed_polarized_sweep_spectra_and_derivatives(device, fixed_boundary):
+    from prom3theus.rt.polarized_exponential import propagation_matrix
+
+    if device == "cuda":
+        from torch.utils._triton import has_triton
+        if not torch.cuda.is_available() or not has_triton():
+            pytest.skip("CUDA Stokes sweep requires a Triton-capable GPU")
+
+    torch.manual_seed(18)
+    # Noncommuting layers, unequal widths, and 70 ray-wavelengths across a GPU tile boundary.
+    shape = (2, 6, 35)
+    options = {"device": device, "dtype": torch.float64}
+    coefficients = .4 * torch.randn(*shape, 7, **options)
+    coefficients[..., 0] = 1 + coefficients[..., 1:4].norm(dim=-1)
+    coefficients.requires_grad_()
+    source = torch.randn(*shape, 4, **options).requires_grad_()
+    distance = torch.tensor([0., .001, .13, .4, 1., 2.], **options).requires_grad_()
+    inputs = (coefficients, source, distance)
+    boundary = None
+    if fixed_boundary:
+        boundary = torch.randn(2, 35, 4, **options).requires_grad_()
+        inputs += (boundary,)
+    result = formal_stokes(coefficients, source, distance, bottom_boundary=boundary,
+                           precision="float64", polarized=True)
+    reference = PolarizedFormalSolver()(propagation_matrix(coefficients), source, distance,
+                                        path=RayDistancePath(distance), bottom_boundary=boundary)
+    torch.testing.assert_close(result, reference, atol=1e-12, rtol=1e-11)
+    direction = torch.randn_like(result)
+    expected = torch.autograd.grad(reference, inputs, direction, create_graph=True)
+    for create_graph in (False, True):
+        gradients = torch.autograd.grad(result, inputs, direction, create_graph=create_graph, retain_graph=True)
+        for actual, target in zip(gradients, expected):
+            torch.testing.assert_close(actual, target, atol=1e-10, rtol=1e-8)
+    def second_derivative(first):
+        return torch.autograd.grad(sum(g.square().sum() for g in first), inputs)
+    for actual, target in zip(second_derivative(gradients), second_derivative(expected)):
+        torch.testing.assert_close(actual, target, atol=1e-8, rtol=1e-7)

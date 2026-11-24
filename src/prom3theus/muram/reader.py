@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from numbers import Integral
+from pathlib import Path
 
 import numpy as np
 
@@ -69,6 +71,12 @@ _REQUIRED_FOR_SYNTHESIS = (
     "temperature",
     "tau",
 )
+
+
+NATIVE_REFERENCE_SCHEMA = "muram_native_reference_v1"
+_SOURCE_FIELDS = {"header": "Header", **{
+    name: _FIELD_IDS[name] for name in _REQUIRED_FOR_SYNTHESIS
+}}
 
 
 @dataclass(frozen=True)
@@ -290,7 +298,8 @@ class MURaMSnapshot:
         """Explicitly materialize and cache the full oriented SI atmosphere.
 
         Arrays have shape [horizontal x, horizontal y, upward z]. Synthesis
-        itself uses synthesis_columns() to avoid these full-cube allocations.
+        itself uses synthesis_columns() to load only its required fields into a
+        shared full-volume cache before sequential batch processing.
         """
         if "quantities" not in self._synthesis_cache:
             quantities, ds_m = self._oriented_fields()
@@ -298,7 +307,7 @@ class MURaMSnapshot:
         return dict(self._synthesis_cache["quantities"])
 
     def synthesis_columns(self) -> NativeColumns:
-        """Reuse a lazy flattened-column dataset and its two-worker loader."""
+        """Reuse native field descriptors and the eager synthesis-volume cache."""
         if "columns" not in self._synthesis_cache:
             order, component_order, z_sign, y_sign, ds_m = self._synthesis_layout()
             paths, scales, signs = {}, {}, {}
@@ -319,11 +328,97 @@ class MURaMSnapshot:
             )
         return self._synthesis_cache["columns"]
 
+    def native_reference(self, *, stride=1, binning=1):
+        """Describe the source and pixel mapping for later native-data evaluation."""
+        return native_snapshot_reference(self, stride=stride, binning=binning)
+
     def close(self):
-        """Release this snapshot's workers and cached arrays before the next one."""
+        """Release this snapshot's cached arrays and mappings before the next one."""
         columns = self._synthesis_cache.get("columns")
         if columns is not None:
             columns.close()
         self._synthesis_cache.clear()
         self._arrays.clear()
         self._mappings.clear()
+
+
+def _sampling_factor(value, name):
+    if value is None:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+        raise ValueError(f"{name} must be a positive integer.")
+    return int(value)
+
+
+def native_snapshot_reference(snapshot, *, stride=1, binning=1):
+    """Record source identity and resolved geometry without loading cube volumes."""
+    stride = _sampling_factor(stride, "stride")
+    binning = _sampling_factor(binning, "binning")
+    order, components, z_sign, y_sign, spacing = snapshot._synthesis_layout()
+    header_axes = tuple(snapshot.axis_order[axis] for axis in order)
+    shape = tuple(snapshot._native_shape[axis] for axis in header_axes)
+    selected = tuple((size + stride - 1) // stride for size in shape[:2])
+    if any(size % binning for size in selected):
+        raise ValueError("Horizontal dimensions after stride must be divisible by binning.")
+    header_spacing = [0.0] * 3
+    for axis, header_axis in enumerate(snapshot.axis_order):
+        header_spacing[header_axis] = snapshot.ds_m[axis]
+    files = {}
+    for name, field_id in _SOURCE_FIELDS.items():
+        path = Path(snapshot._field_path(field_id))
+        stat = path.stat()
+        files[name] = {
+            "name": path.name,
+            "path": str(path.resolve()),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+        }
+    return {
+        "schema": NATIVE_REFERENCE_SCHEMA,
+        "source_path": str(Path(snapshot.source_path).resolve()),
+        "iteration": int(snapshot.iteration),
+        "time_s": float(snapshot.time_s),
+        "identity_method": "file_metadata_v1; not a content checksum",
+        "files": files,
+        "reader": {
+            "axis_order": [int(axis) for axis in snapshot.axis_order],
+            "vertical_axis": None if snapshot.vertical_axis is None else int(snapshot.vertical_axis),
+            "component_order": [int(axis) for axis in snapshot.component_order],
+        },
+        "native_geometry": {
+            "header_shape": list(snapshot._native_shape),
+            "header_spacing_m": header_spacing,
+            "oriented_shape_xyz": list(shape),
+            "oriented_spacing_m": list(spacing),
+            "header_axes_for_local_xyz": [int(axis) for axis in header_axes],
+            "vector_components_for_local_xyz": [int(axis) for axis in components],
+            "index_direction_xyz": [1, y_sign, z_sign],
+            "vector_sign_xyz": [1, y_sign, z_sign],
+            "resolved_vertical_header_axis": int(header_axes[2]),
+            "local_axes": ["solar west", "solar north", "upward"],
+            "height_origin": "bottom native cell center; not the photosphere",
+            "photosphere_height_m": None,
+            "height_range_m": [0.0, (shape[2] - 1) * spacing[2]],
+            "source_dtype": np.dtype(np.float32).str,
+            "source_storage_order": "header axis 0 varies fastest",
+        },
+        "units": {
+            "temperature": "K", "pressure": "Pa", "magnetic_field": "G",
+            "velocity": "m s^-1; local co-rotating flow", "distance": "m", "tau": "1",
+            "native_to_physical_scale": {
+                name: _UNIT_SCALE[name] for name in _REQUIRED_FOR_SYNTHESIS
+            },
+        },
+        "pixel_mapping": {
+            "native_array_order": ["x", "y", "z"],
+            "output_map_order": ["y", "x"],
+            "stride": stride,
+            "binning": binning,
+            "output_shape_yx": [selected[1] // binning, selected[0] // binning],
+            "native_x_indices": "(output_x * binning + subpixel_x) * stride",
+            "native_y_indices": "(output_y * binning + subpixel_y) * stride",
+            "subpixel_range": "0 <= subpixel_x, subpixel_y < binning",
+            "binning_operation": "mean of synthesized observables, not mean atmosphere",
+        },
+    }

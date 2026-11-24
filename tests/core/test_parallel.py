@@ -31,3 +31,8 @@ def test_worker_exception_propagates(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid image"):
         parallel_map(fail, [1], description="Failure")
+
+
+def test_progress_can_be_disabled(capsys):
+    assert parallel_map(lambda value: value * 2, [1, 2], description="Quiet", progress=False) == [2, 4]
+    assert capsys.readouterr().err == ""

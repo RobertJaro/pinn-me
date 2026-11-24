@@ -61,6 +61,7 @@ class PhysicsAssembly:
     hard_example_start_step: int = 0
     hard_example_jitter_length_m: float = 50_000.0
     hard_example_jitter_time_hours: float = 0.0
+    validation_volume_points: int | None = None
 
     def model_configuration(self) -> dict[str, Any]:
         """Return the exact normalized physics constructor representation."""
@@ -85,6 +86,7 @@ class PhysicsAssembly:
             "validation_points_per_height": (self.validation_points_per_height),
             "height_sampling_power": self.height_sampling_power,
             "volume_sampling": self.volume_sampling,
+            "validation_volume_points": self.validation_volume_points,
             "hard_example_enabled": self.hard_example_enabled,
             "hard_example_count": self.hard_example_count,
             "hard_example_start_step": self.hard_example_start_step,
@@ -117,10 +119,15 @@ def build_physics_assembly(
     # hand-built legacy mappings valid while making the normalized runtime
     # representation explicit for new configurations.
     options.setdefault("loss_start_step", 0)
+    options.setdefault("magnetic_current_free_steps", 0)
     options.setdefault("loss_ramp_steps", 0)
     options.setdefault("robust_loss_delta", 0.0)
     options.setdefault("height_sampling_power", 1.0)
     options.setdefault("volume_sampling", "height_grouped")
+    options.setdefault("validation_volume_points", None)
+    if options["volume_sampling"] == "uniform_volume":
+        options.setdefault("height_layers_per_step", 0)
+        options.setdefault("validation_height_layers", 0)
     options.setdefault("hard_example_enabled", False)
     options.setdefault("hard_example_count", 0)
     options.setdefault("hard_example_start_step", 0)
@@ -146,6 +153,7 @@ def build_physics_assembly(
         "validation_points_per_height",
         "height_sampling_power",
         "volume_sampling",
+        "validation_volume_points",
         "hard_example_enabled",
         "hard_example_count",
         "hard_example_start_step",
@@ -209,9 +217,9 @@ def build_physics_assembly(
     if not math.isfinite(height_sampling_power) or height_sampling_power <= 0.0:
         raise ValueError("height_sampling_power must be finite and positive.")
     volume_sampling = options.pop("volume_sampling")
-    if volume_sampling not in {"height_grouped", "fully_random"}:
+    if volume_sampling not in {"height_grouped", "fully_random", "uniform_volume"}:
         raise ValueError(
-            "volume_sampling must be 'height_grouped' or 'fully_random'."
+            "volume_sampling must be 'height_grouped', 'fully_random', or 'uniform_volume'."
         )
     def count(name: str) -> int:
         value = options.pop(name)
@@ -219,6 +227,15 @@ def build_physics_assembly(
             raise TypeError(f"{name} must be an integer.")
         return int(value)
 
+    uniform_volume = volume_sampling == "uniform_volume"
+    if uniform_volume:
+        validation_volume_points = count("validation_volume_points")
+        if validation_volume_points < 1:
+            raise ValueError("validation_volume_points must be positive")
+    else:
+        validation_volume_points = options.pop("validation_volume_points")
+        if validation_volume_points is not None:
+            raise ValueError("validation_volume_points requires volume_sampling: uniform_volume")
     volume_points_per_step = count("volume_points_per_step")
     height_layers_per_step = count("height_layers_per_step")
     hard_example_enabled = options.pop("hard_example_enabled")
@@ -280,13 +297,6 @@ def build_physics_assembly(
         normalization=normalization,
         robust_loss_delta=robust_loss_delta,
     )
-    if constraints.is_active("magnetic_current_free") != (
-        magnetic_current_free_steps > 0
-    ):
-        raise ValueError(
-            "magnetic_current_free must be active exactly when "
-            "magnetic_current_free_steps is positive."
-        )
     if gravity_m_per_s2 is not None and (
         not math.isfinite(gravity_m_per_s2) or gravity_m_per_s2 <= 0
     ):
@@ -307,7 +317,9 @@ def build_physics_assembly(
     if min(volume_points_per_step, height_layers_per_step) < 0:
         raise ValueError("Physics volume and height-layer counts cannot be negative.")
     if constraints.volume_active:
-        if (
+        if volume_points_per_step < 1:
+            raise ValueError("Active volume physics requires a positive volume sample count")
+        if volume_sampling == "height_grouped" and (
             height_layers_per_step < 1
             or height_layers_per_step > volume_points_per_step
             or volume_points_per_step % height_layers_per_step != 0
@@ -323,8 +335,10 @@ def build_physics_assembly(
         raise ValueError(
             "Upper-domain volume and height-layer counts cannot be negative."
         )
-    if constraints.upper_volume_active:
-        if (
+    if constraints.upper_volume_active and not constraints.volume_active:
+        if upper_volume_points_per_step < 1:
+            raise ValueError("Active upper physics requires a positive volume sample count")
+        if not uniform_volume and (
             upper_height_layers_per_step < 1
             or upper_height_layers_per_step > upper_volume_points_per_step
             or upper_volume_points_per_step % upper_height_layers_per_step != 0
@@ -362,7 +376,7 @@ def build_physics_assembly(
         validation_side_boundary_points = 0
     if validation_height_layers < 0:
         raise ValueError("Physics validation height-layer count cannot be negative.")
-    if constraints.volume_active and validation_height_layers < 2:
+    if constraints.volume_active and not uniform_volume and validation_height_layers < 2:
         raise ValueError(
             "Active volume physics validation requires at least two height layers."
         )
@@ -372,7 +386,7 @@ def build_physics_assembly(
         raise ValueError(
             "Upper-domain validation height-layer count cannot be negative."
         )
-    if constraints.upper_volume_active and validation_upper_height_layers < 2:
+    if constraints.upper_volume_active and not uniform_volume and validation_upper_height_layers < 2:
         raise ValueError(
             "Active upper-domain validation requires at least two height layers."
         )
@@ -422,11 +436,16 @@ def build_physics_assembly(
         "time_hours": torch.empty(0, 1, dtype=torch.float32),
         "normal": torch.empty(0, 3, dtype=torch.float32),
     }
+
+    def validation_samples(domain, height_layers):
+        if uniform_volume:
+            return domain.random_volume(
+                validation_volume_points, generator=torch.Generator().manual_seed(0)
+            )
+        return domain.deterministic_grouped(height_layers, validation_points_per_height)
+
     if sampling_domain is not None and constraints.volume_active:
-        validation_volume = sampling_domain.deterministic_grouped(
-            validation_height_layers,
-            validation_points_per_height,
-        )
+        validation_volume = validation_samples(sampling_domain, validation_height_layers)
     if sampling_domain is not None and constraints.upper_boundary_active:
         grouped_boundary = sampling_domain.deterministic_top(
             validation_points_per_height
@@ -435,10 +454,7 @@ def build_physics_assembly(
             name: value.squeeze(0) for name, value in grouped_boundary.items()
         }
     if upper_sampling_domain is not None and constraints.upper_volume_active:
-        validation_upper = upper_sampling_domain.deterministic_grouped(
-            validation_upper_height_layers,
-            validation_points_per_height,
-        )
+        validation_upper = validation_samples(upper_sampling_domain, validation_upper_height_layers)
     if sampling_domain is not None and constraints.side_boundary_active:
         validation_side = sampling_domain.deterministic_sides(
             validation_side_boundary_points,
@@ -478,6 +494,7 @@ def build_physics_assembly(
         robust_loss_delta=robust_loss_delta,
         height_sampling_power=height_sampling_power,
         volume_sampling=volume_sampling,
+        validation_volume_points=validation_volume_points,
         hard_example_enabled=hard_example_enabled,
         hard_example_count=hard_example_count,
         hard_example_start_step=hard_example_start_step,

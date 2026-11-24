@@ -43,7 +43,7 @@ def _compatible_configuration(config, source_config):
 def build_hmi_warm_start_factories(config, source_path):
     """Initialize network weights only, preserving the new atmosphere semantics.
 
-    Pass the returned factories to both setup evaluation and training. The new
+    Pass the returned factories to the training runtime. The new
     run must have its own output directory; ordinary checkpoint resume is a
     separate operation. Returned provenance belongs in the new run report.
     """

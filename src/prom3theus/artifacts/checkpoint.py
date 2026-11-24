@@ -159,10 +159,14 @@ def load_validated_save_state(path, *, map_location="cpu"):
     scene = SceneContract(**context["scene"])
     atmosphere = StratifiedAtmosphereModel(**context["atmosphere"]).float()
     from prom3theus.inversion.lte import LTEWindow
-    synthesis_windows = {
-        name: LTEWindow(atmosphere, configuration=construction)
-        for name, construction in context["synthesis_windows"].items()
-    }
+    synthesis_windows = {}
+    for name, construction in context["synthesis_windows"].items():
+        # Older snapshots recorded the wavelength batch size alongside window physics.
+        options = dict(construction)
+        options.pop("wavelength_chunk_size", None)
+        mapper_spec = options.pop("mapper_spec", None)
+        constructor = {"mapper_spec": mapper_spec} if mapper_spec is not None else {}
+        synthesis_windows[name] = LTEWindow(atmosphere, configuration=options, **constructor)
     terms = {
         name: reconstruct_term(contract, atmosphere, scene, synthesis_windows)
         for name, contract in context["terms"].items()

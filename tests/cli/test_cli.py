@@ -471,14 +471,15 @@ def test_validate_config_prints_resolved_schema(capsys):
     main(
         [
             "validate-config",
-            str(PROJECT_ROOT / "configs" / "sdo/hmi_dynamic.yaml"),
+            str(PROJECT_ROOT / "configs" / "sdo/hmi_aia_dynamic.yaml"),
         ]
     )
     document = json.loads(capsys.readouterr().out)
     assert document["schema_version"] == 5
     assert document["solver"]["kind"] == "joint"
-    assert len(document["streams"]) == 1
+    assert len(document["streams"]) == 2
     assert document["streams"][0]["observation"]["type"] == "hmi_stokes"
+    assert document["streams"][1]["observation"]["type"] == "aia_euv"
 
 
 def test_export_dispatches_p3s_and_preserves_sampling_options(monkeypatch, capsys):

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from prom3theus.core.validation import deferred_validation, require_tensor
+from prom3theus.core.validation import deferred_validation, require_tensor, skip_tensor_validation
 
 
 def test_public_checks_raise_immediately():
@@ -51,3 +51,15 @@ def test_deferred_checks_preserve_exception_type():
     with pytest.raises(RuntimeError, match='composition'):
         with deferred_validation():
             require_tensor(torch.tensor(False), 'composition', error=RuntimeError)
+
+
+def test_training_skips_predicates_and_restores_validation_after_error():
+    def check():
+        pytest.fail("Numerical validation ran in the training loop")
+
+    with pytest.raises(RuntimeError, match="forward failed"):
+        with skip_tensor_validation(), deferred_validation():
+            require_tensor(check, "unused")
+            raise RuntimeError("forward failed")
+    with pytest.raises(ValueError, match="invalid"):
+        require_tensor(lambda: torch.tensor(False), "invalid")

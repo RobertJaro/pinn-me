@@ -90,20 +90,6 @@ def test_validation_does_not_refresh_and_source_is_photospheric():
             assert term.state_dict()[name] == value
 
 
-def test_startup_gradient_probe_preserves_live_state():
-    from prom3theus.application.joint_evaluation import _bounded_shared_gradient_samples
-    from prom3theus.application.runtime import state_dict_sha256
-    term, model = make_term(), Model()
-    before = state_dict_sha256(term)
-    with _bounded_shared_gradient_samples(term, maximum_count=4):
-        result = term.evaluate(model)
-        assert result.active
-    result.loss.backward()
-    assert torch.isfinite(model.amplitude.grad)
-    assert state_dict_sha256(term) == before
-    assert term.update_count == 0
-
-
 def test_lightning_checkpoint_restores_frozen_boundary(tmp_path):
     from pytorch_lightning import Trainer
     from prom3theus.config.joint_schema import JointTrainingConfig

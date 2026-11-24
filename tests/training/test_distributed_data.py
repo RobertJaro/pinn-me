@@ -39,7 +39,7 @@ def test_auto_devices_uses_visible_gpus_and_native_ddp(monkeypatch, device, visi
 
 
 @pytest.mark.skipif(not torch.distributed.is_gloo_available(), reason="Requires Gloo")
-def test_native_ddp_launches_before_sampling_and_synchronizes_gradients(tmp_path):
+def test_native_ddp_prepares_before_launch_and_synchronizes_gradients(tmp_path):
     import os
     import subprocess
     import sys
@@ -47,6 +47,7 @@ def test_native_ddp_launches_before_sampling_and_synchronizes_gradients(tmp_path
 
     worker = tmp_path / "native_ddp.py"
     worker.write_text(textwrap.dedent('''
+        import os
         from pathlib import Path
         import torch
         from prom3theus.core.distributed import initialize_distributed
@@ -55,11 +56,14 @@ def test_native_ddp_launches_before_sampling_and_synchronizes_gradients(tmp_path
 
         if __name__ == '__main__':
             torch.set_num_threads(1)
-            rank, world = initialize_distributed(torch.device('cpu'), devices=2)
-            assert world == 2
+            rank, world = 0, 1
+            if int(os.environ.get('WORLD_SIZE', '1')) > 1:
+                rank, world = initialize_distributed(torch.device('cpu'), devices=2)
             calls = torch.zeros(2, dtype=torch.long)
             def build():
                 assert rank == 0, 'worker must never construct the data module'
+                if calls[0] == 0:
+                    assert not torch.distributed.is_initialized()
                 calls[0] += 1
                 return JointDataModule({'values': torch.arange(8)}, None)
             def finalize(module):
@@ -67,7 +71,13 @@ def test_native_ddp_launches_before_sampling_and_synchronizes_gradients(tmp_path
                 calls[1] += 1
                 return False
             path = Path(__file__).parent / 'data_module.pt'
-            module = restore_or_create_data_module(path, build, finalize=finalize)
+            def launch():
+                global rank, world
+                assert path.is_file(), 'snapshot must exist before workers launch'
+                rank, world = initialize_distributed(torch.device('cpu'), devices=2)
+            module = restore_or_create_data_module(
+                path, build, finalize=finalize, before_handoff=launch)
+            assert world == 2
             first_generation = module.generation
             module = restore_or_create_data_module(path, build, finalize=finalize)
             assert module.generation == first_generation

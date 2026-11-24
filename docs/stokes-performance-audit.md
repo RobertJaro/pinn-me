@@ -180,14 +180,14 @@ step budget for controlled performance/recovery comparisons.
 From the repository root, using the intended training environment:
 
 ```bash
-PYTHONPATH=src python scripts/diagnostics/profile_stokes.py \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.profile_stokes \
   --device cuda --batch 64 --repeats 5 --output data/stokes_performance/gpu
 
-PYTHONPATH=src python scripts/diagnostics/profile_stokes.py \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.profile_stokes \
   --device cuda --batch 64 --repeats 5 --legacy-indexing \
   --output data/stokes_performance/gpu_legacy
 
-PYTHONPATH=src python scripts/diagnostics/profile_stokes.py \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.profile_stokes \
   --device cuda --batch 64 --repeats 5 --split-backward \
   --output data/stokes_performance/gpu_split
 ```

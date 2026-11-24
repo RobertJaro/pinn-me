@@ -22,7 +22,7 @@ def make_precision_system(*, dtype=torch.float32, magnetic_representation="direc
     window = LTEWindow(atmosphere, configuration={
         "id": "fe", "line_ids": ["FeI_6302.4932"], "radiance_scale": 1e13,
         "wavelength_bounds_vacuum_angstrom": [6300., 6307.],
-        "depth_count": depth_count, "coarse_to_fine": coarse_to_fine, "jitter_fraction": 1., "wavelength_chunk_size": 8,
+        "depth_count": depth_count, "coarse_to_fine": coarse_to_fine, "jitter_fraction": 1.,
         "transfer_precision": "float32" if dtype == torch.float32 else "float64",
     })
     term = StokesObservationTerm(

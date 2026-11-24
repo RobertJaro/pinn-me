@@ -9,20 +9,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
 from astropy.io import fits
 from astropy.time import Time, TimeDelta
 
+from prom3theus.instruments.aia_euv.preparation import (
+    AIA_INTENSITY_UNIT,
+    AIA_RAY_DIRECTION_CONVENTION,
+    AIA_SURFACE_FRAME,
+    AIA_TIME_REPRESENTATION,
+    RegisteredAIAChannelRaster,
+    _verified_response_contract,
+    prepare_aia_observation_store,
+)
 from prom3theus.instruments.hmi.acquisition import format_jsoc_time
+from prom3theus.instruments.hmi.calibration import hmi_continuum_radiance
 from prom3theus.observations import ObservationRaster
+from prom3theus.rt.radiometry import load_solar_reference, reference_summary
+
 from .geometry import SOLAR_RADIUS_M
-from .synthesize import MURAM_HMI_RADIANCE_SCALE_W_M3_SR
 from .provenance import check_stokes_forward_provenance
+from .synthesize import AIA_RESPONSE_RESOURCE, MURAM_HMI_RADIANCE_SCALE_W_M3_SR
+from .reporting import progress_bar, progress_enabled, timed_stage
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = "PROM3THEUS-MURAM-1"
 EPOCH = "2010-03-24T00:00:00"
@@ -125,7 +141,7 @@ def image_header(geometry, dx_m, dy_m, time_s, iteration, instrument):
     return header
 
 
-def write_hmi_fits(directory, result, *, time_s, iteration):
+def write_hmi_fits(directory, result, *, time_s, iteration, progress=True):
     time = observation_time(time_s)
     stamp = time.tai.to_datetime().strftime("%Y%m%d_%H%M%S")
     prefix = f"hmi.S_720s.{stamp}_TAI.3"
@@ -155,32 +171,36 @@ def write_hmi_fits(directory, result, *, time_s, iteration):
         "spatial_binning": result.spatial_binning,
     }
     paths = []
-    for component, label in enumerate("IQUV"):
-        for index in range(6):
-            local = header.copy()
-            local["STOKES"] = label
-            local["WAVELNTH"] = float(result.observed_wavelength_angstrom[5 - index])
-            # HMI FITS is red-to-blue, whereas synthesis is blue-to-red.
-            image = (
-                result.stokes[..., component, 5 - index].numpy()
-                * MURAM_HMI_RADIANCE_SCALE_W_M3_SR
-            )
-            hdus = [fits.PrimaryHDU(image.astype(np.float32), local)]
-            if component == 0 and index == 0:
-                for name, value in (
-                    ("RAYS", result.geometry.ray_direction),
-                    ("SURFACE", result.geometry.surface_position_m),
-                    ("BASIS", result.geometry.stokes_basis),
-                    ("COORDS", result.geometry.coordinates),
-                    ("QUAD", result.raw_wavelength_angstrom[1:-1]),
-                    ("WEIGHTS", result.response["spectral_weights"]),
-                    ("CONTIN", result.response["continuum_weights"]),
-                ):
-                    hdus.append(array_hdu(name, value.numpy()))
-                hdus.append(metadata_hdu(metadata))
-            path = Path(directory) / f"{prefix}.{label}{index}.fits"
-            write_fits(path, hdus)
-            paths.append(path)
+    with timed_stage(logger, "Iteration %s: writing 24 HMI FITS segments", iteration), progress_bar(
+        total=24, description=f"Iteration {iteration}: HMI FITS", unit="file", enabled=progress,
+    ) as bar:
+        for component, label in enumerate("IQUV"):
+            for index in range(6):
+                local = header.copy()
+                local["STOKES"] = label
+                local["WAVELNTH"] = float(result.observed_wavelength_angstrom[5 - index])
+                # HMI FITS is red-to-blue, whereas synthesis is blue-to-red.
+                image = (
+                    result.stokes[..., component, 5 - index].numpy()
+                    * MURAM_HMI_RADIANCE_SCALE_W_M3_SR
+                )
+                hdus = [fits.PrimaryHDU(image.astype(np.float32), local)]
+                if component == 0 and index == 0:
+                    for name, value in (
+                        ("RAYS", result.geometry.ray_direction),
+                        ("SURFACE", result.geometry.surface_position_m),
+                        ("BASIS", result.geometry.stokes_basis),
+                        ("COORDS", result.geometry.coordinates),
+                        ("QUAD", result.raw_wavelength_angstrom[1:-1]),
+                        ("WEIGHTS", result.response["spectral_weights"]),
+                        ("CONTIN", result.response["continuum_weights"]),
+                    ):
+                        hdus.append(array_hdu(name, value.numpy()))
+                    hdus.append(metadata_hdu(metadata))
+                path = Path(directory) / f"{prefix}.{label}{index}.fits"
+                write_fits(path, hdus)
+                paths.append(path)
+                bar.update()
     return paths
 
 
@@ -292,9 +312,6 @@ def load_hmi_raster(
     segments, headers, stokes, *, reference_time=None, scene_basis_rows=None,
     response_sampler=None, solar_reference=None, require_quality_zero=True,
 ):
-    from prom3theus.instruments.hmi.calibration import hmi_continuum_radiance
-    from prom3theus.rt.radiometry import load_solar_reference, reference_summary
-
     if any(header.get("SYNSCHEM") != SCHEMA for header in headers):
         raise ValueError("Cannot mix synthetic and observed HMI segments")
     if (
@@ -392,59 +409,58 @@ def load_hmi_raster(
             **({"ground_truth_bz_gauss": truth} if truth is not None else {}),
             "observer_los_velocity_m_per_s": torch.zeros(values.shape[:2]),
             **{
-                "instrument_response:" + key: value.clone()
+                "instrument_response:" + key: value[0, 0].clone().expand_as(value)
                 for key, value in response.sample(coords[..., :2]).items()
             },
         },
     )
 
 
-def write_aia_fits(directory, result, geometry, *, time_s, iteration):
+def write_aia_fits(directory, result, geometry, *, time_s, iteration, progress=True):
+    if result.response_resource != AIA_RESPONSE_RESOURCE:
+        raise ValueError("Standard AIA FITS require the standard response resource; use NPZ for custom responses.")
     time = observation_time(time_s)
     paths = []
-    for index, channel in enumerate(result.channels_angstrom):
-        header = image_header(
-            geometry, result.dx_m, result.dy_m, time_s, iteration, "AIA"
-        )
-        header.update(
-            {
-                "WAVELNTH": channel,
-                "WAVEUNIT": "angstrom",
-                "BUNIT": "DN / s",
-                "LVL_NUM": 1.5,
-                "DEGFACT": 1.0,
-                "EXPNORM": True,
-            }
-        )
-        header.add_history(
-            "Reference-epoch response, unity degradation, count rate per reference AIA pixel."
-        )
-        path = (
-            Path(directory)
-            / f"aia.lev1_euv_12s.{time.utc.to_datetime().strftime('%Y-%m-%dT%H%M%S')}.{channel}.fits"
-        )
-        write_fits(
-            path,
-            [
-                fits.PrimaryHDU(result.intensity[..., index].numpy(), header),
-                array_hdu("RAYS", geometry.ray_direction.numpy()),
-                array_hdu("SURFACE", geometry.surface_position_m.numpy()),
-            ],
-        )
-        paths.append(path)
+    with timed_stage(logger, "Iteration %s: writing %d AIA FITS files", iteration, len(result.channels_angstrom)), progress_bar(
+        total=len(result.channels_angstrom), description=f"Iteration {iteration}: AIA FITS", unit="file", enabled=progress,
+    ) as bar:
+        for index, channel in enumerate(result.channels_angstrom):
+            header = image_header(
+                geometry, result.dx_m, result.dy_m, time_s, iteration, "AIA"
+            )
+            header.update(
+                {
+                    "WAVELNTH": channel,
+                    "WAVEUNIT": "angstrom",
+                    "BUNIT": "DN / s",
+                    "LVL_NUM": 1.5,
+                    "DEGFACT": 1.0,
+                    "EXPNORM": True,
+                }
+            )
+            header.add_history(
+                "Reference-epoch response, unity degradation, count rate per reference AIA pixel."
+            )
+            path = (
+                Path(directory)
+                / f"aia.lev1_euv_12s.{time.utc.to_datetime().strftime('%Y-%m-%dT%H%M%S')}.{channel}.fits"
+            )
+            write_fits(
+                path,
+                [
+                    fits.PrimaryHDU(result.intensity[..., index].numpy(), header),
+                    array_hdu("RAYS", geometry.ray_direction.numpy()),
+                    array_hdu("SURFACE", geometry.surface_position_m.numpy()),
+                    metadata_hdu({"native_reference": result.native_reference,
+                                  "response_resource": result.response_resource}),
+                ],
+            )
+            paths.append(path)
+            bar.update()
     return paths
 
 
 def load_aia_fits(path):
-    from prom3theus.instruments.aia_euv.preparation import (
-        RegisteredAIAChannelRaster,
-        _verified_response_contract,
-        AIA_INTENSITY_UNIT,
-        AIA_TIME_REPRESENTATION,
-        AIA_SURFACE_FRAME,
-        AIA_RAY_DIRECTION_CONVENTION,
-    )
-
     with fits.open(path) as hdus:
         header = hdus[0].header
         if (
@@ -457,6 +473,9 @@ def load_aia_fits(path):
             np.array(hdus[0].data, dtype=np.float32, copy=True)
         )
         ray, surface = read_array(hdus, "RAYS"), read_array(hdus, "SURFACE")
+        synthesis_metadata = read_metadata(hdus) if "CONTRACT" in hdus else {}
+        if synthesis_metadata.get("response_resource", AIA_RESPONSE_RESOURCE) != AIA_RESPONSE_RESOURCE:
+            raise ValueError("Synthetic AIA FITS response differs from the standard calibration contract.")
         return RegisteredAIAChannelRaster(
             intensity=intensity,
             valid_mask=torch.isfinite(intensity),
@@ -478,6 +497,7 @@ def load_aia_fits(path):
             ray_direction_convention=AIA_RAY_DIRECTION_CONVENTION,
             provenance={
                 "synthetic": True,
+                **synthesis_metadata,
                 "file": str(path),
                 "response": "reference epoch; no detector aging",
                 "dx_m": float(np.deg2rad(header["CDELT1"] / 3600) * (header["DSUN_OBS"] - header["RSUN_REF"])),
@@ -488,15 +508,16 @@ def load_aia_fits(path):
         )
 
 
-def prepare_aia_fits(paths, output):
-    from prom3theus.instruments.aia_euv.preparation import prepare_aia_observation_store
-
+def prepare_aia_fits(paths, output, *, progress=True):
     def digest():
         value = hashlib.sha256()
-        for path in paths:
-            with Path(path).open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    value.update(block)
+        with timed_stage(logger, "Computing saved AIA FITS checksums"), progress_bar(
+            paths, description="AIA FITS checksums", unit="file", enabled=progress,
+        ) as files:
+            for path in files:
+                with Path(path).open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        value.update(block)
         return value.hexdigest()
 
     return prepare_aia_observation_store(
@@ -505,4 +526,5 @@ def prepare_aia_fits(paths, output):
         raster_backend=load_aia_fits,
         source_files_sha256=digest,
         preparation_dependencies={"synthetic_fits_contract": SCHEMA},
+        progress=progress_enabled(progress),
     )

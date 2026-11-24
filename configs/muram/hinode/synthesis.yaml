@@ -1,6 +1,6 @@
 # Hinode-like 112-point sampling, 21.549 mA spacing; no noise or spatial PSF.
 # Spectral PSF and lines match mhs.yaml and stokes_only.yaml in this directory.
-# Synthesize the full column at native vertical resolution.
+# The synthesis command controls the sampled height range and ray geometry.
 instrument:
   type: hinode_sp
   spectral_psf:

@@ -221,3 +221,29 @@ def test_shuffle_contract_requires_explicit_migration_and_preserves_other_checks
     incompatible = StreamBatchScheduler({"a": Loader({"seed": 0}, batch_size=3)}, "a")
     with pytest.raises(ValueError, match="schedule differs"):
         incompatible.load_state_dict(state, migrate=True)
+
+
+@pytest.mark.parametrize("world_size,steps", [(1, None), (2, None), (2, 2)])
+def test_render_only_reference_preserves_coverage_without_reading_batches(world_size, steps):
+    class UnreadReference(RandomSlots):
+        def iter_random(self, indices):
+            raise AssertionError("render-only streams must not start a reader")
+
+        def __iter__(self):
+            raise AssertionError("render-only streams must not start a reader")
+
+    active = [10, 11] if steps is None else RandomSlots()
+    scheduler = StreamBatchScheduler(
+        {"render": UnreadReference(), "fit": active}, "render",
+        world_size=world_size, steps_per_epoch=steps, inactive_streams=("render",),
+    )
+    batches = list(scheduler)
+    assert len(batches) == len(scheduler)
+    assert all(b["render"] == {} for b in batches)
+    # A weight change can resume from the same slot with that stream now fitting.
+    restored = StreamBatchScheduler(
+        {"render": [0, 1] if steps is None else RandomSlots(), "fit": active},
+        "render", world_size=world_size, steps_per_epoch=steps,
+    )
+    restored.load_state_dict(scheduler.state_dict())
+    assert next(iter(restored))["render"] == (0 if steps is None else steps * world_size)

@@ -257,11 +257,16 @@ class AtmosphereRenderer:
             "Stokes comparison",
         )
 
-    def render_stokes_profiles(self, trainer, outputs, wavelength_angstrom, label):
-        """Show individual signed profiles in atlas units, without loss scaling."""
+    def render_stokes_profiles(
+        self, trainer, outputs, wavelength_angstrom, label, *, radiance_scale_w_m3_sr=None
+    ):
+        """Show individual signed profiles in the observation's radiance units."""
         return self._save_figure(
             trainer,
-            self.stokes_plots.individual_profiles_figure(outputs, wavelength_angstrom, label),
+            self.stokes_plots.individual_profiles_figure(
+                outputs, wavelength_angstrom, label,
+                radiance_scale_w_m3_sr=radiance_scale_w_m3_sr,
+            ),
             f"{label}_stokes_individual_profiles.png",
             "Stokes individual profiles",
         )

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from prom3theus.muram.synthesize import synthesize_hmi, synthesize_stokes
-from prom3theus.muram.atmosphere_builder import build_native_atmosphere, build_stratified_atmosphere
+from prom3theus.muram.atmosphere_builder import build_native_atmosphere
 from prom3theus.muram.observation import MuramStoredObservationData, _describe_data
 from prom3theus.observations.store import ObservationStore
 
@@ -72,13 +72,7 @@ def test_packaged_hinode():
     assert torch.isfinite(result.stokes).all()
 
 
-def test_invalid_optical_depth_and_stride():
-    q = snapshot().synthesis_ready_quantities()
-    q["tau"][0, 0, 3] = 1e20
-    with pytest.raises(ValueError, match="Optical depth"):
-        build_stratified_atmosphere(q, [-5, 0, 1])
-    with pytest.raises(ValueError, match="covered"):
-        build_stratified_atmosphere(snapshot().synthesis_ready_quantities(), [-9, 0, 1])
+def test_invalid_stride():
     with pytest.raises(ValueError, match="stride"):
         synthesize_hmi(snapshot(), stride=0)
 
@@ -88,7 +82,6 @@ def test_legacy_store_runtime(tmp_path, instrument_type):
     from prom3theus.muram import config as _registration  # noqa: F401
     from prom3theus.config import load_config, parse_config
     from prom3theus.application.joint_assembly import build_joint_runtime
-    from prom3theus.application.joint_evaluation import evaluate_joint_runtime
 
     if instrument_type == "hinode":
         import yaml
@@ -103,9 +96,10 @@ def test_legacy_store_runtime(tmp_path, instrument_type):
     ObservationStore.save_sequence(
         store, [result.to_observation_raster()], source_signature="b" * 64
     )
-    preset = "configs/muram/hinode/mhs.yaml" if instrument_type == "hinode" else "configs/muram/sdo/joint.yaml"
+    preset = "configs/muram/hinode/mhs.yaml" if instrument_type == "hinode" else "configs/sdo/hmi_aia_dynamic.yaml"
     raw = load_config(preset).to_dict()
-    # Legacy stores remain supported, but the shipped preset now uses HMI+AIA FITS.
+    raw["scene"]["time_window"] = None
+    raw["synthesis"]["windows"][0].update(coefficient_backend="exact_lte", mapper_checkpoint=None)
     raw["streams"] = raw["streams"][:1]
     raw["streams"][0]["id"] = "muram_synthetic_stokes"
     raw["scene"]["reference_stream"] = "muram_synthetic_stokes"
@@ -130,17 +124,9 @@ def test_legacy_store_runtime(tmp_path, instrument_type):
     raw["diagnostics"]["visualization"]["enabled"] = False
     raw["physics"]["potential_boundary"]["enabled"] = False
     raw["physics"]["potential_boundary"]["photosphere"]["enabled"] = False
-    raw["dry_run"].update(
-        device="cpu",
-        evaluate_gradients=False,
-        gradient_sample_count=2,
-        max_samples_per_stream=2,
-        quadrature_samples=[4, 8],
-    )
+    raw["training"].update(device="cpu", validation_samples_per_stream=2)
     runtime = build_joint_runtime(parse_config(raw, base_directory=tmp_path))
     runtime.model.set_step(5000)
-    evaluated = evaluate_joint_runtime(runtime)
-    assert evaluated.report
     term = runtime.model.terms["muram_synthetic_stokes"]
     loss = term.evaluate_batch(
         runtime.validation_batches["muram_synthetic_stokes"]
@@ -236,7 +222,7 @@ def test_hmi_azimuth_and_geometric_path():
     )
 
     snap = snapshot()
-    result = synthesize_hmi(snap, stride=1, dtype=torch.float64)
+    result = synthesize_hmi(snap, stride=1, dtype=torch.float64, keep_raw_stokes=True)
     atmosphere = build_native_atmosphere(snap.synthesis_ready_quantities())
     # At the equator the toward-observer component of Omega x r is -Omega*y.
     # Include this inertial shift before comparing the independent formal solve.
@@ -321,11 +307,10 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
     }[instrument_type]
     original_synthesize = getattr(synthesis_module, function_name)
     references = []
-    previous_workers = []
 
     def checked_synthesis(current_snapshot, **kwargs):
-        assert current_snapshot.synthesis_columns()._owner.loader is None
-        assert all(not worker.is_alive() for worker in previous_workers)
+        columns = current_snapshot.synthesis_columns()
+        assert not columns._owner.fields
         if references:
             # The previous native data and complete result must be released
             # before the next synthesis starts, not held for a final save.
@@ -340,8 +325,9 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
             if fail_second:
                 raise RuntimeError("injected second snapshot failure")
         result = original_synthesize(current_snapshot, **kwargs)
-        previous_workers[:] = current_snapshot.synthesis_columns()._owner.loader._iterator._workers
         references[:] = [weakref.ref(current_snapshot), weakref.ref(result)]
+        references.extend(weakref.ref(array) for array in columns._owner.fields.values())
+        references.extend(weakref.ref(array) for array in columns.dataset._mappings.values())
         return result
 
     monkeypatch.setattr(synthesis_module, function_name, checked_synthesis)
@@ -374,7 +360,8 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
         return
     main(args)
     assert all(reference() is None for reference in references)
-    assert not list(out.rglob("*.jpg"))
+    assert len(list((out / "diagnostics").glob("*.jpg"))) == 2
+    assert len(list((out / "diagnostics").glob("*.npz"))) == 2
     status = json.loads((out / "synthesis_status.json").read_text())
     assert status["state"] == "complete"
     assert status["completed_iterations"] == [10, 20]
@@ -382,6 +369,9 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
         with np.load(out / "muram_000020.npz") as result:
             assert result["time_s"] == 7200
             assert result["intensity"].shape == (2, 2, 1)
+            reference = json.loads(str(result["metadata_json"].item()))["native_reference"]
+            assert reference["iteration"] == 20
+            assert reference["native_geometry"]["oriented_shape_xyz"] == [2, 2, 15]
     else:
         data = MuramStoredObservationData(out, 1)
         data.setup()
@@ -391,12 +381,21 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
         )
         assert torch.all(data.rasters[0].coordinates[..., 2] == 1)
         assert torch.all(data.rasters[1].coordinates[..., 2] == 2)
+        for iteration, raster in zip((10, 20), data.rasters):
+            reference = raster.metadata["muram_synthesis"]["native_reference"]
+            assert reference["iteration"] == iteration
+            assert reference["source_path"] == str(source.resolve())
 
     def unexpected_synthesis(*args, **kwargs):
         pytest.fail("Completed snapshots must not be synthesized again")
 
     monkeypatch.setattr(synthesis_module, function_name, unexpected_synthesis)
+    overview = out / "diagnostics" / "muram_000010.jpg"
+    saved_maps = overview.with_suffix(".npz").read_bytes()
+    overview.unlink()
     main(args)
+    assert overview.is_file()
+    assert overview.with_suffix(".npz").read_bytes() == saved_maps
     with pytest.raises(ValueError, match="settings changed"):
         main([*args, "--stride", "2"])
     replaced = []
@@ -410,6 +409,12 @@ def test_synthesis_cli(tmp_path, monkeypatch, instrument_type, fail_second):
     main([*args, "--overwrite"])
     assert replaced == [10, 20]
     assert not (out / "obsolete.txt").exists()
+    import os
+    changed = source / "eosT.000010"
+    stat = changed.stat()
+    os.utime(changed, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    with pytest.raises(ValueError, match="Native source identity changed"):
+        main(args)
 
 
 def test_device_selection_and_unavailable_cuda(monkeypatch):
@@ -429,21 +434,6 @@ def test_device_selection_and_unavailable_cuda(monkeypatch):
         resolve_synthesis_device("cuda:2")
 
 
-def test_interpolation_matches_independent_numpy_reference():
-    from prom3theus.muram.atmosphere_builder import _interp_along_last_axis
-
-    rng = np.random.default_rng(42)
-    x = np.cumsum(rng.uniform(0.01, 1, (3, 2, 30)), axis=-1)
-    y = rng.normal(size=x.shape)
-    target = np.linspace(-1, 30, 61)
-    actual = _interp_along_last_axis(target, x, y)
-    expected = np.stack(
-        [
-            np.interp(target, row_x, row_y)
-            for row_x, row_y in zip(x.reshape(-1, 30), y.reshape(-1, 30))
-        ]
-    )
-    np.testing.assert_allclose(actual, expected.reshape(3, 2, -1), atol=1e-14)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")
@@ -506,12 +496,13 @@ def test_float32_preserves_calibrated_profiles(instrument_type):
     q["bz"][:] = 975.0
     for dtype in (torch.float64, torch.float32):
         if instrument_type == "hmi":
-            result = synthesize_hmi(snap, dtype=dtype, progress=False)
+            result = synthesize_hmi(snap, dtype=dtype, progress=False, keep_raw_stokes=True)
         else:
             result = synthesize_stokes(
                 snap,
                 dtype=dtype,
                 progress=False,
+                keep_raw_stokes=True,
                 instrument={
                     "type": "hinode_sp",
                     "spectral_psf": {
@@ -593,6 +584,8 @@ def test_stride_synthesizes_only_selected_native_columns(monkeypatch, kind, stri
                 observed_wavelength_angstrom=np.linspace(6301.1, 6302.8, 31),
                 line_ids=["FeI_6301.5008", "FeI_6302.4932"],
             )
+    if kind != "aia":
+        options["keep_raw_stokes"] = True
     full = synthesize(snap, **options)
     batches = module.column_batches
     processed = []
@@ -631,49 +624,16 @@ def test_stride_synthesizes_only_selected_native_columns(monkeypatch, kind, stri
         )
 
 
-@pytest.mark.parametrize("boundary", ["top", "bottom"])
-def test_tau_reversals_outside_sampling_brackets_do_not_change_atmosphere(boundary):
-    quantities = snapshot().synthesis_ready_quantities()
-    target = np.linspace(-5, 1, 25)
-    reference = build_stratified_atmosphere(quantities, target)
-    # Boundary tau artifacts remain wholly outside the formation interval.
-    extra_tau = (
-        [1e-8, 8e-8, 1e-9, 0.0] if boundary == "top" else [200.0, 500.0, 300.0, 1000.0]
-    )
-    extended = dict(quantities)
-    for name, value in quantities.items():
-        if not isinstance(value, np.ndarray) or value.ndim != 3:
-            continue
-        extra = np.repeat(
-            value[..., -1:] if boundary == "top" else value[..., :1], 4, axis=-1
-        )
-        if name == "tau":
-            extra[:] = extra_tau
-        extended[name] = np.concatenate(
-            (value, extra) if boundary == "top" else (extra, value), axis=-1
-        )
-    actual = build_stratified_atmosphere(extended, target)
-    for name in ("temperature", "gas_pressure", "magnetic_field", "velocity_field"):
-        torch.testing.assert_close(getattr(actual, name), getattr(reference, name))
-    offset = 0 if boundary == "top" else 4 * quantities["ds_m"][2]
-    torch.testing.assert_close(
-        actual.geometric_height_m - offset, reference.geometric_height_m
-    )
 
 
 def test_native_synthesis_does_not_use_tau_labels():
     snap = snapshot()
-    reference = synthesize_hmi(snap, progress=False, batch_size=1)
+    reference = synthesize_hmi(snap, progress=False, batch_size=1, keep_raw_stokes=True)
     snap.synthesis_ready_quantities()["tau"][1, 0, 3] = 1e20
-    actual = synthesize_hmi(snap, progress=False, batch_size=1)
+    actual = synthesize_hmi(snap, progress=False, batch_size=1, keep_raw_stokes=True)
     torch.testing.assert_close(actual.raw_stokes, reference.raw_stokes)
 
 
-def test_reversed_tau_axis_is_not_silently_sorted():
-    quantities = snapshot().synthesis_ready_quantities()
-    quantities["tau"] = quantities["tau"][..., ::-1]
-    with pytest.raises(ValueError, match="not covered"):
-        build_stratified_atmosphere(quantities, [-5, 0, 1])
 
 
 @pytest.mark.parametrize("kind", ["hmi", "hinode", "aia"])
@@ -703,6 +663,8 @@ def test_binning_averages_after_synthesis(monkeypatch, kind, stride):
             observed_wavelength_angstrom=np.linspace(6301.1, 6302.8, 31),
             line_ids=["FeI_6301.5008", "FeI_6302.4932"],
         )
+    if kind != "aia":
+        options["keep_raw_stokes"] = True
     full = synthesize(snap, **options)
     processed = []
     batches = module.column_batches

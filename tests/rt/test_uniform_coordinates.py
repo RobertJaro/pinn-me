@@ -8,7 +8,7 @@ from prom3theus.config import load_config
 from prom3theus.rt import StratifiedAtmosphereModel
 
 
-@pytest.mark.parametrize('configuration', ['configs/sdo/hmi_aia_dynamic.yaml', 'configs/sdo/hmi_dynamic.yaml'])
+@pytest.mark.parametrize('configuration', ['configs/sdo/hmi_aia_dynamic.yaml'])
 def test_dynamic_configs_have_uniform_spatial_metric_and_independent_time(configuration):
     atmosphere = load_config(configuration).atmosphere
     atmosphere = replace(atmosphere, network=replace(atmosphere.network, hidden_dimension=8, hidden_layers=2))

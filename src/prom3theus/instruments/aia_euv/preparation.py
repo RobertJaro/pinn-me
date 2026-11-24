@@ -12,14 +12,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import math
-import numpy as np
-from prom3theus.core.parallel import parallel_map
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar
 
+import numpy as np
 import torch
+from tqdm.auto import tqdm
 
+from prom3theus.core.parallel import parallel_map
 from prom3theus.observations import (
     ImageObservationRaster,
     ImageObservationSpec,
@@ -417,12 +418,10 @@ class _WrittenRaster:
     entry: dict
 
 
-def _written_statistics(directory, rasters, channels):
+def _written_statistics(directory, rasters, channels, *, progress=True):
     """Exact global medians using disk workspace, not all images in RAM."""
-    from tqdm.auto import tqdm
-
     scales = {}
-    for channel in tqdm(channels, desc="AIA normalization", unit="channel"):
+    for channel in tqdm(channels, desc="AIA normalization", unit="channel", disable=not progress):
         entries = [r.entry for r in rasters if r.channel_angstrom == channel]
         def load(entry, field):
             return np.load(directory / entry["arrays"][field]["file"], mmap_mode="r")
@@ -464,6 +463,7 @@ def prepare_aia_observation_store(
     ]
     | None = None,
     observation_id: str = "aia_euv",
+    progress: bool = True,
 ) -> Path:
     """Write images directly to the final directory, then write the manifest.
 
@@ -510,7 +510,8 @@ def prepare_aia_observation_store(
             name, prepared.spatial_shape, entry,
         )
 
-    written = parallel_map(prepare_and_write, enumerate(jobs), description="AIA read / prepare / write")
+    written = parallel_map(prepare_and_write, enumerate(jobs), description="AIA read / prepare / write",
+                           progress=progress)
     if not written:
         raise ValueError("AIA preparation requires at least one raster.")
     source_digest = _source_sha256(source_files_sha256() if callable(source_files_sha256)
@@ -607,7 +608,7 @@ def prepare_aia_observation_store(
         "observation": spec.metadata(),
         "source_files_sha256": source_digest,
         "preparation": preparation_metadata,
-        "objective_statistics": _written_statistics(output, ordered_inputs, resource_channels),
+        "objective_statistics": _written_statistics(output, ordered_inputs, resource_channels, progress=progress),
     }
     return ImageObservationStore.write_manifest(
         output, [raster.entry for raster in ordered_inputs],

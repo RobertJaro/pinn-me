@@ -15,7 +15,9 @@ from prom3theus.inversion.depth_sampling import (
     DepthRefinement, contribution_fine_distances, merge_depth_samples, stokes_interval_proposal,
 )
 from prom3theus.rt.formal_transfer import formal_stokes
+from prom3theus.rt.polarized_exponential import independent_coefficients
 from prom3theus.rt.geometry import position_to_chart_height
+from prom3theus.rt.coefficient_mapper import CoefficientMapper
 from prom3theus.rt.local_coefficients import LTELocalCoefficients
 from prom3theus.rt.opacity import planck_lambda
 from prom3theus.rt.ray_geometry import canonical_basis, sample_shell_characteristic, shell_characteristic, unit_direction
@@ -44,24 +46,22 @@ class LTEWindow(nn.Module):
     an explicit, fixed incoming temperature is configured.
     """
 
-    def __init__(self, atmosphere_model, *, configuration):
+    def __init__(self, atmosphere_model, *, configuration, mapper_spec=None):
         super().__init__()
         # Keep numerical composition independent of the application's schema.
         # Public YAML is validated by config; direct constructors and restored
         # artifacts still enforce the physical/numerical requirements here.
-        self.configuration = dict(depth_count=257, jitter_fraction=0., coarse_to_fine=None, wavelength_chunk_size=16,
+        self.configuration = dict(depth_count=257, jitter_fraction=0., coarse_to_fine=None,
             transfer_precision="float32", shell_height_bounds_megameter=None,
             lateral_halo_megameter=0., incoming_temperature_k=None)
-        allowed = set(self.configuration) | {"id", "line_ids", "radiance_scale", "wavelength_bounds_vacuum_angstrom"}
+        allowed = set(self.configuration) | {"coefficient_backend", "mapper_checkpoint", "id", "line_ids", "radiance_scale", "wavelength_bounds_vacuum_angstrom"}
         unknown = set(configuration) - allowed
         if unknown:
             raise ValueError(f"Unknown LTE synthesis options: {sorted(unknown)}")
         self.configuration.update(copy.deepcopy(dict(configuration)))
         options = SimpleNamespace(**self.configuration)
-        for name, minimum in (("depth_count", 2), ("wavelength_chunk_size", 1)):
-            value = getattr(options, name)
-            if type(value) is not int or value < minimum:
-                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if type(options.depth_count) is not int or options.depth_count < 2:
+            raise ValueError("depth_count must be an integer >= 2")
         if options.transfer_precision not in ("float32", "float64"):
             raise ValueError("transfer_precision must be float32 or float64")
         if (isinstance(options.jitter_fraction, bool)
@@ -85,6 +85,8 @@ class LTEWindow(nn.Module):
             refinement = {"enabled": False}
         if not isinstance(refinement, Mapping) or set(refinement) - {"enabled", "fine_sample_count", "uniform_weight_floor"}:
             raise ValueError("coarse_to_fine requires enabled, fine_sample_count and uniform_weight_floor")
+        # The typed schema serializes omitted fine-sampling options as None.
+        refinement = {key: value for key, value in refinement.items() if key == "enabled" or value is not None}
         if refinement.get("enabled") and not {"fine_sample_count", "uniform_weight_floor"} <= set(refinement):
             raise ValueError("Enabled coarse_to_fine requires fine_sample_count and uniform_weight_floor")
         self.depth_refinement = DepthRefinement(refinement.get("enabled", False),
@@ -94,7 +96,6 @@ class LTEWindow(nn.Module):
             uniform_weight_floor=self.depth_refinement.uniform_weight_floor)
         self.depth_count = options.depth_count
         self.jitter_fraction = options.jitter_fraction
-        self.wavelength_chunk_size = options.wavelength_chunk_size
         self.transfer_precision = options.transfer_precision
         reference = atmosphere_model.solar_radius_m
         self.register_buffer("radiance_scale", reference.new_tensor(options.radiance_scale))
@@ -116,9 +117,33 @@ class LTEWindow(nn.Module):
         self.register_buffer("wavelength_bounds", reference.new_tensor(options.wavelength_bounds_vacuum_angstrom))
         self.coefficients = LTELocalCoefficients(line_ids=options.line_ids).to(reference)
 
+        self.mapper = None
+        backend = getattr(options, "coefficient_backend", "exact_lte")
+        checkpoint = getattr(options, "mapper_checkpoint", None)
+        if backend == "nn_surrogate":
+            if mapper_spec is None:
+                if checkpoint is None:
+                    raise ValueError("nn_surrogate requires a mapper_checkpoint")
+                self.mapper = CoefficientMapper.load(checkpoint)
+            else:
+                # Portable inversion artifacts supply the learned tensors in their state dict.
+                self.mapper = CoefficientMapper.from_saved_spec(mapper_spec)
+            spec = self.mapper.spec
+            if list(options.line_ids) != spec["line_ids"]:
+                raise ValueError("Mapper line list differs from the synthesis window")
+            if bounds[0] < spec["bounds"][0] or bounds[1] > spec["bounds"][1]:
+                raise ValueError("Mapper wavelength support must cover the configured LTE window")
+            self.mapper.to(reference).requires_grad_(False)
+        elif backend != "exact_lte" or checkpoint is not None or mapper_spec is not None:
+            raise ValueError("Invalid coefficient backend or misplaced mapper checkpoint")
+
     @property
     def construction(self):
-        return copy.deepcopy(self.configuration)
+        options = copy.deepcopy(self.configuration)
+        if self.mapper is not None:
+            options.pop("mapper_checkpoint", None)
+            options["mapper_spec"] = copy.deepcopy(self.mapper.spec)
+        return options
 
     def basis(self, direction):
         # Each ray is independent: choose a nonsingular axis for that ray.
@@ -144,6 +169,10 @@ class LTEWindow(nn.Module):
         state = dict(self.atmosphere_model.evaluate_chart_height_points(
             torch.cat((chart, time[..., None]), dim=-1), height))
         state["velocity_field"] = state["velocity_field"] + carrington_rotation_velocity_cartesian(position_m).to(state["velocity_field"])
+        if self.mapper is not None and self.mapper.thermodynamic_input == "mass_density":
+            state["mass_density"] = self.coefficients.plasma_provider.mass_density(
+                state["temperature"], state["gas_pressure"]
+            )
         return state
 
     def sample_rays(self, geometry):
@@ -151,7 +180,7 @@ class LTEWindow(nn.Module):
 
         During training each interior node moves independently within its
         midpoint stratum. Evaluation uses the nominal uniform grid. The same
-        sampled atmosphere is shared by all spectral blocks in this forward.
+        sampled atmosphere is shared by all wavelengths.
         """
         direction = geometry["direction"]
         index = torch.arange(self.depth_count, device=direction.device, dtype=direction.dtype)
@@ -213,6 +242,14 @@ class LTEWindow(nn.Module):
         zero = torch.zeros_like(intensity)
         return torch.stack((intensity, zero, zero, zero), dim=-1)
 
+    def _transfer_coefficients(self, prepared, spectrum):
+        # The exact teacher also serves standalone callers that consume the full matrix.
+        if self.mapper is None:
+            local = self.coefficients.evaluate_spectrum(prepared, spectrum, radiance_scale=self.radiance_scale)
+            return independent_coefficients(local.propagation_m1), local.source
+        local = self.mapper.evaluate_spectrum(prepared, spectrum, radiance_scale=self.radiance_scale, compact=True)
+        return local.propagation_m1, local.source
+
     def forward(self, geometry, wavelength_vacuum_angstrom):
         """Sample -> atmosphere -> local physics -> spectra -> formal integration.
 
@@ -226,8 +263,8 @@ class LTEWindow(nn.Module):
                     else torch.as_tensor(query, device=self.solar_radius_m.device, dtype=self.solar_radius_m.dtype))
             if wave.ndim < 1 or not wave.numel():
                 raise ValueError("Synthesis wavelengths must be finite and nonempty")
-            require_tensor(torch.isfinite(wave).all(), "Synthesis wavelengths must be finite")
-            require_tensor(((wave >= self.wavelength_bounds[0]) & (wave <= self.wavelength_bounds[1])).all(),
+            require_tensor(lambda: torch.isfinite(wave).all(), "Synthesis wavelengths must be finite")
+            require_tensor(lambda: ((wave >= self.wavelength_bounds[0]) & (wave <= self.wavelength_bounds[1])).all(),
                            "Detector spectral queries exceed the configured LTE window")
             batch_shape = geometry["direction"].shape[:-1]
             if wave.ndim != 1 and wave.shape[:-1] != batch_shape:
@@ -235,7 +272,8 @@ class LTEWindow(nn.Module):
             samples = self.sample_rays(geometry)
             atmosphere = self.evaluate_atmosphere(samples.position_m, samples.time_hours,
                 chart=samples.chart_megameter, height=samples.height_m)
-            prepared = self.coefficients.prepare_atmosphere(atmosphere,
+            backend = self.coefficients if self.mapper is None else self.mapper
+            prepared = backend.prepare_atmosphere(atmosphere,
                 direction=samples.direction, stokes_basis=samples.stokes_basis)
             # A singleton depth axis broadcasts per-ray queries without copying
             # any atmospheric point or its continuum interpolation table.
@@ -244,39 +282,25 @@ class LTEWindow(nn.Module):
                     CenteredWavelength(query.origin_angstrom, query.offset_angstrom[..., None, :]))
             else:
                 spectral_query = wave if wave.ndim == 1 else wave[..., None, :]
-            spectrum = self.coefficients.prepare_spectrum(spectral_query)
+            spectrum = backend.prepare_spectrum(spectral_query)
             incoming = self.incoming_stokes(wave, batch_shape, atmosphere["temperature"].dtype)
-            # Build a scalar extinction proposal across the actual spectrum.
-            # Coarse K/source tensors remain in autograd and are reused below.
-            coarse_blocks = None
+            propagation, source = self._transfer_coefficients(prepared, spectrum)
             distance, intervals = samples.distance_m, samples.intervals_m
             if self.depth_refinement.enabled:
-                coarse_blocks = []
-                proposal = torch.zeros_like(samples.intervals_m)
-                for start in range(0, wave.shape[-1], self.wavelength_chunk_size):
-                    local = self.coefficients.evaluate_spectrum(prepared,
-                        spectrum.block(start, start + self.wavelength_chunk_size), radiance_scale=self.radiance_scale)
-                    coarse_blocks.append(local)
-                    proposal = proposal + stokes_interval_proposal(local.propagation_m1, samples.intervals_m)
+                with torch.no_grad():
+                    proposal = stokes_interval_proposal(propagation, intervals)
                 fine, distance, intervals, order = self.refine_rays(geometry, samples, proposal)
                 fine_atmosphere = self.evaluate_atmosphere(fine.position_m, fine.time_hours,
                     chart=fine.chart_megameter, height=fine.height_m)
-                prepared = self.coefficients.prepare_atmosphere(fine_atmosphere,
+                fine_prepared = backend.prepare_atmosphere(fine_atmosphere,
                     direction=fine.direction, stokes_basis=fine.stokes_basis)
-            results = []
-            for block, start in enumerate(range(0, wave.shape[-1], self.wavelength_chunk_size)):
-                stop = start + self.wavelength_chunk_size
-                local = self.coefficients.evaluate_spectrum(prepared, spectrum.block(start, stop),
-                    radiance_scale=self.radiance_scale)
-                propagation, source = local.propagation_m1, local.source
-                if coarse_blocks is not None:
-                    coarse_local = coarse_blocks[block]
-                    propagation = merge_depth_samples(coarse_local.propagation_m1, propagation, order)
-                    source = merge_depth_samples(coarse_local.source, source, order)
-                results.append(formal_stokes(propagation, source, distance,
-                    bottom_boundary=None if incoming is None else incoming[..., start:stop, :],
-                    precision=self.transfer_precision, polarized=True, intervals_m=intervals))
-            return torch.cat(results, dim=-2).transpose(-1, -2)
+                fine_propagation, fine_source = self._transfer_coefficients(fine_prepared, spectrum)
+                propagation = merge_depth_samples(propagation, fine_propagation, order)
+                source = merge_depth_samples(source, fine_source, order)
+
+            stokes = formal_stokes(propagation, source, distance, bottom_boundary=incoming,
+                precision=self.transfer_precision, polarized=True, intervals_m=intervals)
+            return stokes.transpose(-1, -2)
 
 
 __all__ = ["LTEWindow"]

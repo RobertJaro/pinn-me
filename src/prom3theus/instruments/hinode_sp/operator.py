@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from prom3theus.core.validation import require_tensor
+from prom3theus.core.validation import require_tensor, tensor_validation_enabled
 from prom3theus.instruments.base import MagneticAzimuthConvention
 from prom3theus.resources import resource_path, verify_manifest_resource
 
@@ -34,7 +34,7 @@ class HinodeSpectralPSF(nn.Module):
     def __init__(
         self,
         fwhm_angstrom: float,
-        oversample: int = 4,
+        oversample: int = 2,
         truncate_sigma: float = 4.0,
     ) -> None:
         super().__init__()
@@ -108,8 +108,8 @@ class HinodeSpectralPSF(nn.Module):
             raise ValueError(
                 f"{name} must be a one-dimensional grid with at least two points."
             )
-        require_tensor(torch.isfinite(wavelength).all(), f"{name} must contain only finite values.")
-        require_tensor((wavelength[1:] > wavelength[:-1]).all(), f"{name} must be strictly increasing.")
+        require_tensor(lambda: torch.isfinite(wavelength).all(), f"{name} must contain only finite values.")
+        require_tensor(lambda: (wavelength[1:] > wavelength[:-1]).all(), f"{name} must be strictly increasing.")
 
     def synthesis_grid(self, observed_wavelength_angstrom) -> torch.Tensor:
         """Return a uniform oversampled grid enclosing the observations."""
@@ -140,7 +140,7 @@ class HinodeSpectralPSF(nn.Module):
             1e-4 * reference_spacing.abs(),
             8 * torch.finfo(wavelength.dtype).eps * wavelength.abs().max(),
         )
-        require_tensor((torch.abs(spacing - reference_spacing) <= tolerance).all(),
+        require_tensor(lambda: (torch.abs(spacing - reference_spacing) <= tolerance).all(),
                        "The synthesis wavelength grid must be uniform.")
         radius = max(
             1,
@@ -181,7 +181,7 @@ class HinodeSpectralPSF(nn.Module):
         self._validate_wavelength(synthesis, "synthesis_wavelength_angstrom")
         self._validate_wavelength(observed, "observed_wavelength_angstrom")
         epsilon = 8 * torch.finfo(synthesis.dtype).eps
-        require_tensor((observed[0] >= synthesis[0] - epsilon)
+        require_tensor(lambda: (observed[0] >= synthesis[0] - epsilon)
                        & (observed[-1] <= synthesis[-1] + epsilon),
                        "Observed wavelengths must lie inside the synthesis grid.")
         kernel, radius = self._kernel(synthesis)
@@ -215,7 +215,7 @@ class HinodeSpectralPSF(nn.Module):
             )
         if not stokes.is_floating_point():
             raise ValueError("stokes must contain finite real floating-point values.")
-        require_tensor(torch.isfinite(stokes).all(), "stokes must contain finite real floating-point values.")
+        require_tensor(lambda: torch.isfinite(stokes).all(), "stokes must contain finite real floating-point values.")
         synthesis = torch.as_tensor(
             synthesis_wavelength_angstrom,
             device=stokes.device,
@@ -230,20 +230,21 @@ class HinodeSpectralPSF(nn.Module):
             observed = observed.double()
         self._validate_wavelength(synthesis, "synthesis_wavelength_angstrom")
         self._validate_wavelength(observed, "observed_wavelength_angstrom")
-        expected_synthesis = self._prepared_synthesis_wavelength.to(synthesis)
-        expected_observed = self._prepared_observed_wavelength.to(observed)
-        tolerance = 8 * max(torch.finfo(synthesis.dtype).eps,
-                            torch.finfo(observed.dtype).eps) * expected_synthesis.abs().max()
         if (
-            synthesis.shape != expected_synthesis.shape
-            or observed.shape != expected_observed.shape
+            synthesis.shape != self._prepared_synthesis_wavelength.shape
+            or observed.shape != self._prepared_observed_wavelength.shape
         ):
             raise ValueError(
                 "Forward wavelength grids do not match the prepared Hinode response."
             )
-        require_tensor((torch.abs(synthesis - expected_synthesis) <= tolerance).all()
-                       & (torch.abs(observed - expected_observed) <= tolerance).all(),
-                       "Forward wavelength grids do not match the prepared Hinode response.")
+        if tensor_validation_enabled():
+            expected_synthesis = self._prepared_synthesis_wavelength.to(synthesis)
+            expected_observed = self._prepared_observed_wavelength.to(observed)
+            tolerance = 8 * max(torch.finfo(synthesis.dtype).eps,
+                                torch.finfo(observed.dtype).eps) * expected_synthesis.abs().max()
+            require_tensor(lambda: (torch.abs(synthesis - expected_synthesis) <= tolerance).all()
+                           & (torch.abs(observed - expected_observed) <= tolerance).all(),
+                           "Forward wavelength grids do not match the prepared Hinode response.")
         if stokes.shape[-1] != self._prepared_synthesis_count:
             raise ValueError(
                 "stokes wavelength dimension does not match the synthesis grid."

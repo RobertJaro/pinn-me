@@ -9,7 +9,7 @@
 test "$#" -eq 0 || exit 2
 cd /glade/u/home/rjarolim/projects/lte
 
-# Other supported SDO presets are in configs/sdo/.
+# Dynamic HMI inversion with AIA EUV rendering.
 
 PYTHONPATH=src python -m prom3theus.cli.main invert \
-  configs/sdo/hmi_aia_dynamic_energy.yaml
+  configs/sdo/hmi_aia_dynamic.yaml

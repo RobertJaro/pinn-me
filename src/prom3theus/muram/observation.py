@@ -12,9 +12,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from prom3theus.observations.contracts import ObservationSpec
-from prom3theus.observations.contracts import CARRINGTON_REGISTERED_RELATIVE_VELOCITY
+from prom3theus.observations.contracts import (
+    CARRINGTON_REGISTERED_RELATIVE_VELOCITY,
+    ObservationSpec,
+)
 from prom3theus.observations.store import MANIFEST_FILENAME, ObservationStore
+
+from .binning import bin_stokes_raster, validate_binning
 from .provenance import check_stokes_forward_provenance
 
 
@@ -22,8 +26,6 @@ class MuramStoredObservationData:
     """Adapter-facing wrapper around a pre-built ``ObservationStore`` directory."""
 
     def __init__(self, directory, validation_raster_index: int, binning: int = 1):
-        from .binning import validate_binning
-
         self.binning = validate_binning(binning)
         self.directory = Path(directory)
         self._validation_raster_index = int(validation_raster_index)
@@ -39,7 +41,6 @@ class MuramStoredObservationData:
                 f"validation_raster_index={self._validation_raster_index} is out of "
                 f"range for {len(rasters)} raster(s) in {self.directory}."
             )
-        from .binning import bin_stokes_raster
 
         self.rasters = [bin_stokes_raster(raster, self.binning) for raster in rasters]
         self.raster_names = names
@@ -88,7 +89,7 @@ def _describe_data(data: MuramStoredObservationData) -> ObservationSpec:
         # and achieved optical depth need not be identical at every time.
         result = {
             key: item for key, item in value.items()
-            if key not in {"native_log_tau_grid", "bottom_boundary"}
+            if key not in {"native_log_tau_grid", "bottom_boundary", "native_reference"}
         }
         if "bottom_boundary" in value:
             result["bottom_boundary"] = {

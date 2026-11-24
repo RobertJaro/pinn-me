@@ -6,16 +6,39 @@ device-side flags and inspect them together, without per-operation host waits.
 The context stores flags only, never model states, and is reset on every exit.
 """
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 import torch
 
 _PENDING = ContextVar('tensor_validation_pending', default=None)
+_ENABLED = ContextVar("tensor_validation_enabled", default=True)
 
 
-def require_tensor(condition: torch.Tensor, message: str, *, error=ValueError) -> None:
-    """Require a scalar Boolean tensor, immediately or at the enclosing boundary."""
+@contextmanager
+def skip_tensor_validation():
+    """Skip numerical predicates during an optimizer batch, including nested forwards."""
+    token = _ENABLED.set(False)
+    try:
+        yield
+    finally:
+        _ENABLED.reset(token)
+
+
+def tensor_validation_enabled() -> bool:
+    return _ENABLED.get()
+
+
+def require_tensor(condition: Callable[[], torch.Tensor] | torch.Tensor, message: str, *, error=ValueError) -> None:
+    """Evaluate a numerical check now and, when deferred, inspect its flag at exit.
+
+    Pass a predicate for runtime checks so optimizer batches skip its GPU work.
+    """
+    if not tensor_validation_enabled():
+        return
+    if callable(condition):
+        condition = condition()
     if condition.dtype != torch.bool or condition.numel() != 1:
         raise TypeError('Tensor validity conditions must be scalar Boolean tensors')
     pending = _PENDING.get()
@@ -35,7 +58,7 @@ def deferred_validation():
     indexing bounds and other checks needed to execute safely must remain eager.
     Nested contexts share their outer validation boundary.
     """
-    if _PENDING.get() is not None:
+    if not tensor_validation_enabled() or _PENDING.get() is not None:
         yield
         return
     pending = []

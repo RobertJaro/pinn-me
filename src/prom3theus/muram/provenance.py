@@ -7,7 +7,9 @@ import json
 import warnings
 from importlib.resources import files
 
-from prom3theus.resources import file_sha256, resource_path
+from prom3theus.resources import (
+    AIA_TEMPERATURE_RESPONSE_RESOURCE, file_sha256, resource_path, resolve_resource_reference,
+)
 
 STOKES_FORWARD_CONTRACT_VERSION = 1
 
@@ -18,6 +20,7 @@ _FORWARD_SOURCES = (
     "rt/atomic.py",
     "rt/eos.py",
     "rt/geometry.py",
+    "rt/ray_geometry.py",
     "rt/opacity.py",
     "rt/plasma.py",
     "rt/polarization.py",
@@ -45,6 +48,11 @@ _FORWARD_RESOURCES = (
 )
 
 
+_INSTRUMENT_SOURCES = {
+    "hmi_filter_profiles": ("instruments/hmi/operator.py", "hmi_stokes/instrument_hmi.json"),
+    "hinode_sp": ("instruments/hinode_sp/operator.py", "hinode_sp/instrument_hinode_sp.json"),
+}
+
 class SyntheticForwardModelWarning(UserWarning):
     """Stored synthetic targets do not establish current forward-model closure."""
 
@@ -62,16 +70,7 @@ def stokes_forward_provenance(instrument_type):
     differ. A mismatch signals that closure must be checked, not that spectra
     necessarily changed. No git checkout or network access is required.
     """
-    instrument = {
-        "hmi_filter_profiles": (
-            "instruments/hmi/operator.py",
-            "hmi_stokes/instrument_hmi.json",
-        ),
-        "hinode_sp": (
-            "instruments/hinode_sp/operator.py",
-            "hinode_sp/instrument_hinode_sp.json",
-        ),
-    }
+    instrument = _INSTRUMENT_SOURCES
     if instrument_type not in instrument:
         raise ValueError(f"Unsupported synthetic Stokes instrument: {instrument_type}")
     source, resource = instrument[instrument_type]
@@ -133,3 +132,53 @@ def check_stokes_forward_provenance(stored, instrument_type):
         )
         return {**result, "status": "mismatch"}
     return {**result, "status": "matched"}
+
+
+_AIA_SOURCES = (
+    "core/constants.py",
+    "rt/_interpolation.py",
+    "rt/atomic.py",
+    "rt/eos.py",
+    "rt/optically_thin.py",
+    "instruments/aia_euv/operator.py",
+    "instruments/aia_euv/response.py",
+)
+
+
+def synthesis_run_provenance(instrument_types, *, aia_response_resource=AIA_TEMPERATURE_RESPONSE_RESOURCE):
+    """Identify all generators in one run before any output can be replaced.
+
+    This hashes packaged code and physical resources, never native MURaM cubes.
+    MURaM modules are discovered as a group so splitting the batch pipeline into
+    new modules cannot accidentally omit their implementation from the contract.
+    """
+    instrument_types = tuple(sorted(set(instrument_types)))
+    if not instrument_types or any(name not in (*_INSTRUMENT_SOURCES, "aia_euv")
+                                   for name in instrument_types):
+        raise ValueError(f"Unsupported synthesis instruments: {instrument_types}")
+    package = files("prom3theus")
+    sources = {f"muram/{path.name}" for path in package.joinpath("muram").iterdir()
+               if path.name.endswith(".py")}
+    resources = set(_FORWARD_RESOURCES)
+    for name in instrument_types:
+        if name == "aia_euv":
+            sources.update(_AIA_SOURCES)
+        else:
+            sources.update(_FORWARD_SOURCES)
+            source, resource = _INSTRUMENT_SOURCES[name]
+            sources.add(source)
+            resources.add(resource)
+    resource_hashes = {name: file_sha256(resource_path(name)) for name in sorted(resources)}
+    if "aia_euv" in instrument_types:
+        resource_hashes[aia_response_resource] = file_sha256(
+            resolve_resource_reference(aia_response_resource)
+        )
+    document = {
+        "contract_version": 1,
+        "instrument_types": list(instrument_types),
+        "implementation_sha256": {
+            name: file_sha256(package.joinpath(*name.split("/"))) for name in sorted(sources)
+        },
+        "resource_sha256": resource_hashes,
+    }
+    return {**document, "fingerprint_sha256": _digest(document)}

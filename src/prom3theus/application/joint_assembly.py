@@ -47,7 +47,7 @@ from .joint_streams import (
     _joint_observation_bounds,
     _observation_times_hours,
 )
-from .runtime import _device, _move_value, state_dict_sha256
+from .runtime import _device, _move_value
 
 
 from .data import _startup_stage
@@ -153,7 +153,6 @@ def _default_shared_terms_builder(
     *, summaries=None,
 ) -> SharedTermAssembly:
     geometry = config.atmosphere.geometry
-    height_power = config.physics.collocation.height_sampling_power
     observation_bounds = (_joint_observation_bounds(streams, scene) if summaries is None
                           else summaries["observation_bounds"])
     full_domain = SphericalShellDomain.from_observation_bounds(
@@ -166,33 +165,23 @@ def _default_shared_terms_builder(
             geometry.line_formation_outer_height_megameter,
         )
     )
-    equations = config.physics.equations.to_dict()
-    physics_active = any(
-        item["enabled"] and item["weight"] > 0.0 for item in equations.values()
-    )
-    gravity_required = any(
-        equations[name]["enabled"] and equations[name]["weight"] > 0.0
-        for name in (
-            "hydrostatic_equilibrium",
-            "magnetohydrostatic_equilibrium",
-            "momentum",
-        )
-    )
-    gravity = _reference_gravity(resources, required=gravity_required)
+    equations = config.physics.equations.to_dict() if config.physics is not None else {}
     terms: dict[str, SharedObjectiveTerm] = {}
     physics_metadata = None
-    if physics_active:
+    if any(equation["enabled"] for equation in equations.values()):
+        gravity_required = any(equations[name]["enabled"] for name in (
+            "hydrostatic_equilibrium", "magnetohydrostatic_equilibrium", "momentum",
+        ))
+        gravity = _reference_gravity(resources, required=gravity_required)
         physics = build_physics_assembly(
             _physics_options(config, full_domain, gravity),
             reference_gravity_m_per_s2=gravity,
         )
-        # Keep the assembled objective training-ready.  The setup-only
-        # evaluation temporarily disables higher-order derivative graphs below.
         terms["physics"] = PhysicsConstraintTerm(physics)
         physics_metadata = physics.model_configuration()
     potential_metadata = None
-    potential = config.physics.potential_boundary
-    if potential.enabled:
+    if config.physics is not None and config.physics.potential_boundary.enabled:
+        potential = config.physics.potential_boundary
         stokes_streams = {
             name: loaded for name, loaded in streams.items()
             if loaded.prepared.descriptor.observation_kind == "stokes"
@@ -247,12 +236,16 @@ def _default_shared_terms_builder(
             time_hours=sample["time_hours"],
             component_weights=weights,
         )
+    sampling_options = {}
+    if config.physics is not None:
+        sampling = config.physics.collocation
+        sampling_options = dict(height_power=sampling.height_sampling_power, volume_sampling=sampling.volume_sampling)
     return SharedTermAssembly(
         terms=terms,
         metadata={
             "observation_bounds": observation_bounds,
-            "full_domain": full_domain.metadata(height_power=height_power),
-            "line_formation_domain": line_domain.metadata(height_power=height_power),
+            "full_domain": full_domain.metadata(**sampling_options),
+            "line_formation_domain": line_domain.metadata(**sampling_options),
             "physics": physics_metadata,
             "potential_boundary": potential_metadata,
         },
@@ -265,6 +258,7 @@ def build_joint_runtime(
     rebuild_observations: bool = False,
     factories: JointRunnerFactories | None = None,
     for_training: bool = False,
+    before_data_handoff=None,
 ) -> JointRuntime:
     """Load every stream and assemble one shared, unfitted atmosphere."""
 
@@ -296,13 +290,14 @@ def build_joint_runtime(
             config, resources, load_stream, build_scene,
             rebuild_observations=rebuild_observations, for_training=for_training,
             compute_summaries=factories.shared_terms_builder is None,
+            before_handoff=before_data_handoff,
         )
     loaded, scene = data_module.streams, data_module.scene
     if for_training:
         from prom3theus.observations.bulk import configure_readers
         configure_readers(config.training.reader_workers)
-    controls = config.training if for_training else config.dry_run
-    device = _device(controls.device)
+    device = _device(config.training.device if config.training else "auto")
+    validation_samples = config.training.validation_samples_per_stream if config.training else 4096
     import os
     if device.type == "cuda" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
         import torch
@@ -346,11 +341,7 @@ def build_joint_runtime(
             stream.id: _move_value(
                 deterministic_validation_batch(
                     loaded[stream.id].data_module,
-                    max_samples=(
-                        controls.validation_samples_per_stream
-                        if for_training
-                        else controls.max_samples_per_stream
-                    ),
+                    max_samples=validation_samples,
                 ),
                 device,
             )
@@ -366,5 +357,4 @@ def build_joint_runtime(
         validation_batches=MappingProxyType(validation_batches),
         device=device,
         shared_metadata=shared.metadata,
-        state_sha256_at_build=None if for_training else state_dict_sha256(model),
     )

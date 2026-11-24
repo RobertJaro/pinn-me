@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from prom3theus.config.joint_schema import ObservationStreamConfig
@@ -19,6 +20,12 @@ def _stokes_instrument_options(
     )
     maximum = float(instrument.pop("maximum_line_of_sight_velocity_correction_m_per_s"))
     for name, value in specification.instrument_options.items():
+        if (
+            instrument["type"] == "hinode_sp" and name == "spectral_psf"
+            and isinstance(value, Mapping) and "oversample" in value
+        ):
+            # The inversion chooses its own integration grid for the same detector PSF.
+            value = {**value, "oversample": instrument[name]["oversample"]}
         if name in instrument and instrument[name] != value:
             raise ValueError(
                 f"Configured instrument option {name!r} conflicts with the observation."

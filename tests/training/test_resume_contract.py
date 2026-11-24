@@ -314,11 +314,11 @@ def test_sampling_migration_rebuilds_only_derived_buffers_and_keeps_same_geometr
     assert checkpoint["state_dict"][prefix + "_extra_state"]["last_update"] == -1
 
 
-def _formal_window_contract(chunk_size=64):
+def _formal_window_contract():
     document = contract()
     window = {
         'id': 'fe', 'line_ids': ['FeI_6302.4932'],
-        'depth_count': 257, 'wavelength_chunk_size': chunk_size,
+        'depth_count': 257,
         'transfer_precision': 'float64',
         'wavelength_bounds_vacuum_angstrom': [6300., 6307.],
         'shell_height_bounds_megameter': [-1., 1.5],
@@ -329,17 +329,14 @@ def _formal_window_contract(chunk_size=64):
     return document
 
 
-def test_resume_allows_spectral_batch_changes_without_mutating_archived_contract():
-    previous = _formal_window_contract(64)
-    current = _formal_window_contract(32)
-    recorded_previous, recorded_current = deepcopy(previous), deepcopy(current)
+def test_resume_ignores_legacy_wavelength_batch_size_without_mutating_archived_contract():
+    current = _formal_window_contract()
+    previous = deepcopy(current)
+    previous['configuration']['synthesis']['windows'][0]['wavelength_chunk_size'] = 64
+    previous['synthesis_windows']['fe']['wavelength_chunk_size'] = 64
+    recorded = deepcopy(previous)
     assert _scientific_contract(previous) == _scientific_contract(current)
-    assert previous == recorded_previous
-    assert current == recorded_current
-    # Missing operational defaults also mean the same scientific model.
-    current['configuration']['synthesis']['windows'][0].pop('wavelength_chunk_size')
-    current['synthesis_windows']['fe'].pop('wavelength_chunk_size')
-    assert _scientific_contract(previous) == _scientific_contract(current)
+    assert previous == recorded
 
 
 @pytest.mark.parametrize('location', ['configuration', 'construction'])
@@ -379,3 +376,12 @@ def test_missing_refinement_preserves_old_windows_but_enabling_changes_contract(
     assert _scientific_contract(previous) == _scientific_contract(current)
     current['configuration']['synthesis']['windows'][0]['coarse_to_fine']['enabled'] = True
     assert _scientific_contract(previous) != _scientific_contract(current)
+
+
+def test_stokes_only_resume_accepts_former_inactive_physics_block():
+    old = contract()
+    old["configuration"]["physics"]["potential_boundary"]["enabled"] = False
+    old["configuration"]["physics"]["equations"]["divergence"]["enabled"] = False
+    new = deepcopy(old)
+    new["configuration"]["physics"] = None
+    assert _scientific_contract(old) == _scientific_contract(new)

@@ -39,11 +39,6 @@ SDO_DOWNLOAD = PROJECT_ROOT / "scripts" / "sdo" / "download.sh"
 SDO_PREPARE = PROJECT_ROOT / "scripts" / "sdo" / "prepare.sh"
 SDO_RUN = PROJECT_ROOT / "scripts" / "sdo" / "run.sh"
 SCRIPTS = (HMI_DOWNLOAD, HMI_PREPARE, HMI_RUN, HINODE_RESOURCES, HINODE_RUN)
-# MURaM validation tooling: unpack_snapshots.sh is a Python script (`.sh`
-# only by extension, per its own naming) that stages raw MURaM archives, so
-# it does not go through the static-bash checks below; the other two follow
-# the same fixed, argument-rejecting, prom3theus.muram.cli-dispatching
-# pattern as the SCRIPTS tuple, just against a different CLI entry point.
 MURAM_UNPACK = PROJECT_ROOT / "scripts" / "muram" / "unpack_snapshots.sh"
 MURAM_SYNTHESIZE = PROJECT_ROOT / "scripts" / "muram" / "synthesize_snapshots.sh"
 MURAM_RUN = PROJECT_ROOT / "scripts" / "muram" / "run_inversion.sh"
@@ -101,9 +96,10 @@ def test_scripts_are_executable_static_bash_without_dispatch_or_overwrite():
         "scripts/hmi/prepare.sh",
         "scripts/hmi/run.sh",
         "scripts/muram/run_inversion.sh",
+        "scripts/muram/synthesize_rays.sh",
         "scripts/muram/synthesize_snapshots.sh",
+        "scripts/muram/train_surrogate.sh",
         "scripts/muram/unpack_snapshots.sh",
-        "scripts/muram_hinode/check_setup.sh",
         "scripts/muram_hinode/run.sh",
         "scripts/muram_hinode/run_stokes_only.sh",
         "scripts/muram_hinode/synthesize.sh",
@@ -225,7 +221,7 @@ def test_sdo_commands_are_fixed_and_minimal(tmp_path):
         ],
     ]
     assert _run(SDO_RUN, tmp_path / "run") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_aia_dynamic_energy.yaml"],
+        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_aia_dynamic.yaml"],
     ]
 
 
@@ -283,7 +279,8 @@ def test_hmi_preparation_commands_are_fixed(tmp_path):
 
 def test_run_commands_are_separate_and_fixed(tmp_path):
     assert _run(HMI_RUN, tmp_path / "hmi") == [
-        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_dynamic.yaml"],
+        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_aia_dynamic.yaml"],
+        ["-m", "prom3theus.cli.main", "invert", "configs/sdo/hmi_aia_energy.yaml"],
         [
             "-m",
             "prom3theus.cli.main",
@@ -312,9 +309,41 @@ def test_run_commands_are_separate_and_fixed(tmp_path):
 
 def test_muram_inversion_launches_configured_runs(tmp_path):
     assert _run(MURAM_RUN, tmp_path) == [
-        ["-m", "prom3theus.muram.cli", "invert", "configs/muram/sdo/joint.yaml"],
-        ["-m", "prom3theus.muram.cli", "invert", "configs/muram/sdo/mhs.yaml"],
+        ["-m", "prom3theus.muram.cli", "invert", "configs/muram/hinode/stokes_only.yaml"],
     ]
+
+
+def test_muram_hinode_synthesis_mapper_and_inversion_share_artifacts(tmp_path):
+    import yaml
+
+    script = PROJECT_ROOT / "scripts/muram/train_surrogate.sh"
+    assert os.access(script, os.X_OK)
+    (training,) = _run(script, tmp_path / "training")
+    assert training == ["-m", "prom3theus.surrogate", "--config", "configs/muram/hinode/surrogate.yaml"]
+    (synthesis,) = _run(PROJECT_ROOT / "scripts/muram/synthesize_ar11158.pbs", tmp_path / "synthesis")
+    assert synthesis[:3] == ["-m", "prom3theus.muram.cli", "synthesize"]
+    assert synthesis[synthesis.index("--inversion-depth-grid") + 1] == "configs/muram/hinode/mhs.yaml"
+    assert float(synthesis[synthesis.index("--photosphere-height-megameters") + 1]) == 7.5
+    assert synthesis[synthesis.index("--output-format") + 1] == "store"
+    from prom3theus.surrogate.cli import parse_options
+
+    window_config = PROJECT_ROOT / training[-1]
+    run = parse_options(["--config", str(window_config)])
+    assert run.source_path == Path(synthesis[synthesis.index("--source-path") + 1])
+    assert run.iteration == int(synthesis[synthesis.index("--iterations") + 1])
+    assert run.instrument_config == PROJECT_ROOT / synthesis[synthesis.index("--instrument-config") + 1]
+    detector = yaml.safe_load(run.instrument_config.read_text())
+    surrogate = yaml.safe_load(window_config.read_text())
+    for preset in (window_config.with_name("stokes_only.yaml"), window_config.with_name("mhs.yaml")):
+        config = yaml.safe_load(preset.read_text())
+        window, = config["synthesis"]["windows"]
+        stream, = config["streams"]
+        assert window["coefficient_backend"] == "exact_lte"
+        assert window.get("mapper_checkpoint") is None
+        assert window["line_ids"] == surrogate["line_ids"] == detector["line_ids"]
+        assert window["wavelength_bounds_vacuum_angstrom"] == surrogate["wavelength_bounds_vacuum_angstrom"]
+        assert stream["data_term"]["instrument"] == detector["instrument"]
+        assert stream["observation"]["directory"] == synthesis[synthesis.index("--out") + 1]
 
 
 def test_hinode_resource_command_is_fixed(tmp_path):

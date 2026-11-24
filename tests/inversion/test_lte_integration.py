@@ -1,15 +1,17 @@
 """End-to-end atmosphere gradients through polarized formal transfer."""
 import pytest
 import torch
+from prom3theus.rt.polarized_exponential import propagation_matrix
 from prom3theus.rt import StratifiedAtmosphereModel
 from prom3theus.inversion.lte import LTEWindow
 from prom3theus.inversion.data_terms.stokes import StokesObservationTerm
 from prom3theus.inversion.joint import JointForwardModel
 
-def make_system(magnetic_representation="direct", *, dtype=torch.float32, **window_options):
+def make_system(magnetic_representation="direct", *, dtype=torch.float32, magnetic_reference_height=None, **window_options):
     atmosphere = StratifiedAtmosphereModel(
         shell_height_bounds_megameter=(1.5, -1.),
         magnetic_representation=magnetic_representation,
+        magnetic_reference_height_megameter=magnetic_reference_height,
         spatial_coordinate_scale_megameter=(10., 10.),
         scene_geometry_config={"solar_radius_m": 695700000., "scene_basis": torch.eye(3)},
         model_config={"type": "siren", "dim": 8, "n_layers": 1,
@@ -17,7 +19,7 @@ def make_system(magnetic_representation="direct", *, dtype=torch.float32, **wind
     ).to(dtype=dtype)
     config = dict(id="fe", line_ids=["FeI_6302.4932"],
                   wavelength_bounds_vacuum_angstrom=[6300.,6307.], radiance_scale=1e13,
-                  depth_count=33, wavelength_chunk_size=8)
+                  depth_count=33)
     config.update(window_options)
     window = LTEWindow(atmosphere, configuration=config)
     term = StokesObservationTerm(
@@ -52,13 +54,12 @@ def test_observation_loss_directly_trains_atmosphere_without_radiation_parameter
     assert any(g.abs().max() > 0 for g in gradients)
 
 
-def test_per_ray_spectral_queries_and_chunking_agree_with_individual_rays():
+def test_batched_spectral_queries_agree_with_individual_rays():
     _, window, term, batch = make_system()
     window.eval()
     batch["removed_solar_los_velocity_m_per_s"] = torch.tensor([-1000., 1000.])
     with torch.no_grad():
         actual = term.predict(batch)
-        window.wavelength_chunk_size = 1000
         expected = torch.cat([term.predict({k: v[i:i+1] for k, v in batch.items()}) for i in range(2)])
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
@@ -78,10 +79,11 @@ def test_detector_spin_two_rotation():
     torch.testing.assert_close(rotated[:, 2], -s2*original[:, 1]+c2*original[:, 2])
 
 
-def test_one_optimizer_step_updates_atmosphere():
+def test_one_optimizer_step_updates_atmosphere(monkeypatch):
     from prom3theus.config.joint_schema import JointTrainingConfig
     from prom3theus.training.joint import JointInversionModule
-    atmosphere, window, term, batch = make_system()
+    atmosphere, window, term, batch = make_system(
+        coarse_to_fine=dict(enabled=True, fine_sample_count=5, uniform_weight_floor=.05))
     from prom3theus.inversion.objective import StokesObjective
     term.objective = StokesObjective(stokes_scales={"I": 1., "Q": .1, "U": .1, "V": .1})
     model = JointForwardModel(atmosphere, {"stokes": term}, {"stokes": 1.}, synthesis_windows={"fe": window})
@@ -89,8 +91,16 @@ def test_one_optimizer_step_updates_atmosphere():
     module.log = lambda *args, **kwargs: None
     before = [p.detach().clone() for p in atmosphere.parameters()]
     optimizer = module.configure_optimizers()["optimizer"]
-    loss = module.training_step({"stokes": batch}, 0)
-    loss.backward()
+    def reject_host_read(*args, **kwargs):
+        pytest.fail("Training read a tensor on the host")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "cpu", reject_host_read)
+        patch.setattr(torch.Tensor, "item", reject_host_read)
+        patch.setattr(torch.Tensor, "__bool__", reject_host_read)
+        loss = module.training_step({"stokes": batch}, 0)
+        loss.backward()
+        module.on_after_backward()
     optimizer.step()
     assert any(not torch.equal(p, old) for p, old in zip(atmosphere.parameters(), before))
 
@@ -103,23 +113,47 @@ def test_differentiable_instrument_wavelength_calibration():
     assert grad is not None and torch.isfinite(grad) and grad != 0
 
 
-def test_all_depths_use_one_atmosphere_network_pass_even_with_spectral_chunks():
-    atmosphere, window, term, batch = make_system(jitter_fraction=1.)
-    window.wavelength_chunk_size = 2
-    inputs = []
-    handle = atmosphere.network.register_forward_pre_hook(lambda module, args: inputs.append(args[0].shape))
+@pytest.mark.parametrize("fine_count", [0, 5])
+@pytest.mark.parametrize("fixed_magnetic_height", [False, True])
+def test_full_ray_batch_and_spectrum_per_sampling_stage(monkeypatch, fine_count, fixed_magnetic_height):
+    from unittest.mock import patch
+    from prom3theus.rt.formal_transfer import formal_stokes
+
+    refinement = dict(enabled=True, fine_sample_count=fine_count, uniform_weight_floor=.05)
+    atmosphere, window, _, batch = make_system(
+        depth_count=8, coarse_to_fine=refinement if fine_count else None,
+        magnetic_reference_height=.15 if fixed_magnetic_height else None)
+    geometry = window.boundary_queries(batch["coordinates"], batch["ray_direction"])
+    ray_count = len(batch["coordinates"])
+    wave = torch.linspace(6301., 6303., 71)
+    network_points, coefficient_shapes = [], []
+    evaluate = window.coefficients.evaluate_spectrum
+
+    def record_spectrum(*args, **kwargs):
+        local = evaluate(*args, **kwargs)
+        coefficient_shapes.append(local.source.shape)
+        return local
+
+    monkeypatch.setattr(window.coefficients, "evaluate_spectrum", record_spectrum)
+    handle = atmosphere.network.register_forward_pre_hook(
+        lambda module, args: network_points.append(args[0].shape[0]))
     try:
-        term.predict(batch)
+        with patch("prom3theus.inversion.lte.formal_stokes", wraps=formal_stokes) as transfer:
+            output = window(geometry, wave)
     finally:
         handle.remove()
-    assert len(inputs) == 1
-    assert inputs[0].numel() // inputs[0][-1] == len(batch["coordinates"]) * window.depth_count
+    depths = [window.depth_count, fine_count] if fine_count else [window.depth_count]
+    points_per_depth = ray_count * (2 if fixed_magnetic_height else 1)
+    assert network_points == [points_per_depth * depth for depth in depths]
+    assert coefficient_shapes == [(ray_count, depth, len(wave), 4) for depth in depths]
+    transfer.assert_called_once()
+    assert transfer.call_args.args[0].shape == (ray_count, sum(depths), len(wave), 7)
+    assert output.shape == (ray_count, 4, len(wave))
 
 
 @pytest.mark.parametrize("per_ray", [False, True])
-def test_spectral_chunks_prepare_plasma_once_without_wavelength_duplication(monkeypatch, per_ray):
+def test_full_spectrum_prepares_plasma_once_without_wavelength_duplication(monkeypatch, per_ray):
     _, window, term, batch = make_system()
-    window.wavelength_chunk_size = 2
     if per_ray:
         batch["removed_solar_los_velocity_m_per_s"] = torch.tensor([-1000., 1000.])
     provider = window.coefficients.plasma_provider
@@ -160,6 +194,7 @@ def test_physical_spectrum_matches_independent_serial_solver(monkeypatch, incomi
         actual = term.predict(batch)
 
     def serial(k, source, distance, *, bottom_boundary=None, precision, polarized, intervals_m):
+        k = propagation_matrix(k)
         grid = torch.arange(k.shape[-4], dtype=torch.float64, device=k.device)
         return PolarizedFormalSolver()(k.double(), source.double(), grid,
             path=RayDistancePath(distance.double()),
@@ -256,22 +291,6 @@ def test_deterministic_ray_sampling_does_not_consume_rng(training, jitter_fracti
     expected = geometry["path_length_m"][:, None] * (torch.arange(depth_count, dtype=first.dtype) / (depth_count - 1))
     assert torch.equal(first, expected)
     assert torch.equal(first, second)
-
-
-def test_jitter_is_shared_across_spectral_chunks_with_matching_gradients():
-    atmosphere, window, term, batch = make_system(jitter_fraction=1., wavelength_chunk_size=2)
-    rng = torch.get_rng_state()
-    actual = term.predict(batch)
-    actual.square().sum().backward()
-    gradients = [p.grad.clone() for p in atmosphere.parameters() if p.grad is not None]
-    atmosphere.zero_grad(set_to_none=True)
-    window.wavelength_chunk_size = 1000
-    torch.set_rng_state(rng)
-    expected = term.predict(batch)
-    expected.square().sum().backward()
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-    for actual_grad, parameter in zip(gradients, [p for p in atmosphere.parameters() if p.grad is not None]):
-        torch.testing.assert_close(actual_grad, parameter.grad, rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize("jitter_fraction", [-.01, 1.01, float("nan"), float("inf"), True])
@@ -381,7 +400,6 @@ def test_refined_rays_keep_64_unique_shell_points_and_actual_intervals(monkeypat
 def test_refinement_evaluates_only_new_points_and_reuses_coarse_physics(monkeypatch):
     atmosphere, window, term, batch = make_system(depth_count=32, jitter_fraction=1.,
         coarse_to_fine={"enabled": True, "fine_sample_count": 32, "uniform_weight_floor": .05})
-    window.wavelength_chunk_size = 2
     network_outputs, point_counts = [], []
     def record(module, args, output):
         output.retain_grad()
@@ -404,20 +422,18 @@ def test_refinement_evaluates_only_new_points_and_reuses_coarse_physics(monkeypa
         assert output.grad.abs().max() > 0
 
 
-def test_refined_spectrum_and_gradients_are_chunk_independent_and_eval_deterministic():
+def test_refined_spectrum_and_gradients_are_deterministic_in_eval():
     torch.manual_seed(42)
     atmosphere, window, term, batch = make_system(depth_count=32, jitter_fraction=1.,
         coarse_to_fine={"enabled": True, "fine_sample_count": 32, "uniform_weight_floor": .05})
     window.eval()
     batch["removed_solar_los_velocity_m_per_s"] = torch.tensor([-1000., 1000.])
     rng = torch.get_rng_state()
-    window.wavelength_chunk_size = 2
     actual = term.predict(batch)
     actual.square().sum().backward()
     gradients = [p.grad.clone() for p in atmosphere.parameters() if p.grad is not None]
     assert torch.equal(rng, torch.get_rng_state())
     atmosphere.zero_grad(set_to_none=True)
-    window.wavelength_chunk_size = 1000
     expected = term.predict(batch)
     expected.square().sum().backward()
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
@@ -443,6 +459,7 @@ def test_refined_physical_spectrum_matches_independent_serial_solver(monkeypatch
     with torch.no_grad():
         actual = term.predict(batch)
     def serial(k, source, distance, *, bottom_boundary=None, precision, polarized, intervals_m):
+        k = propagation_matrix(k)
         assert distance.shape[-1] == 64
         torch.testing.assert_close(intervals_m, distance.diff(dim=-1))
         grid = torch.arange(k.shape[-4], dtype=torch.float64)

@@ -28,6 +28,15 @@ def test_repository_contains_only_the_public_yaml_runs():
         document = yaml.safe_load((PROJECT_ROOT / name).read_text())
         if name == "configs/muram/hinode/synthesis.yaml":
             assert "instrument" in document  # explicit numerical fixture config
+        elif name == "configs/muram/hinode/surrogate.yaml":
+            assert set(document) == {
+                "line_ids", "wavelength_bounds_vacuum_angstrom", "knots", "wavelength_count",
+                "workers", "batch_size", "steps", "validate_every",
+                "architecture", "width", "hidden_layers", "jitter", "wavelength_jitter_fraction",
+                "replay_fraction", "replay_buffer_size",
+                "optimizer", "learning_rate", "final_learning_rate", "learning_rate_decay_steps",
+                "source_path", "iteration", "instrument_config", "output_dir",
+            }
         else:
             assert document["schema_version"] == 5, name
 
@@ -42,12 +51,7 @@ def test_source_tree_contains_only_the_current_package():
 
 
 def test_preprocessing_lives_in_the_installed_package():
-    # Offline profiling/check scripts are explicit developer tools. Production
-    # download and preprocessing remain importable installed-package functions.
-    for script in (PROJECT_ROOT / "scripts").rglob("*.py"):
-        assert script.relative_to(PROJECT_ROOT / "scripts").parts[0] in {
-            "diagnostics", "muram_hinode", "hmi",
-        }
+    assert not list((PROJECT_ROOT / "scripts").rglob("*.py"))
     for name in ("hmi", "aia"):
         module = SOURCE_ROOT / "preprocess" / f"{name}.py"
         assert module.is_file()
@@ -150,7 +154,7 @@ def test_packaging_exposes_one_new_command_and_only_the_new_namespace():
     config_files = project["tool"]["setuptools"]["data-files"]
     assert set(config_files) == {
         "share/prom3theus/configs/hinode", "share/prom3theus/configs/sdo",
-        "share/prom3theus/configs/muram/hinode", "share/prom3theus/configs/muram/sdo",
+        "share/prom3theus/configs/muram/hinode",
     }
     assert {name for names in config_files.values() for name in names} == {
         path.relative_to(PROJECT_ROOT).as_posix()

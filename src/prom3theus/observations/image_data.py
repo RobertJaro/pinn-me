@@ -38,7 +38,7 @@ class StoredImageDataModule(LightningDataModule):
         store_metadata: Mapping | None = None,
         batch_size: int = 256,
         validation_batch_size: int | None = None,
-        num_workers: int = 2,
+        num_workers: int = 4,
         pin_memory: bool = False,
     ) -> None:
         super().__init__()
@@ -209,7 +209,7 @@ class StoredImageDataModule(LightningDataModule):
             )
             channels.append(datasets[0] if len(datasets) == 1 else ConcatDataset(datasets))
         return PersistentTensorLoader(
-            self.dataset, self.batch_size, channels=channels,
+            self.dataset, self.batch_size, channels=channels, num_workers=self.num_workers,
             pin_memory=self.pin_memory and torch.cuda.is_available(),
         )
 

@@ -48,7 +48,7 @@ def load_raster(
     reference_time: datetime | str | None = None,
     scene_basis_rows=None,
     *,
-    fits_read_workers: int = 1,
+    fits_read_workers: int = 4,
     progress: bool = False,
     defer_radiometric_calibration: bool = False,
 ) -> ObservationRaster:

@@ -76,6 +76,8 @@ class PhysicsNormalization:
     ``*_scale_*`` value where a physically motivated one is known; use
     ``detach_normalization_scale=False`` only as a deliberate experiment and
     monitor field/pressure amplitude for runaway growth.
+    Disabling ``normalize_force_balance`` or ``normalize_boundary_current``
+    reduces the corresponding native residual directly, before loss scaling.
     """
 
     length_m: float = 1.0e6
@@ -91,6 +93,8 @@ class PhysicsNormalization:
     # Whether the adaptive (non-fixed) normalization scale is detached from
     # autograd. True reproduces the original stop-gradient behavior.
     detach_normalization_scale: bool = True
+    normalize_force_balance: bool = True
+    normalize_boundary_current: bool = True
 
     def __post_init__(self):
         if self.force_balance_pressure_scale_pa is not None:
@@ -113,6 +117,9 @@ class PhysicsNormalization:
             raise ValueError(
                 "force_balance_pressure_floor_pa must be finite and non-negative."
             )
+        for name in ("normalize_force_balance", "normalize_boundary_current"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
         if type(self.detach_normalization_scale) is not bool:
             raise TypeError("detach_normalization_scale must be boolean.")
         for name, value in (
@@ -142,6 +149,8 @@ class PhysicsNormalization:
             "force_balance_pressure_scale_pa",
             "force_balance_pressure_floor_pa",
             "detach_normalization_scale",
+            "normalize_force_balance",
+            "normalize_boundary_current",
         }
         if unknown:
             raise TypeError(f"Unknown physics normalization options: {sorted(unknown)}")
@@ -162,6 +171,9 @@ class PhysicsNormalization:
             )
         if not self.detach_normalization_scale:
             configuration["detach_normalization_scale"] = self.detach_normalization_scale
+        for name in ("normalize_force_balance", "normalize_boundary_current"):
+            if not getattr(self, name):
+                configuration[name] = False
         return configuration
 
     @property
@@ -1126,9 +1138,15 @@ class MagnetofluidConstraints(nn.Module):
             name: str,
             terms: Mapping[str, torch.Tensor],
             normalized_terms: Mapping[str, torch.Tensor] | None = None,
+            *, pressure_equivalent=None,
         ) -> None:
             if not return_diagnostics:
                 return
+            if pressure_equivalent is not None:
+                normalized_terms = {
+                    name: normalize_force_balance(value, pressure_equivalent).reshape_as(value)
+                    for name, value in terms.items()
+                }
             normalized_terms = normalized_terms or terms
             diagnostics[name] = {
                 "units": "dimensionless model force/rate",
@@ -1143,6 +1161,8 @@ class MagnetofluidConstraints(nn.Module):
             }
 
         def normalize_force_balance(residual, pressure_equivalent):
+            if not self.normalization.normalize_force_balance:
+                return state.grouped(residual)
             fixed_scale = self.normalization.force_balance_pressure_scale_pa
             if fixed_scale is not None:
                 fixed_hat = fixed_scale / pressure_scale_pa
@@ -1157,11 +1177,6 @@ class MagnetofluidConstraints(nn.Module):
                     / pressure_scale_pa
                 ),
             )
-
-        def normalize_force_term(term, pressure_equivalent):
-            """Normalize one force term while retaining its flat shape for plots."""
-            normalized = normalize_force_balance(term, pressure_equivalent)
-            return normalized.reshape_as(term)
 
         reference = next(atmosphere_model.parameters())
         pressure = state.gas_pressure_model
@@ -1191,12 +1206,7 @@ class MagnetofluidConstraints(nn.Module):
             record(
                 "hydrostatic_equilibrium",
                 {"radial ∇p_hat": radial_pressure_gradient, "gravity": gravity_force},
-                {
-                    "radial ∇p_hat": normalize_force_term(
-                        radial_pressure_gradient, pressure_equivalent
-                    ),
-                    "gravity": normalize_force_term(gravity_force, pressure_equivalent),
-                },
+                pressure_equivalent=pressure_equivalent,
             )
 
         curl_magnetic = None
@@ -1233,13 +1243,7 @@ class MagnetofluidConstraints(nn.Module):
             record(
                 "magnetohydrostatic_equilibrium",
                 {"∇p_hat": grad_pressure, "gravity": gravity_vector, "−J×B": -lorentz_force},
-                {
-                    "∇p_hat": normalize_force_term(grad_pressure, pressure_equivalent),
-                    "gravity": normalize_force_term(
-                        gravity_vector, pressure_equivalent
-                    ),
-                    "−J×B": normalize_force_term(-lorentz_force, pressure_equivalent),
-                },
+                pressure_equivalent=pressure_equivalent,
             )
 
         inertial_force = None
@@ -1307,15 +1311,7 @@ class MagnetofluidConstraints(nn.Module):
                     "gravity": gravity_force[:, None] * state.radial_unit,
                     "−J×B": -lorentz_force,
                 },
-                {
-                    "inertial": normalize_force_term(inertial_force, pressure_equivalent),
-                    "∇p_hat": normalize_force_term(grad_pressure, pressure_equivalent),
-                    "gravity": normalize_force_term(
-                        gravity_force[:, None] * state.radial_unit,
-                        pressure_equivalent,
-                    ),
-                    "−J×B": normalize_force_term(-lorentz_force, pressure_equivalent),
-                },
+                pressure_equivalent=pressure_equivalent,
             )
 
         field_normalization = torch.linalg.vector_norm(magnetic, dim=-1)
@@ -1605,6 +1601,8 @@ class MagnetofluidConstraints(nn.Module):
             )
 
         def normalize_force_balance(residual, pressure_equivalent):
+            if not self.normalization.normalize_force_balance:
+                return state.grouped(residual)
             fixed_scale = self.normalization.force_balance_pressure_scale_pa
             if fixed_scale is not None:
                 # Force density [Pa/m] times L/P0; the same denominator
@@ -2344,28 +2342,27 @@ class MagnetofluidConstraints(nn.Module):
         return PhysicsResult(losses, weights)
 
     def _boundary_current_loss(self, state: PhysicsState) -> torch.Tensor:
-        """Dimensionless mu0*J*L/<|B|>, with a detached boundary-mean scale.
-
-        Curl and field both use gauss, so the gauss-to-tesla and mu0 factors
-        cancel. The magnitude is averaged, not the signed field vector.
-        """
+        """Penalize curl(B), optionally scaled by the boundary-mean field strength."""
         if state.model_primitive_derivatives is not None:
+            curl = _curl(state.model_derivative("magnetic"))
+            field = state.magnetic_field_model
+            length = self.normalization.length_m / state.model_length_scale_m
+            floor = self.normalization.magnetic_field_floor_gauss / state.model_magnetic_scale_gauss
+        else:
+            curl = _curl(state.derivative("magnetic"))
+            field = state.magnetic_field_gauss
+            length = self.normalization.length_m
+            floor = self.normalization.magnetic_field_floor_gauss
+        if self.normalization.normalize_boundary_current:
             residual = state.normalize_height_groups(
-                _curl(state.model_derivative("magnetic")),
-                torch.linalg.vector_norm(state.magnetic_field_model, dim=-1),
-                self.normalization.length_m / state.model_length_scale_m,
-                scale_floor=self.normalization.magnetic_field_floor_gauss
-                / state.model_magnetic_scale_gauss,
+                curl,
+                torch.linalg.vector_norm(field, dim=-1),
+                length,
+                scale_floor=floor,
                 detach_scale=self.normalization.detach_normalization_scale,
             )
         else:
-            residual = state.normalize_height_groups(
-                _curl(state.derivative("magnetic")),
-                torch.linalg.vector_norm(state.magnetic_field_gauss, dim=-1),
-                self.normalization.length_m,
-                scale_floor=self.normalization.magnetic_field_floor_gauss,
-                detach_scale=self.normalization.detach_normalization_scale,
-            )
+            residual = state.grouped(curl)
         return state.height_group_mse(
             residual, robust_delta=self.robust_loss_delta
         )

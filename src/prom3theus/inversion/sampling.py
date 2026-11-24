@@ -137,8 +137,8 @@ class SphericalShellDomain:
             solar_radius_m=self.solar_radius_m,
         )
 
-    def metadata(self, *, height_power: float | None = None) -> dict:
-        """Describe the grouped shell sampler for the inversion artifact."""
+    def metadata(self, *, height_power: float | None = None, volume_sampling: str = "height_grouped") -> dict:
+        """Describe collocation and boundary sampling for the inversion artifact."""
 
         radial_power = _RANDOM_HEIGHT_POWER if height_power is None else float(height_power)
         if not math.isfinite(radial_power) or radial_power <= 0.0:
@@ -166,7 +166,7 @@ class SphericalShellDomain:
                 ),
             }
         )
-        return {
+        metadata = {
             "collocation_distribution": (
                 f"power-{radial_power:g} stratified random geometric-height layers; "
                 "uniform longitude and surface-area latitude "
@@ -203,6 +203,31 @@ class SphericalShellDomain:
                 ),
             },
         }
+
+        if volume_sampling == "uniform_volume":
+            metadata["collocation_distribution"] = "independent uniform-volume points in the spherical shell"
+            metadata["spatial_sampling"].update(
+                type="uniform_volume",
+                selection_rule="independent draws uniform in longitude, sine latitude, cubed radius, and time",
+            )
+            del metadata["spatial_sampling"]["random_radial_power"]
+        return metadata
+
+    def random_volume(self, point_count: int, *, device=None, generator=None):
+        """Draw independent points uniformly per unit physical volume in the shell."""
+        if type(point_count) is not int or point_count < 1:
+            raise ValueError("Volume sample count must be a positive integer.")
+        radial, longitude, latitude, time = torch.rand(
+            (point_count, 4), dtype=torch.float64, device=device, generator=generator
+        ).unbind(dim=-1)
+        inner, outer = self.height_bounds_megameter
+        inner_radius = self.solar_radius_m / 1e6 + inner
+        # Invert the radius-cubed CDF without subtracting nearly equal solar radii.
+        log_volume_ratio = 3.0 * math.log1p((outer - inner) / inner_radius)
+        height = inner + inner_radius * torch.expm1(
+            torch.log1p(radial * math.expm1(log_volume_ratio)) / 3.0
+        )
+        return self._positions(height, longitude, latitude, time, device=device)
 
     def _positions(
         self,

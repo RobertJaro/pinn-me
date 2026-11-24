@@ -3,8 +3,8 @@
 schema_version: 5
 solver:
   kind: joint
-  output_directory: /glade/work/rjarolim/lte/muram_hinode_isotropic_soap_v01
-  work_directory: /glade/derecho/scratch/rjarolim/lte/muram_hinode_isotropic_soap_v01
+  output_directory: /glade/work/rjarolim/lte/muram_hinode_ar11158_2000000_stokes_exact_lte_soap_uniform32
+  work_directory: /glade/derecho/scratch/rjarolim/lte/muram_hinode_ar11158_2000000_stokes_exact_lte_soap_uniform32
 scene:
   reference_stream: photospheric_stokes
 atmosphere:
@@ -12,10 +12,10 @@ atmosphere:
     type: spherical_shell
     time_dependent: false
     height_input_scale_m: 10000000.0
-    outer_height_megameter: 1.5
-    inner_height_megameter: -0.5
+    outer_height_megameter: 1.0
+    inner_height_megameter: -1.0
     tangent_margin_m: 1000.0
-    line_formation_outer_height_megameter: 1.5
+    line_formation_outer_height_megameter: 1.0
     uniform_spatial_scaling: true
   reference_atmosphere: falc_82
   parameters:
@@ -37,6 +37,7 @@ atmosphere:
 synthesis:
   windows:
     - id: fe_i_6302
+      coefficient_backend: exact_lte
       line_ids:
         - FeI_6301.5008
         - FeI_6302.4932
@@ -44,63 +45,25 @@ synthesis:
         - 6300.0
         - 6307.0
       radiance_scale: 25000000000000.0
-      depth_count: 16  # Coarse points per ray; fine samples below are additional.
+      depth_count: 32
       coarse_to_fine:
-        enabled: true
-        fine_sample_count: 16
-        uniform_weight_floor: 0.05
-      jitter_fraction: 1.0
-      wavelength_chunk_size: 64
-      transfer_precision: float32
+        enabled: false
+      jitter_fraction: 0.0
       shell_height_bounds_megameter:
-        - -0.5
-        - 1.5
+        - -1.0
+        - 1.0
       lateral_halo_megameter: 5.0
-physics:
-  # No atmospheric residuals in this Stokes-only run.
-  equations: {}
-  vector_basis_matches_spatial_coordinates: true
-  collocation:
-    volume_points_per_step: 8192
-    height_layers_per_step: 64
-    upper_boundary_points_per_step: 512
-    validation_height_layers: 12
-    validation_points_per_height: 32
-    validation_side_boundary_points: 256
-    validation_upper_height_layers: 6
-    height_sampling_power: 2.5
-    volume_sampling: fully_random
-    hard_example_count: 256
-    hard_example_start_step: 500
-  normalization:
-    length_m: 1000000.0
-    time_s: 3600.0
-    force_balance_pressure_floor_pa: 1.0
-    detach_normalization_scale: false
-  potential_boundary:
-    enabled: false
-    start_step: 2000
-    update_every_n_steps: 1000
-    weight: 0.01
-    photosphere:
-      enabled: false
-      minimum_horizontal_field_gauss: 1.0
-      start_step: 2000
-      ramp_steps: 2000
-      end_step: 10000
-atmosphere_regularization: []
 streams:
   - id: photospheric_stokes
     observation:
       type: muram_stored
-      binning: 4  # Average native synthesis pixels during loading.
-      directory: /glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_single_frame
+      binning: 1  # Use the stored spectra at their original resolution.
+      directory: /glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_ar11158_2000000_uniform32
       loader:
+        workers: 4
         batch_size: 1024  # Per GPU: 4096 rays per update across the four-GPU job.
         validation_batch_size: 16
         validation_stride: 16
-        preparation_workers: 8
-        workers: 8
     data_term:
       type: lte_stokes
       synthesis_window: fe_i_6302
@@ -115,15 +78,13 @@ streams:
       objective:
         type: mse
         stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
-        qu_warmup_steps: 0
         continuum_normalization: true
         stokes_scales: {I: 1.0, Q: 0.1, U: 0.1, V: 0.1}
 diagnostics:
   visualization:
-    enabled: true
     ray_sampling:
       batch_size: 16
-      max_pixels: 4096
+      max_pixels: 65536
       max_profile_samples: 2048
     slice_sampling:
       batch_size: 512
@@ -133,14 +94,6 @@ diagnostics:
     meridional_slice:
       enabled: true
       longitude_deg: 2.0
-    contribution_ray_count: 0
-dry_run:
-  gradient_sample_count: 4
-  max_samples_per_stream: 64
-  quadrature_samples:
-    - 96
-    - 192
-  report_filename: hinode_setup.json
 training:
   max_steps: -1
   learning_rate: 0.001
@@ -149,16 +102,9 @@ training:
   device: cuda
   steps_per_epoch: 1000
   learning_rate_decay_steps: 10000
-  reference_stream: photospheric_stokes
 logging:
   type: wandb
   project: PROM3THEUS
   run_name: MURaM Hinode SIREN SOAP Stokes only
   tags:
-    - muram
-    - synthetic
-    - hinode
-    - validation
-    - single-frame
     - stokes-only
-    - formal-lte

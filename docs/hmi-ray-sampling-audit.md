@@ -115,7 +115,7 @@ and reinforces the need to check convergence by region on the fitted model.
    The default remains `reference` for existing configurations. The sampling
    coordinate called `reference_log_tau500` labels placement; it is not the
    learned atmosphere's optical depth. Uniform mode maps it linearly to height.
-2. Initially enabled uniform placement in `configs/muram/sdo/stokes_only.yaml`, keeping
+2. Initially enabled uniform placement in the former MURaM/SDO Stokes-only preset, keeping
    128 coarse + 64 fine points, disabled depth jitter, batch 64, SIREN and
    existing Stokes weights. Fresh `muram_stokes_only_uniform192_v03`
    directories prevent automatic reuse of the preceding control checkpoint.

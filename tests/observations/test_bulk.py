@@ -105,7 +105,7 @@ def test_reader_failure_reaches_consumer_and_closes():
     loader = SequentialBulkLoader(image(), 10, max_batch_bytes=1)
     with pytest.raises(ValueError, match="max_batch_bytes"):
         list(loader)
-    assert not any(item.thread.is_alive() for item in loader._active)
+    assert not loader._active
 
 
 def test_validation_in_slabs_preserves_invalid_geometry_checks():
@@ -139,7 +139,7 @@ def test_validation_in_slabs_preserves_invalid_geometry_checks():
 def test_auxiliary_partial_block_survives_reference_epochs():
     from prom3theus.training.streams import StreamBatchScheduler
 
-    loader = SequentialBulkLoader(image(shape=(20, 5)), 1)
+    loader = SequentialBulkLoader(image(shape=(20, 5)), 1, num_workers=0)
     scheduler = StreamBatchScheduler({"reference": [0], "image": loader}, "reference")
     try:
         for index in range(12):

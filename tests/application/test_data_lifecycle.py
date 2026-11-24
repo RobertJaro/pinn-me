@@ -178,3 +178,100 @@ def test_finish_each_stream_before_loading_next_and_release_raw_payload(
         compute_summaries=False,
     )
     assert restored.generation == module.generation
+
+
+def test_training_starts_logger_before_preparation_and_launch(tmp_path, monkeypatch):
+    from prom3theus.application import joint_training
+    from prom3theus.core import distributed
+    from unittest.mock import Mock
+
+    events = []
+    logger = Mock()
+    config = SimpleNamespace(
+        training=SimpleNamespace(device="cpu", devices=1, resume_from_checkpoint=None),
+        solver=SimpleNamespace(output_directory=tmp_path),
+    )
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr("prom3theus.observations.persistence.global_rank", lambda: 0)
+
+    def start_logger(config):
+        events.append("logger")
+        return logger
+
+    def launch(*args, **kwargs):
+        events.append("launch")
+        return 0, 1
+
+    class StopAfterAssembly(Exception):
+        pass
+
+    def assemble(config, *, before_data_handoff, **kwargs):
+        events.append("data")
+        before_data_handoff()
+        events.append("model")
+        raise StopAfterAssembly
+
+    monkeypatch.setattr(joint_training, "_online_logger", start_logger)
+    monkeypatch.setattr(distributed, "initialize_distributed", launch)
+    monkeypatch.setattr(joint_training, "build_joint_runtime", assemble)
+    with pytest.raises(StopAfterAssembly):
+        joint_training.run_joint_inversion(config)
+    assert events == ["logger", "data", "launch", "model"]
+    logger.finalize.assert_called_once_with("failed")
+    logger.log_metrics.assert_not_called()
+
+
+def test_failed_preparation_does_not_launch_workers(tmp_path):
+    from prom3theus.observations.persistence import restore_or_create_data_module
+    from unittest.mock import Mock
+
+    launch = Mock()
+
+    def build():
+        raise ValueError("invalid input")
+
+    with pytest.raises(ValueError, match="invalid input"):
+        restore_or_create_data_module(tmp_path / "data_module.pt", build,
+                                      before_handoff=launch)
+    launch.assert_not_called()
+
+
+def test_enabling_potential_backfills_only_missing_summaries(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from prom3theus.application import data
+    from prom3theus.config import load_config
+    from prom3theus.observations.persistence import JointDataModule
+
+    config = load_config("configs/hinode/mhs_extrapolation.yaml")
+    config = replace(config, solver=replace(config.solver, work_directory=tmp_path))
+    stream = config.streams[0]
+    stored = SimpleNamespace(
+        prepared=SimpleNamespace(descriptor=SimpleNamespace(observation_kind="stokes")),
+        data_module=SimpleNamespace(),
+    )
+    module = JointDataModule({stream.id: stored}, object(), summaries={},
+                             contract=data.data_contract(config, {}))
+    scans, changes = [], []
+
+    def restore(path, build, *, finalize, **kwargs):
+        changes.append(finalize(module))
+        return module
+
+    monkeypatch.setattr(data, "restore_or_create_data_module", restore)
+    monkeypatch.setattr(data, "_joint_observation_bounds", lambda *args: scans.append("bounds") or {"x": 1})
+    monkeypatch.setattr(data, "_observation_times_hours", lambda *args: scans.append("times") or [0.])
+    load_joint_data(config, {}, None, None)
+    assert scans == ["bounds"]
+    potential = replace(config.physics.potential_boundary, enabled=True)
+    # Isolate the preparation path from the preset's incompatible outer equations.
+    physics = replace(config.physics, potential_boundary=potential, equations=type(config.physics.equations)())
+    config = replace(config, physics=physics)
+    load_joint_data(config, {}, None, None)
+    assert scans == ["bounds"] and module.summaries["stokes_bounds"] == {"x": 1}
+    config = replace(config, atmosphere=replace(config.atmosphere, geometry=replace(
+        config.atmosphere.geometry, time_dependent=True)))
+    module.contract = data.data_contract(config, {})
+    load_joint_data(config, {}, None, None)
+    load_joint_data(config, {}, None, None)
+    assert scans == ["bounds", "times"]
+    assert changes == [True, True, True, False]

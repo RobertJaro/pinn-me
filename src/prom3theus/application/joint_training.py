@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,13 +14,31 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_info
 from prom3theus.artifacts.checkpoint import save_state, snapshot_context
 from prom3theus.config.joint_schema import JointInversionConfig
 from prom3theus.diagnostics.providers import render_diagnostics
+from prom3theus.inversion.data_terms import PhysicsConstraintTerm
+from prom3theus.resources import file_sha256
 from prom3theus.training.joint import JointInversionModule
 from prom3theus.training.streams import StreamBatchScheduler
 
 from .joint_assembly import build_joint_runtime
 from .joint_contracts import JointRunnerFactories
-from .joint_evaluation import _temporary_physics_derivative_graph
 from .runtime import _json_value, _preserve_rng, _temporary_eval_mode
+
+
+@contextmanager
+def _validation_physics_derivatives(module: torch.nn.Module):
+    """Evaluate PDE derivatives without retaining their graph during validation."""
+
+    terms = [
+        child for child in module.modules() if isinstance(child, PhysicsConstraintTerm)
+    ]
+    states = [term.create_graph for term in terms]
+    for term in terms:
+        term.create_graph = False
+    try:
+        yield
+    finally:
+        for term, state in zip(terms, states, strict=True):
+            term.create_graph = state
 
 
 class CommitStreamBatch(Callback):
@@ -155,7 +174,7 @@ class JointTrainingDiagnostics(Callback):
             _temporary_eval_mode(module.model),
         ):
             with (
-                _temporary_physics_derivative_graph(module.model, enabled=False),
+                _validation_physics_derivatives(module.model),
                 torch.no_grad(),
             ):
                 evaluation = module.model.evaluate_batches(runtime.validation_batches)
@@ -225,18 +244,38 @@ def run_joint_inversion(
         raise ValueError("Joint inversion requires an explicit training section.")
     torch.set_float32_matmul_precision("high")
     from prom3theus.core.distributed import initialize_distributed
+    from prom3theus.observations.persistence import global_rank
     from .runtime import _device
-    rank, world_size = initialize_distributed(_device(settings.device), devices=settings.devices)
+    # Re-entered Lightning children (and externally launched ranks) already
+    # exist. Join their group to establish global rank before logger ownership.
+    # The native parent reaches this launch only after publishing its data.
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        initialize_distributed(_device(settings.device), devices=settings.devices)
+    rank, world_size = global_rank(), 1
+    logger = _online_logger(config) if rank == 0 else False
+
+    def launch_workers():
+        nonlocal rank, world_size
+        rank, world_size = initialize_distributed(
+            _device(settings.device), devices=settings.devices
+        )
+
     output = config.solver.output_directory
     resume_checkpoint = _resume_checkpoint(output, settings.resume_from_checkpoint)
     if resume_checkpoint is not None:
         rank_zero_info(f"Resuming joint inversion from {resume_checkpoint}")
-    runtime = build_joint_runtime(
-        config,
-        rebuild_observations=rebuild_observations,
-        factories=factories,
-        for_training=True,
-    )
+    try:
+        runtime = build_joint_runtime(
+            config,
+            rebuild_observations=rebuild_observations,
+            factories=factories,
+            for_training=True,
+            before_data_handoff=launch_workers,
+        )
+    except BaseException:
+        if logger:
+            logger.finalize("failed")
+        raise
     if runtime.device.type not in ("cpu", "cuda"):
         raise ValueError("Joint training currently supports CPU or CUDA devices.")
     print(f"Training topology: rank={rank}/{world_size}, device={runtime.device}, "
@@ -249,12 +288,15 @@ def run_joint_inversion(
     output.mkdir(parents=True, exist_ok=True)
     contract = config.to_dict()
     # Operational settings may change on resume; the physical/data contract may not.
-    for key in ("training", "solver", "dry_run", "diagnostics", "logging"):
+    for key in ("training", "solver", "diagnostics", "logging"):
         contract.pop(key, None)
     # Stream weights are the supported render-only/fitting switch, including
     # when resuming. The checkpoint still records their original values above.
     for stream in contract["streams"]:
         stream["data_term"].pop("weight", None)
+    for window in contract["synthesis"]["windows"]:
+        if window.get("coefficient_backend") == "nn_surrogate":
+            window["mapper_sha256"] = file_sha256(Path(window["mapper_checkpoint"]))
     context = _json_value(
         {
             "format": "prom3theus.joint_checkpoint",
@@ -275,6 +317,8 @@ def run_joint_inversion(
     loaders = runtime.data_module.train_dataloader(
         batch_sizes={stream.id: stream.observation.loader.batch_size
                      for stream in config.streams if hasattr(stream.observation, "loader")},
+        workers={stream.id: stream.observation.loader.workers
+                 for stream in config.streams if hasattr(stream.observation, "loader")},
         pin_memory=runtime.device.type == "cuda",
         prefetch_batches=settings.loader_prefetch_batches,
         max_batch_bytes=settings.loader_max_batch_bytes,
@@ -284,6 +328,10 @@ def run_joint_inversion(
         loaders, settings.reference_stream or config.scene.reference_stream,
         explicit_commit=True, rank=rank, world_size=world_size,
         steps_per_epoch=settings.steps_per_epoch,
+        inactive_streams=[
+            stream.id for stream in config.streams if stream.data_term.weight == 0
+            and (stream.data_term.weight_schedule is None or stream.data_term.weight_schedule.initial_weight == 0)
+        ],
     )
     if runtime.device.type == "cuda" and settings.gpu_prefetch:
         scheduler.device = runtime.device
@@ -297,6 +345,10 @@ def run_joint_inversion(
     )
     save_state_path = output / "state.p3s"
     save_state_callback = JointSaveStateCallback(save_state_path, snapshot_context(runtime))
+    callbacks = [CommitStreamBatch(), checkpoint, save_state_callback]
+    if "potential_boundary" in runtime.model.shared_objectives:
+        callbacks.append(PotentialBoundaryDiagnostics(output / "potential-boundaries"))
+    callbacks.append(JointTrainingDiagnostics(runtime))
     trainer = Trainer(
         accelerator="gpu" if runtime.device.type == "cuda" else "cpu",
         devices=(int(os.environ.get("LOCAL_WORLD_SIZE", world_size)) if world_size > 1
@@ -309,14 +361,8 @@ def run_joint_inversion(
         log_every_n_steps=settings.log_every_n_steps,
         num_sanity_val_steps=0,
         limit_val_batches=0,
-        logger=_online_logger(config) if rank == 0 else False,
-        callbacks=[
-            CommitStreamBatch(),
-            checkpoint,
-            save_state_callback,
-            PotentialBoundaryDiagnostics(output / "potential-boundaries"),
-            JointTrainingDiagnostics(runtime),
-        ],
+        logger=logger,
+        callbacks=callbacks,
         inference_mode=False,
         use_distributed_sampler=False,
         profiler=profiler,

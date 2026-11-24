@@ -13,6 +13,9 @@ and optional magnetofluid constraints.
 
 ## Guides
 
+- [Project component plan](project-components.md) follows an inversion from input to
+  result and maps each workflow to its source packages.
+
 - [Parallel formal LTE transfer](parallel-formal-transfer.md): production synthesis,
   numerical controls, gradient validation and benchmarking.
 

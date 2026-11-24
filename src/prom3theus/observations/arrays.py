@@ -81,7 +81,7 @@ class ArrayRef:
 class ReadSession:
     """Own mappings while leased; outputs never borrow their storage."""
 
-    def __init__(self, max_mappings=64, workers=2):
+    def __init__(self, max_mappings=64, workers=4):
         if max_mappings < 1 or workers < 1:
             raise ValueError("Reader limits must be positive")
         self.max_mappings = max_mappings
@@ -189,7 +189,7 @@ def process_reader():
     return _PROCESS_READER
 
 
-def configure_reader(workers=2, max_mappings=64):
+def configure_reader(workers=4, max_mappings=64):
     global _PROCESS_READER, _PROCESS_ID
     if workers < 1 or max_mappings < 1:
         raise ValueError("Reader limits must be positive")
@@ -241,8 +241,21 @@ def write_array(path, tensor):
                 raise
             shutil.copyfile(ref.path, path)
         return ref.numpy_dtype, ref.shape
-    array = tensor.detach().cpu().contiguous().numpy()
-    np.save(path, array, allow_pickle=False)
+    array = tensor.detach().cpu().numpy()
+    if array.flags.c_contiguous:
+        np.save(path, array, allow_pickle=False)
+    else:
+        # Preserve the canonical C-order format without materializing a full
+        # broadcast response or transposed array in heap memory.
+        output = np.lib.format.open_memmap(path, mode="w+", dtype=array.dtype, shape=array.shape)
+        row_bytes = math.prod(array.shape[1:]) * array.dtype.itemsize
+        rows = max(1, (16 * 1024**2) // max(row_bytes, 1))
+        try:
+            for start in range(0, len(array), rows):
+                output[start:start + rows] = array[start:start + rows]
+            output.flush()
+        finally:
+            del output
     return array.dtype.str, tuple(array.shape)
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from prom3theus.core.validation import require_tensor
+from prom3theus.core.validation import require_tensor, tensor_validation_enabled
 
 from .geometry import validate_scene_basis
 
@@ -21,7 +21,7 @@ def _scene_components(vector, basis):
 
 def _chart_from_local_position(local, radius):
     require_tensor(
-        (local[..., 2] > 0).all(),
+        lambda: (local[..., 2] > 0).all(),
         'Directions lie outside the visible hemisphere of the scene chart.')
     return (radius / 1e6) * local[..., :2] / local[..., 2:3]
 
@@ -33,11 +33,11 @@ def unit_direction(direction: torch.Tensor) -> torch.Tensor:
     if direction.shape[-1:] != (3,):
         raise ValueError('Radiation directions must be finite three-vectors.')
     require_tensor(
-        torch.isfinite(direction).all(),
+        lambda: torch.isfinite(direction).all(),
         'Radiation directions must be finite three-vectors.')
     norm = torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
     require_tensor(
-        (norm > 0).all(),
+        lambda: (norm > 0).all(),
         'Radiation directions must be nonzero.')
     return direction / norm
 
@@ -57,7 +57,7 @@ def canonical_basis(
     transverse = a - (a * n).sum(-1, keepdim=True) * n
     norm = torch.linalg.vector_norm(transverse, dim=-1, keepdim=True)
     require_tensor(
-        (norm >= 0.001).all(),
+        lambda: (norm >= 0.001).all(),
         'Direction approaches the polarization-chart singularity.')
     e1 = transverse / norm
     e2 = torch.linalg.cross(n, e1, dim=-1)
@@ -72,7 +72,7 @@ def rotate_stokes_basis(
         raise ValueError("Stokes values must have shape [...,4,W].")
     source, target = source_basis.to(stokes), target_basis.to(stokes)
     require_tensor(
-        torch.isclose(source[..., 2, :], target[..., 2, :], atol=2e-05, rtol=0).all(),
+        lambda: torch.isclose(source[..., 2, :], target[..., 2, :], atol=2e-05, rtol=0).all(),
         'A basis rotation cannot reverse photon direction.')
     cosine = (target[..., 0, :] * source[..., 0, :]).sum(-1)[..., None]
     sine = (target[..., 0, :] * source[..., 1, :]).sum(-1)[..., None]
@@ -105,23 +105,23 @@ def shell_characteristic(
     if coords.shape[-1:] != (3,):
         raise ValueError('coordinates must be finite [x/megameter,y/megameter,time/hour].')
     require_tensor(
-        torch.isfinite(coords).all(),
+        lambda: torch.isfinite(coords).all(),
         'coordinates must be finite [x/megameter,y/megameter,time/hour].')
     ray = unit_direction(torch.as_tensor(ray_direction).to(coords))
     if ray.shape != coords.shape:
         raise ValueError("ray_direction must match coordinates.")
     radius = torch.as_tensor(solar_radius_m, device=coords.device, dtype=coords.dtype)
     require_tensor(
-        (torch.isfinite(radius) & (radius > 0)).all(),
+        lambda: (torch.isfinite(radius) & (radius > 0)).all(),
         'solar_radius_m must be finite and strictly positive.')
     heights = torch.as_tensor(height_bounds_m, device=coords.device, dtype=coords.dtype)
     if heights.shape != (2,):
         raise ValueError('Radiation shell bounds must be [inner,outer] metres.')
     require_tensor(
-        torch.isfinite(heights).all() & (heights[0] < heights[1]),
+        lambda: torch.isfinite(heights).all() & (heights[0] < heights[1]),
         'Radiation shell bounds must be [inner,outer] metres.')
     require_tensor(
-        (radius + heights[0] > 0).all(),
+        lambda: (radius + heights[0] > 0).all(),
         'Radiation shell must have positive radius.')
     basis = validate_scene_basis(torch.as_tensor(scene_basis).to(coords))
     local = torch.cat((coords[..., :2] * (1e6 / radius), torch.ones_like(coords[..., :1])), dim=-1)
@@ -130,14 +130,14 @@ def shell_characteristic(
     local_ray = _scene_components(ray, basis)
     mu = -(radial * ray).sum(-1)
     require_tensor(
-        (mu > 0).all(),
+        lambda: (mu > 0).all(),
         'Only outward observed characteristics are supported.')
 
     def intersection(height):
         delta = (height / radius) * (2 + height / radius)
         discriminant = mu.square() + delta
         require_tensor(
-            (discriminant > 0).all(),
+            lambda: (discriminant > 0).all(),
             'Unsupported grazing characteristic: ray does not reach the true lower thermal boundary. A tangent point is not a lower boundary.')
         return -height * (2 + height / radius) / (mu + discriminant.sqrt())
 
@@ -146,9 +146,9 @@ def shell_characteristic(
     outgoing = radius * radial + outer_offset[..., None] * ray
     length = inner_offset - outer_offset
     require_tensor(
-        (length > 0).all(),
+        lambda: (length > 0).all(),
         'Radiation characteristic has no positive path length.')
-    if chart_bounds_megameter is not None:
+    if chart_bounds_megameter is not None and tensor_validation_enabled():
         bounds = torch.as_tensor(chart_bounds_megameter).to(coords)
         offset_scale = torch.maximum(inner_offset.abs(), outer_offset.abs()).amax() / 1e6
         tolerance = (4 * torch.finfo(coords.dtype).eps * (
@@ -160,7 +160,7 @@ def shell_characteristic(
             point = local_radial + (offset / radius)[..., None] * local_ray
             chart = _chart_from_local_position(point, radius)
             require_tensor(
-                ((chart >= bounds[0] - tolerance) & (chart <= bounds[1] + tolerance)).all(),
+                lambda: ((chart >= bounds[0] - tolerance) & (chart <= bounds[1] + tolerance)).all(),
                 'Characteristic crosses the lateral atmosphere boundary; enlarge synthesis lateral_halo_megameter or restrict the observed domain. Lateral Planck/zero inflow is not silently imposed.')
     return {
         "outgoing_position_m": outgoing,

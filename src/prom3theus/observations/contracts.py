@@ -320,10 +320,15 @@ class ObservationRaster:
                 )
             if value.is_complex():
                 raise ValueError(f"Auxiliary array {name!r} must be real-valued.")
-            if value.is_floating_point() and not torch.isfinite(value[valid]).all():
-                raise ValueError(
-                    f"Auxiliary array {name!r} must be finite at every valid pixel."
-                )
+            # Spatially uniform response tensors may be broadcast views. Check
+            # their small base directly instead of materializing all valid pixels.
+            if value.is_floating_point():
+                finite_values = (value[0, 0] if value.stride()[:2] == (0, 0) and valid.any()
+                                 else value[valid])
+                if not torch.isfinite(finite_values).all():
+                    raise ValueError(
+                        f"Auxiliary array {name!r} must be finite at every valid pixel."
+                    )
         for name, value in tensors.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

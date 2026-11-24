@@ -190,8 +190,7 @@ def test_public_factory_requires_an_exact_discriminator():
     [
         ("hinode/mhs.yaml", "HinodeDataModule"),
         ("hinode/mhs_extrapolation.yaml", "HinodeDataModule"),
-        ("sdo/hmi_aia_potential.yaml", "HMIDataModule"),
-        ("sdo/hmi_dynamic.yaml", "HMIDataModule"),
+        ("sdo/hmi_aia_dynamic.yaml", "HMIDataModule"),
     ],
 )
 def test_shipped_observation_sections_construct_their_exact_adapter(

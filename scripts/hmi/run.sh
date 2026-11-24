@@ -11,7 +11,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 test "$#" -eq 0
 
-PYTHONPATH=src python -m prom3theus.cli.main invert configs/sdo/hmi_dynamic.yaml
+PYTHONPATH=src python -m prom3theus.cli.main invert configs/sdo/hmi_aia_dynamic.yaml
+
+PYTHONPATH=src python -m prom3theus.cli.main invert configs/sdo/hmi_aia_energy.yaml
 
 
 PYTHONPATH=src python -m prom3theus.cli.main compare-hmi /glade/work/rjarolim/lte/hmi_subframe_dynamic_extrapolation_v07/state.p3s \

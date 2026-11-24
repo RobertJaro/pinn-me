@@ -1,8 +1,7 @@
-"""Setup-only orchestration tests with deliberately cheap forward fakes."""
+"""Joint training and validation tests with deliberately cheap forward fakes."""
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,27 +12,17 @@ import yaml
 from torch import nn
 
 from prom3theus.application import joint_rendering, joint_streams
-from prom3theus.application.joint_runner import (
-    dry_run_joint_inversion,
-    run_joint_dry_run,
-)
 from prom3theus.application.joint_contracts import (
     JointRunnerFactories,
     LoadedJointStream,
     SharedTermAssembly,
 )
 from prom3theus.application.joint_assembly import build_joint_runtime
-from prom3theus.application.joint_evaluation import evaluate_joint_runtime
 from prom3theus.application.batches import deterministic_validation_batch
-from prom3theus.application.runtime import state_dict_sha256
 from prom3theus.config import JointInversionConfig, parse_config
 from prom3theus.inversion.data_terms import (
-    AtmosphereRegularizationTerm,
     DataTermBatchResult,
     ObservationDataTerm,
-    PhysicsConstraintTerm,
-    SharedObjectiveTerm,
-    SharedTermResult,
 )
 from prom3theus.observations import (
     ImageObservationRaster,
@@ -84,23 +73,19 @@ def test_joint_stokes_diagnostics_render_shared_radiation_and_atmosphere(tmp_pat
     window.coefficients = SimpleNamespace(lines=[])
     object.__setattr__(term, "synthesis_window", window)
 
-    def evaluate(batch):
+    def predict(batch):
         assert not term.training
         assert not window.training
         assert not atmosphere.training
-        return SimpleNamespace(
-            diagnostics={
-                "prediction": batch["stokes"] * 0.9,
-                "target": batch["stokes"],
-                "pixel_index": batch["pixel_index"],
-            }
-        )
+        return batch["stokes"] * 0.9
 
-    term.evaluate_batch = evaluate
+    term.predict = predict
     raster = SimpleNamespace(spatial_shape=(2, 2))
+    dataset = _DiagnosticPixelDataset()
     data = SimpleNamespace(
         raster=raster,
-        evaluation_dataset=lambda: _DiagnosticPixelDataset(),
+        validation_dataset=torch.utils.data.Subset(dataset, [0]),
+        evaluation_dataset=lambda: dataset,
         evaluation_collate_fn=lambda: None,
         num_workers=0,
     )
@@ -111,7 +96,9 @@ def test_joint_stokes_diagnostics_render_shared_radiation_and_atmosphere(tmp_pat
         model=SimpleNamespace(
             terms={"photospheric_stokes": term}, atmosphere_model=atmosphere
         ),
-        streams={"photospheric_stokes": SimpleNamespace(data_module=data)},
+        streams={"photospheric_stokes": SimpleNamespace(
+            data_module=data, specification=SimpleNamespace(radiance_scale_w_m3_sr=1.e13)
+        )},
     )
     stokes = Mock(return_value=tmp_path / "stokes.png")
     profiles = Mock(return_value=tmp_path / "profiles.png")
@@ -125,10 +112,14 @@ def test_joint_stokes_diagnostics_render_shared_radiation_and_atmosphere(tmp_pat
     assert len(paths.paths) == 3
     stokes.assert_called_once()
     profiles.assert_called_once()
+    assert profiles.call_args.kwargs["radiance_scale_w_m3_sr"] == 1.e13
     fields.assert_called_once()
     assert stokes.call_args.args[0].logger is None
     assert stokes.call_args.args[4] == "photospheric_stokes"
     assert fields.call_args.kwargs["label"] == "photospheric_stokes"
+    assert stokes.call_args.kwargs["rows"].tolist() == [0, 1]
+    assert stokes.call_args.kwargs["columns"].tolist() == [0, 1]
+    assert fields.call_args.kwargs["rows"].tolist() == [0]
     assert stokes.call_args.args[1]["stokes_pred"].shape == (4, 4, 6)
     from prom3theus.diagnostics.sampling import integrated_stokes
     payload = stokes.call_args.args[1]
@@ -234,10 +225,10 @@ def test_default_stokes_builder_converts_yaml_component_keys(monkeypatch):
 
 
 def _config(
-    tmp_path: Path, *, gradients: bool = True, render_streams: bool = False
+    tmp_path: Path, *, render_streams: bool = False
 ) -> JointInversionConfig:
     legacy = yaml.safe_load(
-        (PROJECT_ROOT / "configs/sdo/hmi_dynamic.yaml").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "configs/sdo/hmi_aia_dynamic.yaml").read_text(encoding="utf-8")
     )
     document = {
         "schema_version": 5,
@@ -313,13 +304,12 @@ def _config(
 
             }
         },
-        "dry_run": {
+        "training": {
             "device": "cpu",
-            "evaluate_gradients": gradients,
-            "gradient_sample_count": 6,
-            "max_samples_per_stream": 9,
-            "quadrature_samples": [2, 4, 8],
-            "report_filename": "dry_run.json",
+            "max_steps": 3,
+            "learning_rate": 0.01,
+            "final_learning_rate": 0.01,
+            "validation_samples_per_stream": 9,
         },
     }
     config = parse_config(document, base_directory=tmp_path, environ={})
@@ -419,63 +409,7 @@ class _Term(ObservationDataTerm):
         return {"type": "fake", "stream_id": self.stream_id}
 
 
-class _SharedGradientTerm(SharedObjectiveTerm):
-    def __init__(self, *, detached: bool = False) -> None:
-        super().__init__()
-        self.detached = detached
-
-    def evaluate(self, atmosphere_model):
-        value = atmosphere_model.field
-        if self.detached:
-            value = value.detach()
-        loss = value.square()
-        return SharedTermResult(loss, {"field": loss}, {})
-
-
-class _TrackingPhysicsTerm(PhysicsConstraintTerm):
-    def __init__(self) -> None:
-        nn.Module.__init__(self)
-        self.create_graph = True
-        self.volume_points_per_step = 120
-        self.height_layers_per_step = 12
-        self.upper_volume_points_per_step = 60
-        self.upper_height_layers_per_step = 6
-        self.upper_boundary_points_per_step = 80
-        self.side_boundary_points_per_step = 80
-        self.calls = []
-
-    def evaluate(self, atmosphere_model):
-        self.calls.append(
-            {
-                "training": self.training,
-                "create_graph": self.create_graph,
-                "volume": self.volume_points_per_step,
-                "upper_volume": self.upper_volume_points_per_step,
-                "upper_boundary": self.upper_boundary_points_per_step,
-                "side_boundary": self.side_boundary_points_per_step,
-            }
-        )
-        loss = atmosphere_model.field.square()
-        return SharedTermResult(loss, {"equation": loss}, {})
-
-
-class _TrackingRegularizationTerm(AtmosphereRegularizationTerm):
-    def __init__(self) -> None:
-        super().__init__(
-            kind="vector_magnitude",
-            position_m=torch.arange(300.0).reshape(100, 3),
-            time_hours=torch.arange(100.0),
-            component_weights={"magnetic": 1.0, "velocity": 1.0},
-        )
-        self.sample_counts = []
-
-    def evaluate(self, atmosphere_model):
-        self.sample_counts.append(int(self.position_m.reshape(-1, 3).shape[0]))
-        loss = atmosphere_model.field.square()
-        return SharedTermResult(loss, {"magnitude": loss}, {})
-
-
-def _factories(tmp_path: Path, *, shared_terms=None):
+def _factories(tmp_path: Path):
     calls = {"resources": None, "rebuild": []}
 
     def resources(set_ids):
@@ -546,7 +480,7 @@ def _factories(tmp_path: Path, *, shared_terms=None):
     def shared_builder(config, streams, scene, resources):
         del config, streams, scene, resources
         return SharedTermAssembly(
-            {} if shared_terms is None else shared_terms,
+            {},
             {"sampling": "fake deterministic"},
         )
 
@@ -756,7 +690,6 @@ def test_build_assembles_one_atmosphere_and_balanced_deterministic_batches(tmp_p
         runtime.validation_batches["coronal_euv"]["x"],
         torch.tensor([1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0]),
     )
-    assert runtime.state_sha256_at_build == state_dict_sha256(runtime.model)
 
     repeated = deterministic_validation_batch(
         runtime.streams["coronal_euv"].data_module, max_samples=9
@@ -766,160 +699,12 @@ def test_build_assembles_one_atmosphere_and_balanced_deterministic_batches(tmp_p
     )
 
 
-def test_evaluation_and_autograd_smoke_do_not_mutate_state_or_grad_fields(tmp_path):
-    config = _config(tmp_path)
-    factories, _ = _factories(tmp_path)
-    runtime = build_joint_runtime(config, factories=factories)
-    before = state_dict_sha256(runtime.model)
-
-    result = evaluate_joint_runtime(runtime)
-
-    report = result.report
-    assert report["optimization_started"] is False
-    assert report["checkpoint_written"] is False
-    assert report["state"]["unchanged"] is True
-    assert report["state"]["sha256_before_evaluation"] == before
-    assert report["state"]["sha256_after_evaluation"] == before
-    assert report["gradient_smoke"]["success"] is True
-    assert report["gradient_smoke"]["parameter_grad_fields_unchanged"] is True
-    assert report["gradient_smoke"]["sample_count_by_stream"] == {
-        "photospheric_stokes": 6,
-        "coronal_euv": 6,
-    }
-    assert all(parameter.grad is None for parameter in runtime.model.parameters())
-    assert set(report["gradient_smoke"]["losses"]) == {
-        "streams.photospheric_stokes.likelihood",
-        "streams.coronal_euv.likelihood",
-    }
-    assert set(report["quadrature_convergence"]) == {"coronal_euv"}
-    samples = report["quadrature_convergence"]["coronal_euv"]["samples"]
-    assert samples["8"]["relative_l2_to_finest"] == 0.0
-    assert samples["2"]["relative_l2_to_finest"] > 0.0
-
-
-def test_gradient_smoke_checks_bounded_shared_physics_and_regularization(tmp_path):
-    config = _config(tmp_path)
-    physics = _TrackingPhysicsTerm()
-    regularization = _TrackingRegularizationTerm()
-    factories, _ = _factories(
-        tmp_path,
-        shared_terms={"physics": physics, "regularization": regularization},
-    )
-    runtime = build_joint_runtime(config, factories=factories)
-
-    result = evaluate_joint_runtime(runtime, evaluate_quadrature=False)
-
-    smoke = result.report["gradient_smoke"]
-    assert smoke["success"] is True
-    assert set(smoke["losses"]) == {
-        "streams.photospheric_stokes.likelihood",
-        "streams.coronal_euv.likelihood",
-        "shared.physics.loss",
-        "shared.physics.components.equation",
-        "shared.regularization.loss",
-        "shared.regularization.components.magnitude",
-    }
-    assert all(item["success"] for item in smoke["losses"].values())
-    assert smoke["shared_samples"] == {
-        "physics": {
-            "mode": "training_sampler",
-            "volume": 6,
-            "upper_volume": 6,
-            "upper_boundary": 6,
-            "side_boundary": 4,
-        },
-        "regularization": {
-            "mode": "fixed_evenly_spaced",
-            "sample_count": 6,
-        },
-    }
-    assert physics.calls == [
-        {
-            "training": False,
-            "create_graph": False,
-            "volume": 120,
-            "upper_volume": 60,
-            "upper_boundary": 80,
-            "side_boundary": 80,
-        },
-        {
-            "training": True,
-            "create_graph": True,
-            "volume": 6,
-            "upper_volume": 6,
-            "upper_boundary": 6,
-            "side_boundary": 4,
-        },
-    ]
-    assert regularization.sample_counts == [100, 6]
-    assert physics.volume_points_per_step == 120
-    assert regularization.position_m.shape == (100, 3)
-    assert all(parameter.grad is None for parameter in runtime.model.parameters())
-
-
-def test_configured_gradient_failure_is_fatal_and_preserves_grad_fields(tmp_path):
-    config = _config(tmp_path)
-    factories, _ = _factories(
-        tmp_path,
-        shared_terms={"detached": _SharedGradientTerm(detached=True)},
-    )
-    runtime = build_joint_runtime(config, factories=factories)
-    runtime.model.atmosphere_model.field.grad = torch.tensor(7.0)
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"shared\.detached\.(?:loss|components\.field).*detached",
-    ):
-        evaluate_joint_runtime(runtime, evaluate_quadrature=False)
-
-    assert runtime.model.atmosphere_model.field.grad.item() == 7.0
-    with pytest.raises(RuntimeError, match="Gradient smoke failed"):
-        run_joint_dry_run(config, factories=factories)
-
-    assert not (tmp_path / "output/dry_run.json").exists()
-
-
-def test_dry_run_writes_only_the_auditable_json_report(tmp_path):
-    config = _config(tmp_path, gradients=False)
-    factories, _ = _factories(tmp_path)
-
-    result = run_joint_dry_run(config, factories=factories)
-
-    assert result.report_path == (tmp_path / "output" / "dry_run.json").resolve()
-    report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["format"] == "prom3theus.joint_dry_run"
-    assert report["mode"] == "setup_and_forward_only"
-    assert report["gradient_smoke"] == {"enabled": False, "success": None}
-    assert report["diagnostics"]["streams"]["coronal_euv"]["enabled"] is False
-    assert report["report_path"] == str(result.report_path)
-    assert report["runtime"]["streams"]["coronal_euv"]["uses_shared_atmosphere"] is True
-    assert list((tmp_path / "output").iterdir()) == [result.report_path]
-
-    cli_report = dry_run_joint_inversion(config, factories=factories)
-    assert json.loads(json.dumps(cli_report, allow_nan=False))["report_path"] == str(
-        result.report_path
-    )
-
-
-def test_runner_source_has_no_fitting_or_checkpoint_lifecycle():
-    import prom3theus.application.joint_runner as runner
-
-    for path in Path(runner.__file__).parent.glob("joint_*.py"):
-        if path.name == "joint_training.py":
-            continue  # Explicit optimization entry point, not a setup service.
-        source = path.read_text()
-        assert "torch.optim" not in source, path
-        assert "pytorch_lightning" not in source, path
-        assert ".backward(" not in source, path
-        assert "torch.save(" not in source, path
-
-
-def test_dry_run_routes_aia_payload_and_native_rasters_to_default_registry(
+def test_validation_routes_aia_payload_and_native_rasters_to_default_registry(
     tmp_path, monkeypatch
 ):
     from dataclasses import replace
 
-    config = _config(tmp_path, gradients=False, render_streams=True)
+    config = _config(tmp_path, render_streams=True)
     factories, _ = _factories(tmp_path)
     original_builder = factories.term_builder
 
@@ -974,13 +759,15 @@ def test_dry_run_routes_aia_payload_and_native_rasters_to_default_registry(
         joint_rendering, "default_diagnostic_registry", registry_factory
     )
 
-    result = run_joint_dry_run(config, factories=factories)
+    runtime = build_joint_runtime(config, factories=factories)
+    evaluation = runtime.model.evaluate_batches(runtime.validation_batches)
+    result = joint_rendering._render_aia_diagnostics(runtime, evaluation, tmp_path)
 
     assert set(captured["results"]) == {"coronal_euv"}
     assert captured["stream_kinds"] == {"coronal_euv": "aia_euv"}
     assert captured["label"] == "validation"
     assert captured["contexts"]["coronal_euv"]["rasters"] == (
-        result.runtime.streams["coronal_euv"].rasters
+        runtime.streams["coronal_euv"].rasters
     )
     assert captured["options"] == {
         "aia_max_pixels_per_image": (
@@ -1007,11 +794,9 @@ def test_dry_run_routes_aia_payload_and_native_rasters_to_default_registry(
         "channel_193": 1.0,
         "channel_211": 1.0,
     }
-    assert result.evaluation.report["diagnostics"]["streams"]["coronal_euv"][
-        "registry"
-    ] == ("default_diagnostic_registry")
+    assert result["registry"] == ("default_diagnostic_registry")
     assert (
-        config.solver.work_directory / "validation/setup/diagnostics/initial_aia.png"
+        tmp_path / "diagnostics/initial_aia.png"
     ).is_file()
 
 

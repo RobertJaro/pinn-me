@@ -7,15 +7,24 @@ from copy import deepcopy
 class StreamBatchScheduler:
     version = 3
 
-    def __init__(self, loaders, reference_stream, *, explicit_commit=False, rank=0, world_size=1, steps_per_epoch=None):
+    def __init__(
+        self, loaders, reference_stream, *, explicit_commit=False, rank=0,
+        world_size=1, steps_per_epoch=None, inactive_streams=(),
+    ):
         if world_size < 1 or not 0 <= rank < world_size:
             raise ValueError("Invalid distributed schedule rank/world_size")
         self.rank, self.world_size = rank, world_size
         self.loaders = dict(loaders)
+        # All loaders define checkpoint coverage. Only fitting streams read pixels.
+        self.inactive_streams = tuple(inactive_streams)
+        if set(self.inactive_streams).difference(self.loaders):
+            raise ValueError("Inactive streams must name configured loaders")
+        self.fitting_loaders = {name: loader for name, loader in self.loaders.items()
+                                if name not in self.inactive_streams}
         if steps_per_epoch is not None:
             if type(steps_per_epoch) is not int or steps_per_epoch < 1:
                 raise ValueError("steps_per_epoch must be a positive integer")
-            if any(not hasattr(loader, "iter_random") for loader in self.loaders.values()):
+            if any(not hasattr(loader, "iter_random") for loader in self.fitting_loaders.values()):
                 raise ValueError("Fixed-length epochs require loaders implementing iter_random")
         self.steps_per_epoch = steps_per_epoch
         if reference_stream not in self.loaders:
@@ -106,20 +115,22 @@ class StreamBatchScheduler:
         validity = [True] * count
         if self.steps_per_epoch is not None:
             indices = [step * self.world_size + self.rank for step in range(start, start + count)]
-            self._active = [loader.iter_random(indices) for loader in self.loaders.values()]
+            self._active = [loader.iter_random(indices) for loader in self.fitting_loaders.values()]
         elif self.world_size == 1:
-            self._active = [self._iterator(loader, start, count) for loader in self.loaders.values()]
+            self._active = [self._iterator(loader, start, count) for loader in self.fitting_loaders.values()]
         else:
             reference_count = len(self.loaders[self.reference_stream])
             epoch, within = divmod(start, len(self))
             slots = [(within + i) * self.world_size + self.rank for i in range(count)]
             validity = [slot < reference_count for slot in slots]
             indices = [epoch * reference_count + min(slot, reference_count - 1) for slot in slots]
-            self._active = [self._selected_iterator(loader, indices) for loader in self.loaders.values()]
+            self._active = [self._selected_iterator(loader, indices) for loader in self.fitting_loaders.values()]
 
         def host_batches():
             for valid in validity:
-                batch = {name: next(iterator) for name, iterator in zip(self.loaders, self._active, strict=True)}
+                batch = {name: next(iterator) for name, iterator in zip(self.fitting_loaders, self._active, strict=True)}
+                for name in self.inactive_streams:
+                    batch[name] = {}
                 if self.world_size > 1:
                     batch["_data_valid"] = valid
                 yield batch

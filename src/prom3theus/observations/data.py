@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import math
+import random
 
 import torch
 from prom3theus.observations.loading import buffered_dataloader
@@ -29,8 +30,8 @@ class ObservationDataModule(LightningDataModule):
         batch_size: int = 4,
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
-        data_loading_workers: int = 1,
-        num_workers: int = 2,
+        data_loading_workers: int = 4,
+        num_workers: int = 4,
         pin_memory: bool = False,
         progress: bool = True,
     ) -> None:
@@ -269,6 +270,32 @@ class ObservationDataModule(LightningDataModule):
     def evaluation_collate_fn(self):
         return None
 
+    def sampled_validation_dataloader(self, max_samples: int):
+        """Cover the row-major validation lattice with a repeatable bounded sample."""
+        if type(max_samples) is not int or max_samples < 1:
+            raise ValueError("max_samples must be a positive integer.")
+        if self.validation_dataset is None:
+            self.setup()
+        dataset = self.validation_dataset
+        size = len(dataset)
+        if size <= max_samples:
+            return self.val_dataloader()
+
+        # One pixel per equal-population stratum. Vary the offset within
+        # each stratum so a regular raster width cannot alias a fixed column.
+        rng = random.Random(0)
+        indices = [
+            rng.randrange(i * size // max_samples, (i + 1) * size // max_samples)
+            for i in range(max_samples)
+        ]
+        if isinstance(dataset, Subset):
+            indices = [dataset.indices[i] for i in indices]
+            dataset = dataset.dataset
+        return self._data_loader(
+            dataset=Subset(dataset, indices), shuffle=False,
+            batch_size=self.validation_batch_size, collate_fn=self.evaluation_collate_fn(),
+        )
+
     def val_dataloader(self) -> DataLoader:
         if self.validation_dataset is None:
             self.setup()
@@ -292,7 +319,7 @@ class StoredObservationDataModule(ObservationDataModule):
         batch_size: int = 4,
         validation_batch_size: int | None = None,
         validation_stride: int = 1,
-        num_workers: int = 2,
+        num_workers: int = 4,
         pin_memory: bool = False,
     ) -> None:
         super().__init__(

@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from prom3theus.core import ATOMIC_MASS_UNIT, K_BOLTZMANN, SPEED_OF_LIGHT
-from prom3theus.core.validation import require_tensor
+from prom3theus.core.validation import require_tensor, tensor_validation_enabled
 
 from .atomic import AtomicDatabase, SpectralLine
 from .opacity import damping_rate, integrated_line_opacity
@@ -154,10 +154,10 @@ class PolarizedLineOpacity(nn.Module):
                             ("continuum_extinction", continuum), ("alpha500", alpha500)):
             if value.dtype != temperature.dtype or value.device != temperature.device:
                 raise TypeError(f"{name} must use the temperature tensor's dtype and device")
-            require_tensor(torch.isfinite(value).all(), f"{name} must contain only finite values")
-        require_tensor(((wavelength >= 2000.) & (wavelength <= 100000.)).all(),
+            require_tensor(lambda: torch.isfinite(value).all(), f"{name} must contain only finite values")
+        require_tensor(lambda: ((wavelength >= 2000.) & (wavelength <= 100000.)).all(),
                        "Standard-air wavelengths must lie in the supported 2000--100000 Angstrom range")
-        require_tensor((continuum > 0).all() & (alpha500 > 0).all(),
+        require_tensor(lambda: (continuum > 0).all() & (alpha500 > 0).all(),
                        "continuum_extinction and alpha500 must be strictly positive")
 
     def _orientation(self, magnetic_field: torch.Tensor):
@@ -306,19 +306,19 @@ class PolarizedLineOpacity(nn.Module):
                     raise ValueError(f"{name} must share the temperature point shape (plus 3 for magnetic field)")
                 if value.device != temperature.device or value.dtype != temperature.dtype:
                     raise TypeError(f"{name} must use the temperature tensor's dtype and device")
-                require_tensor(torch.isfinite(value).all(), f"{name} must contain only finite values")
-            require_tensor((temperature > 0).all(), "temperature must be strictly positive")
-            require_tensor((velocity_los.abs() < SPEED_OF_LIGHT).all(), "velocity_los must remain strictly subluminal")
-            require_tensor((microturbulence >= 0).all(), "microturbulence must be non-negative")
+                require_tensor(lambda: torch.isfinite(value).all(), f"{name} must contain only finite values")
+            require_tensor(lambda: (temperature > 0).all(), "temperature must be strictly positive")
+            require_tensor(lambda: (velocity_los.abs() < SPEED_OF_LIGHT).all(), "velocity_los must remain strictly subluminal")
+            require_tensor(lambda: (microturbulence >= 0).all(), "microturbulence must be non-negative")
 
         def density(name, value, *, allow_zero=False):
             value = torch.as_tensor(value, dtype=temperature.dtype, device=temperature.device)
             if value.shape != temperature.shape:
                 raise ValueError(f"{name} must share the temperature shape")
-            if validate:
+            if validate and tensor_validation_enabled():
                 positive = value >= 0 if allow_zero else value > 0
                 qualifier = "non-negative" if allow_zero else "strictly positive"
-                require_tensor(torch.isfinite(value).all() & positive.all(),
+                require_tensor(lambda: torch.isfinite(value).all() & positive.all(),
                                f"{name} must be finite and {qualifier}")
             return value
 
@@ -438,7 +438,7 @@ class PolarizedLineOpacity(nn.Module):
         if paired_wavelengths:
             if wavelength.shape != temperature.shape or wavelength.ndim != 1:
                 raise ValueError("Paired line queries require one-dimensional matching point/wavelength arrays")
-            require_tensor(torch.isfinite(wavelength).all() & ((wavelength >= 2000.) & (wavelength <= 100000.)).all(),
+            require_tensor(lambda: torch.isfinite(wavelength).all() & ((wavelength >= 2000.) & (wavelength <= 100000.)).all(),
                            "Paired air wavelengths must be finite and within 2000--100000 Angstrom")
         self._validate_spectral_inputs(wavelength[:1] if paired_wavelengths else wavelength,
                                       temperature, continuum_extinction, alpha500)
@@ -456,7 +456,7 @@ class PolarizedLineOpacity(nn.Module):
                         else (len(self.lines), len(wavelength)))
             if offsets.shape != expected:
                 raise ValueError("line_velocity_offsets_km_s must be finite [line,wavelength]")
-            require_tensor(torch.isfinite(offsets).all(), "line_velocity_offsets_km_s must be finite [line,wavelength]")
+            require_tensor(lambda: torch.isfinite(offsets).all(), "line_velocity_offsets_km_s must be finite [line,wavelength]")
         result = self.evaluate_prepared(prepared, offsets, continuum_extinction,
                                        alpha500=alpha500 if normalize_to_alpha500 else None,
                                        return_diagnostics=return_diagnostics)

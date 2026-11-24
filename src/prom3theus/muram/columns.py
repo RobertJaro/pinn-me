@@ -1,13 +1,16 @@
-"""Bounded native-column access shared by diagnostics and synthesis."""
+"""Eager native volumes with sequential column batches for synthesis."""
 
 from __future__ import annotations
 
-from numbers import Integral
-
+import logging
 import os
+from numbers import Integral
+from time import perf_counter
 
 import numpy as np
-from torch.utils.data import DataLoader, Dataset
+from .reporting import progress_bar, timed_stage
+
+logger = logging.getLogger(__name__)
 
 
 class ArrayColumns:
@@ -15,7 +18,8 @@ class ArrayColumns:
 
     def __init__(self, quantities):
         self.quantities = quantities
-        self.shape = quantities["temperature"].shape
+        self.shape = next(value.shape for value in quantities.values()
+                          if isinstance(value, np.ndarray) and value.ndim == 3)
         self.ds_m = quantities["ds_m"]
 
     def strided(self, step):
@@ -24,6 +28,12 @@ class ArrayColumns:
         return ArrayColumns({
             name: value[::step, ::step, :] if isinstance(value, np.ndarray)
             and value.ndim == 3 else value
+            for name, value in self.quantities.items()
+        })
+
+    def cropped(self, depth):
+        return ArrayColumns({
+            name: value[..., :depth] if isinstance(value, np.ndarray) and value.ndim == 3 else value
             for name, value in self.quantities.items()
         })
 
@@ -40,12 +50,11 @@ class ArrayColumns:
             }}
 
 
-class NativeColumnDataset(Dataset):
-    """Flattened horizontal pixels; each sample contains one full native column.
+class NativeColumnDataset:
+    """Read-only native field mappings with unit and orientation descriptors.
 
-    Only filenames and orientation metadata are serialized to workers. Each
-    process opens its own read-only maps on first use. No reshaping of the
-    oriented cube into a contiguous full-volume array is needed.
+    Also exposes individual columns for inspection; synthesis materializes full
+    fields before iterating over in-memory column batches.
     """
 
     def __init__(self, paths, native_shape, axis_order, scales, signs, *, y_sign, z_sign):
@@ -90,6 +99,10 @@ class NativeColumnDataset(Dataset):
         if not 0 <= native_index < len(self):
             raise IndexError(native_index)
         ix, iy = divmod(native_index, self.shape[1])
+        return {"index": output_index, "fields": self.read_fields(ix, iy, fields)}
+
+    def read_fields(self, ix, iy, fields):
+        """Read one column or a batch of coordinate pairs in synthesis units."""
         values = {}
         for name in fields:
             column = np.array(self._mapped(name)[ix, iy, :], dtype=np.float32, copy=True)
@@ -97,100 +110,74 @@ class NativeColumnDataset(Dataset):
             if self.signs[name] < 0:
                 np.negative(column, out=column)
             values[name] = column
-        return {"index": output_index, "fields": values}
+        return values
 
 
-class _ColumnBatchSampler:
-    """Sequential flattened pixel batches, with per-pass field selection.
+class _ColumnVolume:
+    """One cache of converted full cubes, shared by strided views of a snapshot."""
 
-    The sampler runs in the parent process. Keeping selection in the requests
-    supports field/stride selection without serializing any cube contents.
-    """
-
-    def __init__(self, shape):
-        self.shape = shape
-        self.batch_size = 256
-        self.stride = 1
-        self.fields = ()
-
-    @property
-    def selected_shape(self):
-        return tuple((size + self.stride - 1) // self.stride for size in self.shape[:2])
-
-    def __len__(self):
-        nx, ny = self.selected_shape
-        return (nx * ny + self.batch_size - 1) // self.batch_size
-
-    def __iter__(self):
-        nx, ny = self.selected_shape
-        for start in range(0, nx * ny, self.batch_size):
-            requests = []
-            for index in range(start, min(start + self.batch_size, nx * ny)):
-                ix, iy = divmod(index, ny)
-                native_index = ix * self.stride * self.shape[1] + iy * self.stride
-                requests.append((native_index, index, self.fields))
-            yield requests
-
-
-class _ColumnLoader:
-    """One two-worker DataLoader per snapshot; synthesis uses one source pass."""
-
-    def __init__(self, dataset):
+    def __init__(self, dataset, *, depth=None, stride=1):
         self.dataset = dataset
-        self.sampler = _ColumnBatchSampler(dataset.shape)
-        self.loader = None
-        self.active = False
+        self.depth = dataset.shape[2] if depth is None else depth
+        self.stride = stride
+        self.shape = tuple((size + stride - 1) // stride for size in dataset.shape[:2]) + (self.depth,)
+        self.fields = {}
 
-    def batches(self, batch_size, stride, fields):
-        if self.active:
-            raise RuntimeError("Concurrent passes over one native snapshot are not supported.")
-        self.active = True
-        try:
-            self.sampler.batch_size = batch_size
-            self.sampler.stride = stride
-            self.sampler.fields = tuple(fields)
-            if self.loader is None:
-                self.loader = DataLoader(
-                    self.dataset, batch_sampler=self.sampler, num_workers=2,
-                    prefetch_factor=1, persistent_workers=True,
-                    multiprocessing_context="spawn",
-                )
-            for batch in self.loader:
-                yield batch
-        finally:
-            self.active = False
+    def load(self, names, *, progress=False):
+        missing = [name for name in names if name not in self.fields]
+        if not missing:
+            return
+        gib = int(np.prod(self.shape)) * len(missing) * 4 / 2**30
+        with timed_stage(logger, "Loading %d selected native fields (%.2f GiB)", len(missing), gib), progress_bar(
+            missing, description="Loading cube fields", unit="field", enabled=progress,
+        ) as fields:
+            for name in fields:
+                logger.info("Loading native field %s", name)
+                selected = self.dataset._mapped(name)[::self.stride, ::self.stride, :self.depth]
+                values = np.array(selected, dtype=np.float32, copy=True, order="C")
+                np.multiply(values, np.float32(self.dataset.scales[name]), out=values)
+                if self.dataset.signs[name] < 0:
+                    np.negative(values, out=values)
+                values.flags.writeable = False
+                self.fields[name] = values
 
     def close(self):
-        if self.active:
-            raise RuntimeError("Cannot close an active column loader.")
-        # Releasing DataLoader releases its persistent iterator and workers.
-        self.loader = None
+        self.fields.clear()
+        self.dataset._mappings.clear()
 
 
 class NativeColumns:
-    """Sequential column batches from a lazy memory-mapped dataset."""
+    """Full native cubes loaded once, then processed in sequential column batches."""
 
     def __init__(self, dataset, ds_m, *, stride=1, owner=None):
         self.dataset = dataset
         self.ds_m = ds_m
         self.stride = stride
-        self.shape = tuple((size + stride - 1) // stride for size in dataset.shape[:2]) + (dataset.shape[2],)
-        self._owner = _ColumnLoader(dataset) if owner is None else owner
+        self._owner = _ColumnVolume(dataset) if owner is None else owner
+        self.shape = tuple((size + stride - 1) // stride for size in dataset.shape[:2]) + (self._owner.depth,)
 
     def strided(self, step):
         if step == 1:
             return self
         return NativeColumns(self.dataset, self.ds_m, stride=self.stride * step, owner=self._owner)
 
+    def cropped(self, depth):
+        if depth == self.shape[2] and self.stride == self._owner.stride:
+            return self
+        owner = _ColumnVolume(self.dataset, depth=depth, stride=self.stride)
+        return NativeColumns(self.dataset, self.ds_m, stride=self.stride, owner=owner)
+
     def batches(self, batch_size, fields=None):
         if isinstance(batch_size, bool) or not isinstance(batch_size, Integral) or batch_size < 1:
             raise ValueError("batch_size must be a positive integer.")
         names = tuple(self.dataset.paths) if fields is None else tuple(fields)
-        for batch in self._owner.batches(batch_size, self.stride, names):
-            ix, iy = np.unravel_index(batch["index"].numpy(), self.shape[:2])
-            yield ix, iy, {"ds_m": self.ds_m, **{
-                name: value.numpy()[:, None, :] for name, value in batch["fields"].items()
-            }}
+        self.load_fields(names)
+        source = ArrayColumns({"ds_m": self.ds_m, **{name: self._owner.fields[name] for name in names}})
+        yield from source.strided(self.stride // self._owner.stride).batches(batch_size, names)
+
+    def load_fields(self, fields=None, *, progress=False):
+        names = tuple(self.dataset.paths) if fields is None else tuple(fields)
+        self._owner.load(names, progress=progress)
 
     def close(self):
         self._owner.close()
@@ -219,13 +206,35 @@ def strided_columns(quantities, stride):
 
 
 def column_batches(quantities, batch_size, *, fields=None, progress=False, description="Synthesis"):
-    from tqdm.auto import tqdm
-
     if isinstance(batch_size, bool) or not isinstance(batch_size, Integral) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer.")
     source = as_columns(quantities)
-    with tqdm(total=source.shape[0] * source.shape[1], desc=description,
-              unit="column", disable=not progress) as bar:
-        for ix, iy, columns in source.batches(batch_size, fields):
-            yield ix, iy, columns
-            bar.update(len(ix))
+    if isinstance(source, NativeColumns):
+        source.load_fields(fields, progress=progress)
+    total = source.shape[0] * source.shape[1]
+    logger.debug("%s: shape=%s, batch_size=%d, fields=%s", description, source.shape, batch_size, fields)
+    started = finished = last_report = perf_counter()
+    loaded_seconds = processing_seconds = 0.0
+    completed = 0
+    with progress_bar(total=total, description=description, unit="column", enabled=progress) as bar:
+        try:
+            for ix, iy, columns in source.batches(batch_size, fields):
+                ready = perf_counter()
+                loaded_seconds += ready - finished
+                yield ix, iy, columns
+                processing_seconds += perf_counter() - ready
+                completed += len(ix)
+                bar.update(len(ix))
+                now = perf_counter()
+                if progress and bar.disable and now - last_report >= 30.0:
+                    elapsed = now - started
+                    rate = completed / elapsed
+                    logger.info("%s: %d/%d columns (%.1f%%), %.1f columns/s, ETA %.0f s",
+                                description, completed, total, 100 * completed / total,
+                                rate, (total - completed) / rate)
+                    last_report = now
+                finished = perf_counter()
+        finally:
+            logger.info("%s: processed %d/%d columns in %.1f s (loading/waiting %.1f s; processing %.1f s)",
+                        description, completed, total, perf_counter() - started,
+                        loaded_seconds, processing_seconds)

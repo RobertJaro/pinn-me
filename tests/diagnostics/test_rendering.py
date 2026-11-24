@@ -36,7 +36,17 @@ def test_individual_stokes_profiles_retain_signs_and_raw_units():
         "stokes_reference": raw * 100,
         "stokes_pred": raw * 50,
     }
-    figure = StokesPlotter().individual_profiles_figure(outputs, torch.arange(3.), "test")
+    wavelength = torch.tensor([6301.47, 6301.50, 6301.53], dtype=torch.float64)
+    figure = StokesPlotter().individual_profiles_figure(
+        outputs, wavelength, "test", radiance_scale_w_m3_sr=1.e13
+    )
+    for axis, index in zip(figure.axes[::4], (0, 2, 1), strict=True):
+        observed, predicted = axis.lines
+        np.testing.assert_array_equal(observed.get_xdata(), wavelength)
+        np.testing.assert_array_equal(observed.get_ydata(), raw[index, 0])
+        np.testing.assert_array_equal(predicted.get_ydata(), raw[index, 0] * .5)
+        assert axis.get_ylim()[0] > 0
+    assert "1e+13" in figure.get_supylabel()
     np.testing.assert_array_equal(figure.axes[1].lines[0].get_ydata(), raw[0, 1])
     np.testing.assert_array_equal(figure.axes[7].lines[1].get_ydata(), raw[2, 3] * .5)
     assert "pixel (2, 3)" in figure.axes[0].get_ylabel()
@@ -61,6 +71,7 @@ def test_stokes_plotter_accepts_the_canonical_observation_contract():
         "integrated_prediction": prediction.abs().sum(dim=-1),
         "integrated_reference": reference.abs().sum(dim=-1),
     }
+    outputs["integrated_prediction"][:, 0] = torch.tensor([0., 1., 4., 7.])
 
     figure = StokesPlotter().validation_figure(
         outputs,
@@ -72,6 +83,8 @@ def test_stokes_plotter_accepts_the_canonical_observation_contract():
     )
 
     assert len(figure.axes) >= 12
+    for axis in (figure.axes[0], figure.axes[4]):
+        assert axis.images[0].get_clim() == (0., 7.)
     for axis in figure.axes[8:12]:
         np.testing.assert_array_equal(axis.lines[0].get_xdata(), wavelength.numpy())
     figure.clear()

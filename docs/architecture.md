@@ -15,10 +15,10 @@ The production Stokes path has explicit stages with one owner for each stage:
 ```mermaid
 flowchart TD
     batch[Observation batch: rays, wavelengths, measured Stokes] --> rays[Sample ray points and canonical polarization basis]
-    rays --> atmosphere[Evaluate atmosphere network once]
+    rays --> atmosphere[Evaluate atmosphere at all points per sampling stage]
     atmosphere --> physics[Prepare plasma, populations and line physics once]
     batch --> queries[Prepare exact spectral coordinates once]
-    physics --> coefficients[Evaluate spectral coefficients in wavelength blocks]
+    physics --> coefficients[Evaluate coefficients across the full spectrum]
     queries --> coefficients
     coefficients --> transfer[Ordered parallel formal Stokes integration]
     transfer --> detector[Rotate Stokes and apply instrument response]
@@ -32,9 +32,9 @@ flowchart TD
 | Ray tracing and sampling | `LTEWindow.boundary_queries`, `sample_rays` | True shell intersections; stratified training jitter shared across all wavelengths; fixed endpoints and deterministic evaluation |
 | Atmosphere | `LTEWindow.evaluate_atmosphere` | One batched network evaluation at all sampled points |
 | Point physics | `LTELocalCoefficients.prepare_atmosphere`, `PolarizedLineOpacity.prepare` | One forward call; live tensors retain gradients |
-| Spectral coordinates | `LTELocalCoefficients.prepare_spectrum` | Full query prepared once, then sliced into blocks |
-| Spectral coefficients | `LTELocalCoefficients.evaluate_spectrum`, `PolarizedLineOpacity.evaluate_prepared` | Continuum and Voigt/Faraday profiles for one spectral block |
-| Formal integration | `formal_stokes`, `affine_transfer_reduce` | Local propagators followed by an ordered balanced reduction |
+| Spectral coordinates | `LTELocalCoefficients.prepare_spectrum` | Full query prepared once per ray batch |
+| Spectral coefficients | `LTELocalCoefficients.evaluate_spectrum`, `PolarizedLineOpacity.evaluate_prepared` | Continuum and Voigt/Faraday profiles across all wavelengths |
+| Formal integration | `formal_stokes`, `polarized_sweep` | Bottom-to-top Stokes-vector transport |
 | Detector response | `StokesObservationTerm.observe_stokes` | Emergent spectra rotated, calibrated and spectrally sampled |
 | Likelihood | `StokesObjective.compare` and scoring methods | Transformed prediction/target and continuum weights reused |
 | Training and reporting | `JointInversionModule`, `training.metrics` | Optimizer every update; detached fit diagnostics at log cadence |
@@ -43,8 +43,7 @@ flowchart TD
 queries. Their axes remain separate. A per-ray grid broadcasts across depth and
 uses gathers from each point's continuum table; it never replicates the entire
 plasma state over wavelength. Field orientation, Doppler widths, damping, Zeeman
-splitting and integrated line strengths are prepared once, before spectral
-blocks. Prepared state is not cached across optimizer updates or detached.
+splitting and integrated line strengths are prepared once per sampled point for the full spectrum. Prepared state is not cached across optimizer updates or detached.
 
 The shipped inversion presets set `synthesis.windows[].jitter_fraction: 1.0`.
 Interior points jitter independently between grid midpoints, with a small epsilon
@@ -62,13 +61,9 @@ subtracting the solar radius from a rounded global position. `CenteredWavelength
 likewise keeps small Doppler shifts separate from the absolute optical wavelength.
 The fixed detector calibration is prepared once at higher precision on CPU.
 
-`core.validation.deferred_validation` collects device-side validity flags at the
-production prediction boundary. Nested numerical routines contribute flags and
-the outer boundary transfers them together once per device. Public numerical
-calls outside this context still validate immediately. Shape/type/index-safety
-checks remain eager; invalid numerical inputs still raise an error before a
-prediction is returned. This removes repeated validation waits inside spectral
-blocks, not all CPU orchestration in training.
+Optimizer batches skip numerical validation predicates and retain shape and dtype
+checks. For standalone predictions and validation, `deferred_validation` collects
+numerical flags and checks them once per device at the prediction boundary.
 
 Training calls the lightweight scoring path between logging steps. Public
 `evaluate_batches` retains full diagnostics by default for evaluation, artifacts
@@ -78,8 +73,8 @@ already includes DDP normalization and is averaged across ranks only once.
 
 The model is still an atmosphere network with optional physical constraints.
 There is no radiation network, iterative LTE population solve, or sequential
-layer-intensity recurrence. Wavelength blocks and the fixed algebraic polynomial
-operations are implementation loops; the ordered depth reduction needs only
+layer-intensity recurrence. The fixed algebraic polynomial operates on all rays and wavelengths together.
+The ordered depth reduction needs only
 `ceil(log2(number_of_layers))` stages.
 
 ## Observation preprocessing
@@ -131,7 +126,7 @@ Dependencies must point down this diagram.  In particular:
 | `instruments` | Independent Hinode, HMI, and AIA readers/preparation plus their response operators | Optimizers, loss scheduling, artifact policy |
 | `download` | Independent observation-download workflows such as AIA time-series/calibration acquisition | Instrument-specific parsing, deployment dates/paths, training |
 | `preprocess` | Reusable HMI/AIA preparation workflows, directory scanning, crop-aware reuse checks, and instrument API composition | Deployment paths, fixed crop settings, optimization |
-| `application` | Run orchestration, typed configuration translation, stream/scene assembly, setup evaluation, and report scheduling | Numerical equations, optimizer internals |
+| `application` | Run orchestration, typed configuration translation, stream/scene assembly, training validation, and report scheduling | Numerical equations, optimizer internals |
 | `inversion` | Scene LTE synthesis windows, stream likelihoods, shared objective reduction, physical constraints | Diagnostic rendering, schema translation, Lightning lifecycle |
 | `training` | One stream training lifecycle and resumable reference-stream scheduling | Radiative-transfer equations, instrument parsing |
 | `artifacts` | Atomic self-contained persistence and strict reconstruction/export | Observation preparation, training orchestration |
@@ -199,13 +194,12 @@ keep non-owning references. Only atmosphere and calibration parameters are
 trained. `LTELocalCoefficients` supplies dimensional K and normalized Planck
 sources independently at every ray node.
 
-`rt.formal_transfer` computes frozen midpoint layer attenuation in parallel,
-then composes ordered affine maps in a balanced tree. For adjacent near/far
-layers, `(A,b) = (A_near A_far, b_near + A_near b_far)`. Associativity permits
-O(log depth) stages without assuming commuting propagation matrices. The
-reduction works relative to the bottom intensity to preserve constant thermal
-equilibrium. Standard tensor operations support first and higher derivatives.
-Float64 transfer arithmetic is the default; outputs retain the coefficient dtype.
+`rt.formal_transfer` evaluates the analytic midpoint exponential coefficients
+in parallel. Each ray and wavelength advances its Stokes vector from the
+bottom boundary to the observer. A fused CUDA kernel applies the cubic
+polarized exponential directly to those vectors. Working relative to the
+bottom intensity preserves uniform thermal equilibrium. The default transfer
+precision is float32. The integration supports first and higher derivatives.
 
 Every observed characteristic reaches the true lower shell boundary. The bottom
 source is the modeled local Planck function, or a configured fixed incoming
@@ -426,8 +420,9 @@ Stokes and atmosphere plots retain the renderer titles, such as
 `Stokes comparison`, `Magnetic field`, and `Optical depth`;
 filenames and step numbers never create dashboard keys. There is no `streams/`
 image logging namespace;
-step-specific directories retain local history. Gradient-finiteness checks remain
-active without logging gradient extrema.
+step-specific directories retain local history. Stokes comparison maps sample the
+observation raster after binning, up to `diagnostics.visualization.ray_sampling.max_pixels`.
+The metric loader uses its own `validation_stride`.
 
 `diagnostics.providers` registers rendering callbacks by term type. Setup and training
 collect returned artifact records and sends them to logging from `DiagnosticOutput(report, paths)` without scanning report text or guessing
@@ -450,12 +445,12 @@ which runs in one process.
 
 `LTEWindow` evaluates jittered coarse ray-distance nodes. Optional
 `coarse_to_fine` adds contribution-guided fine points using the shared depth
-sampler: 32 coarse plus 32 fine in the Hinode Stokes-only preset. Coarse
+sampler: 16 coarse plus 16 fine in the MURaM Hinode Stokes-only preset. Coarse
 coefficients are reused, fine points receive a second batched network evaluation,
 and the sorted merged distances define the integration intervals. Both sets
 retain atmosphere gradients; proposal locations are detached. `depth_count`
-controls the coarse count; `wavelength_chunk_size` controls block size, not
-spectral resolution. All layer coefficients and affine-map pairings within a
+controls the coarse count. One formal transfer integrates the full wavelength
+grid for every ray in the observation batch. All layer coefficients and affine-map pairings within a
 reduction stage are batched. No serial intensity loop remains in production.
 
 `inversion.depth_sampling` continues to provide bounded jitter, contribution-weighted

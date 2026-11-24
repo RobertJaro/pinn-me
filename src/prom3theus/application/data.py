@@ -121,7 +121,6 @@ def prepare_joint_data(
     *,
     rebuild_observations,
     for_training,
-    compute_summaries,
 ):
     from prom3theus.observations import ObservationRaster, ImageObservationRaster
     from prom3theus.observations.scene import rebase_stokes_raster
@@ -206,27 +205,38 @@ def prepare_joint_data(
     loaded = {stream.id: loaded[stream.id] for stream in config.streams}
     if training is not None:
         training = {stream.id: training[stream.id] for stream in config.streams}
-    summaries = {}
-    if compute_summaries:
-        with _startup_stage("derive reusable domain summaries"):
-            summaries["observation_bounds"] = _joint_observation_bounds(loaded, scene)
-            stokes = {
-                name: stream
-                for name, stream in loaded.items()
-                if stream.prepared.descriptor.observation_kind == "stokes"
-            }
-            if stokes:
-                summaries["stokes_bounds"] = _joint_observation_bounds(stokes, scene)
-                summaries["observation_times_hours"] = _observation_times_hours(
-                    stokes, scene
-                )
     return JointDataModule(
         loaded,
         scene,
         train_loaders=training,
-        summaries=summaries,
+        summaries={},
         contract=data_contract(config, resources),
     )
+
+
+def _complete_domain_summaries(module, config):
+    """Fill only the geometry summaries required by this run, including on restore."""
+    if module.summaries is None:
+        module.summaries = {}
+    summaries = module.summaries
+    previous_count = len(summaries)
+    if "observation_bounds" not in summaries:
+        summaries["observation_bounds"] = _joint_observation_bounds(module.streams, module.scene)
+    if config.physics is not None and config.physics.potential_boundary.enabled:
+        stokes = {
+            name: stream for name, stream in module.streams.items()
+            if stream.prepared.descriptor.observation_kind == "stokes"
+        }
+        if not stokes:
+            raise ValueError("Potential boundaries require a Stokes observation footprint")
+        if "stokes_bounds" not in summaries:
+            summaries["stokes_bounds"] = (
+                summaries["observation_bounds"] if len(stokes) == len(module.streams)
+                else _joint_observation_bounds(stokes, module.scene)
+            )
+        if config.atmosphere.geometry.time_dependent and "observation_times_hours" not in summaries:
+            summaries["observation_times_hours"] = _observation_times_hours(stokes, module.scene)
+    return len(summaries) != previous_count
 
 
 def load_joint_data(
@@ -238,6 +248,7 @@ def load_joint_data(
     rebuild_observations=False,
     for_training=False,
     compute_summaries=True,
+    before_handoff=None,
 ):
     contract = data_contract(config, resources)
 
@@ -246,12 +257,11 @@ def load_joint_data(
             raise ValueError(
                 "Saved data module differs from the requested data/scene/resource contract; explicitly rebuild observations"
             )
-        if not for_training or module.train_loaders is not None:
-            return False
-        module.train_loaders = prepare_training_loaders(
-            config, module.streams, module.scene
-        )
-        return True
+        updated = compute_summaries and _complete_domain_summaries(module, config)
+        if for_training and module.train_loaders is None:
+            module.train_loaders = prepare_training_loaders(config, module.streams, module.scene)
+            updated = True
+        return updated
 
     module = restore_or_create_data_module(
         config.solver.work_directory / "data_module.pt",
@@ -262,10 +272,10 @@ def load_joint_data(
             build_scene,
             rebuild_observations=rebuild_observations,
             for_training=for_training,
-            compute_summaries=compute_summaries,
         ),
         rebuild=rebuild_observations,
         finalize=finalize,
+        before_handoff=before_handoff,
     )
     for stream in config.streams:
         options = getattr(stream.observation, "loader", None)

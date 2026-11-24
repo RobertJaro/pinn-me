@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 
-def buffered_dataloader(dataset, *, num_workers=2, shuffle=False, **options):
+def buffered_dataloader(dataset, *, num_workers=4, shuffle=False, **options):
     """Bulk observation loading; generic plugin datasets retain DataLoader support."""
     from .bulk import SequentialBulkLoader, supported
     if type(num_workers) is not int or num_workers < 0:
@@ -18,8 +18,8 @@ def buffered_dataloader(dataset, *, num_workers=2, shuffle=False, **options):
         options.pop("persistent_workers", None)
         if shuffle:
             from .tensor_loader import PersistentTensorLoader
-            return PersistentTensorLoader(dataset, **options)
-        return SequentialBulkLoader(dataset, **options)
+            return PersistentTensorLoader(dataset, num_workers=num_workers, **options)
+        return SequentialBulkLoader(dataset, num_workers=num_workers, **options)
     # Non-raster extension datasets retain their own contract and sampling policy.
     pin = options.pop("pin_memory", False) and torch.cuda.is_available()
     return DataLoader(dataset, num_workers=num_workers, shuffle=shuffle,

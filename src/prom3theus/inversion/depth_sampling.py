@@ -203,7 +203,8 @@ def stokes_interval_proposal(propagation, intervals):
     wavelength contributes equally to the proposal so continuum and line-core
     formation regions both receive samples. Polarized transfer still uses full K.
     """
-    extinction = propagation[..., 0, 0].transpose(-1, -2)
+    eta_i = propagation[..., 0] if propagation.shape[-1] == 7 else propagation[..., 0, 0]
+    extinction = eta_i.transpose(-1, -2)
     delta_tau = (0.5 * extinction[..., :-1] + 0.5 * extinction[..., 1:]) * intervals[..., None, :]
     tau_before = torch.cat((torch.zeros_like(delta_tau[..., :1]),
                             delta_tau[..., :-1].cumsum(dim=-1)), dim=-1)
@@ -235,9 +236,9 @@ def contribution_fine_distances(
         or not 0 <= uniform_weight_floor <= 1
     ):
         raise ValueError("Invalid fine sample count or proposal floor.")
-    require_tensor(torch.isfinite(contribution).all() & (contribution >= 0).all(),
+    require_tensor(lambda: torch.isfinite(contribution).all() & (contribution >= 0).all(),
                    "Contribution weights must be finite and nonnegative.")
-    require_tensor(torch.isfinite(distance_m).all() & (distance_m.diff(dim=-1) > 0).all(),
+    require_tensor(lambda: torch.isfinite(distance_m).all() & (distance_m.diff(dim=-1) > 0).all(),
                    "Proposal distances must be finite and strictly increasing.")
     interval_count = contribution.shape[-1]
     normalized = _unit_mass(contribution)

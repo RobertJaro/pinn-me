@@ -1,11 +1,12 @@
 # Historical local HMI inversion and force-free baseline
 
 This records a local experiment whose machine-specific configuration is no longer
-distributed. `scripts/hmi/run_local.py` requires an explicit `--config` pointing to
+distributed. `python -m prom3theus.diagnostics.commands.run_local_hmi` requires an explicit `--config` pointing to
 a user-supplied configuration. The commands below use `/path/to/local_hmi.yaml`;
 adapt its paths and settings to reproduce the recorded setup.
 
-The experiment uses `data/hmi` and selects one 256 × 256 bipolar region of
+By default the command reads `data/hmi` from the working directory. Use
+`--source-directory` to select another location. The experiment selects one 256 × 256 bipolar region of
 the March 23, 2024 22:12 TAI acquisition, centered at Carrington longitude
 213.2877°, latitude −12.9481°. The existing input is already a cutout; further
 cropping accumulates its detector offsets so the HMI response still samples
@@ -55,7 +56,7 @@ Use Python ≥3.11 with the project, observation and visualization dependencies.
 In this checkout the `nf2` Conda environment has them installed.
 
 ```bash
-PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml --prepare-only
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.run_local_hmi --config /path/to/local_hmi.yaml --prepare-only
 ```
 
 This prepares the region and checks calibration, writing `preparation.json`
@@ -67,16 +68,16 @@ network operation, performed separately with a registered JSOC email:
 ```bash
 PYTHONPATH=src python -m prom3theus.cli.main prepare hmi-responses \
   data/hmi/*.fits --output data/hmi_responses_local --email YOUR_JSOC_EMAIL
-PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.run_local_hmi --config /path/to/local_hmi.yaml
 # Continue the same inversion to a larger total step count if necessary:
-PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml --steps 6000
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.run_local_hmi --config /path/to/local_hmi.yaml --steps 6000
 ```
 
 The recorded height-independent refit starts from the completed unrestricted
 inversion and transfers network weights only:
 
 ```bash
-PYTHONPATH=src python scripts/hmi/run_local.py --config /path/to/local_hmi.yaml \
+PYTHONPATH=src python -m prom3theus.diagnostics.commands.run_local_hmi --config /path/to/local_hmi.yaml \
   --steps 1000 \
   --initialize-from-state runs/hmi_local_fine/state.p3s
 ```
@@ -99,7 +100,6 @@ Products go to the chosen configuration's output directory
 (`runs/hmi_local_constant/` for the default configuration):
 
 - `report.json`: preparation state and, after optimization, fit and corona checks.
-- `setup.json`: initial Stokes loss and finite-gradient checks.
 - `initial_reference.npz`: original diagnostic predictions, exact observations,
   pixel indices and initialization provenance, retained across continuations.
 - `state.p3s`, `last.ckpt`: trained photospheric model and resumable checkpoint.
@@ -132,8 +132,7 @@ configuration uses I weight 20,000 to prioritize the remaining brightness
 error; Q/U/V training weights remain 390,625.
 Continuations retain the original predictions and verify that observations and
 sample indices match exactly; they do not reset the comparison to an unfitted
-network. `setup.json` describes the newly assembled diagnostic runtime, while
-the fit report uses the preserved initial reference.
+network. The fit report uses the preserved initial reference.
 
 The coronal report checks recovered photospheric Br, nonzero source and top
 field, Cartesian finite-difference divergence/curl/Lorentz residuals, and field

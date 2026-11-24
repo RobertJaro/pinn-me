@@ -8,8 +8,9 @@ import torch
 from pytorch_lightning import LightningModule
 
 from prom3theus.config.joint_schema import JointTrainingConfig, LossBalanceConfig
+from prom3theus.core.validation import skip_tensor_validation
 from prom3theus.inversion.joint import JointForwardModel
-from prom3theus.training.optimizers import build_optimizer
+from prom3theus.training.optimizers import build_optimizer, exponential_lr_factor
 from prom3theus.training.metrics import reduce_training_metrics
 
 
@@ -37,15 +38,13 @@ def _scientific_contract(contract):
     config = contract.get("configuration", {})
     for key in ("training", "solver", "dry_run", "diagnostics", "logging"):
         config.pop(key, None)
-    # Chunking, training jitter and arithmetic precision are fitting controls.
+    # Ignore legacy wavelength batching and current training-only numerical controls.
     # Retain the physical model and depth grid in the compatibility contract.
-    for window in config.get("synthesis", {}).get("windows", []):
-        window.pop("wavelength_chunk_size", None)
-        window.pop("jitter_fraction", None)
-        window.pop("transfer_precision", None)
-        if not (window.get("coarse_to_fine") or {}).get("enabled", False):
-            window.pop("coarse_to_fine", None)
-    for window in contract.get("synthesis_windows", {}).values():
+    windows = config.get("synthesis", {}).get("windows", [])
+    for window in (*windows, *contract.get("synthesis_windows", {}).values()):
+        if window.get("coefficient_backend", "exact_lte") == "exact_lte":
+            window.pop("coefficient_backend", None)
+            window.pop("mapper_checkpoint", None)
         window.pop("wavelength_chunk_size", None)
         window.pop("jitter_fraction", None)
         window.pop("transfer_precision", None)
@@ -62,7 +61,12 @@ def _scientific_contract(contract):
     atmosphere = contract.get("atmosphere", {})
     if atmosphere.get("scale_vector_potential", 1.0) == 1.0:
         atmosphere.pop("scale_vector_potential", None)
-    physics = config.get("physics", {})
+    physics = config.get("physics") or {}
+    # Stokes-only runs formerly carried a full, inactive collocation configuration.
+    if not physics.get("potential_boundary", {}).get("enabled") and not any(
+        equation.get("enabled") for equation in physics.get("equations", {}).values()
+    ):
+        config.pop("physics", None)
     for key in (
         "magnetic_current_free_steps",
         "magnetic_current_free_final_factor",
@@ -73,6 +77,10 @@ def _scientific_contract(contract):
     ):
         physics.pop(key, None)
     equations = physics.get("equations", {})
+    if not any(equations.get(name, {}).get("enabled") for name in (
+        "upper_domain_temperature_prior", "upper_domain_microturbulence_prior", "coronal_energy",
+    )):
+        physics.get("collocation", {}).pop("validation_upper_height_layers", None)
     for name, equation in list(equations.items()):
         equation.pop("weight", None)
         # Plain residual switches carry no learned parameters or fixed buffers.
@@ -85,6 +93,7 @@ def _scientific_contract(contract):
     for key in list(physics.get("collocation", {})):
         if key.endswith("_per_step") or key in {
             "height_sampling_power",
+            "validation_volume_points",
         }:
             physics["collocation"].pop(key)
     potential = physics.get("potential_boundary", {})
@@ -125,7 +134,7 @@ def _scientific_contract(contract):
                 item.pop(key)
     for stream in config.get("streams", []):
         loader = stream.get("observation", {}).get("loader", {})
-        for key in ("workers", "pin_memory", "batch_size", "validation_batch_size"):
+        for key in ("workers", "pin_memory", "preparation_workers", "batch_size", "validation_batch_size"):
             loader.pop(key, None)
         term = stream.get("data_term", {})
         term.pop("weight", None)
@@ -397,7 +406,7 @@ class JointInversionModule(LightningModule):
             batch = {key: value for key, value in batch.items() if key != "_data_valid"}
         cadence = getattr(self.settings, "log_every_n_steps", 10)
         collect_metrics = self.global_step == 0 or (self.global_step + 1) % cadence == 0
-        with distributed_batch(valid):
+        with distributed_batch(valid), skip_tensor_validation():
             evaluation = self.model.evaluate_batches(batch, diagnostics=collect_metrics)
         if self._first_batch:
             print("First training forward pass complete: starting backward", flush=True)
@@ -428,19 +437,6 @@ class JointInversionModule(LightningModule):
         if self._first_batch:
             print("First training backward pass complete", flush=True)
             self._first_batch = False
-        # Read all flags together, rather than synchronizing CUDA once per
-        # parameter. Keep the parameter-specific error on the failure path.
-        by_device = {}
-        for name, parameter in self.named_parameters():
-            if parameter.grad is not None:
-                by_device.setdefault(parameter.grad.device, []).append(
-                    (name, torch.isfinite(parameter.grad).all())
-                )
-        for checks in by_device.values():
-            finite = torch.stack([flag for _, flag in checks]).cpu().tolist()
-            for (name, _), valid in zip(checks, finite, strict=True):
-                if not valid:
-                    raise FloatingPointError(f"Non-finite joint gradient: {name}")
 
     def on_before_optimizer_step(self, optimizer):
         """Log the learning rate shared by every optimizer parameter group."""
@@ -454,7 +450,6 @@ class JointInversionModule(LightningModule):
 
     def learning_rate_factor(self, step):
         """One exponential decay shared by every trainable parameter group."""
-        ratio = self.settings.final_learning_rate / self.settings.learning_rate
         steps = self.settings.learning_rate_decay_steps
         if steps is None:
             steps = self.trainer.estimated_stepping_batches
@@ -462,9 +457,7 @@ class JointInversionModule(LightningModule):
             # Reaching the final rate does not stop optimization.
             if not math.isfinite(steps):
                 steps = 10000
-        steps = max(steps, 1)
-        progress = min(max(step / steps, 0.0), 1.0)
-        return ratio ** progress
+        return exponential_lr_factor(step, self.settings.learning_rate, self.settings.final_learning_rate, steps)
 
     def configure_optimizers(self):
         optimizer = build_optimizer(

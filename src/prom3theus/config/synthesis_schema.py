@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import math
 import re
+from pathlib import Path
 from typing import Literal
 
 from .schema import CoarseToFineConfig, ConfigNode
@@ -17,13 +18,16 @@ class LTEWindowConfig(ConfigNode):
     depth_count: int = 257
     coarse_to_fine: CoarseToFineConfig = field(default_factory=lambda: CoarseToFineConfig(enabled=False))
     jitter_fraction: float = 0.0
-    wavelength_chunk_size: int = 16
     transfer_precision: Literal["float32", "float64"] = "float32"
     shell_height_bounds_megameter: tuple[float, float] | None = None
     lateral_halo_megameter: float = 0.0
     incoming_temperature_k: float | None = None
+    coefficient_backend: Literal["exact_lte", "nn_surrogate"] = "exact_lte"
+    mapper_checkpoint: Path | None = None
 
     def __post_init__(self):
+        if (self.coefficient_backend == "nn_surrogate") != (self.mapper_checkpoint is not None):
+            raise ValueError("mapper_checkpoint is required exactly for the nn_surrogate coefficient backend")
         if not isinstance(self.id, str) or re.fullmatch(r"[a-z][a-z0-9_]*", self.id) is None:
             raise ValueError("LTE window id must match [a-z][a-z0-9_]*")
         if not self.line_ids or any(not isinstance(v, str) or not v.strip() for v in self.line_ids):
@@ -35,10 +39,8 @@ class LTEWindowConfig(ConfigNode):
             raise ValueError("Wavelength bounds must be finite, positive and increasing")
         if not math.isfinite(self.radiance_scale) or self.radiance_scale <= 0:
             raise ValueError("radiance_scale must be finite and positive")
-        for name, minimum in (("depth_count", 2), ("wavelength_chunk_size", 1)):
-            value = getattr(self, name)
-            if type(value) is not int or value < minimum:
-                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if type(self.depth_count) is not int or self.depth_count < 2:
+            raise ValueError("depth_count must be an integer >= 2")
         if self.transfer_precision not in ("float32", "float64"):
             raise ValueError("transfer_precision must be float32 or float64")
         if (isinstance(self.jitter_fraction, bool)

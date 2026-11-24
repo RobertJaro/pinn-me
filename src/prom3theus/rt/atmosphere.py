@@ -1435,20 +1435,18 @@ class StratifiedAtmosphereModel(nn.Module):
         is constant along a radial column, while oblique rays can still cross
         angular structure. The default path performs the unchanged single query.
         """
-        raw = self.network(inputs.reshape(-1, inputs.shape[-1])).reshape(
-            *inputs.shape[:-1], -1
-        )
+        flat_inputs = inputs.reshape(-1, inputs.shape[-1])
         if self.magnetic_reference_height_megameter is None:
-            return raw
+            return self.network(flat_inputs).reshape(*inputs.shape[:-1], -1)
         reference_height = self.magnetic_reference_height_megameter * 1e6 / self.height_input_scale_m
         magnetic_inputs = torch.cat((
-            inputs[..., :2],
-            torch.full_like(inputs[..., 2:3], reference_height),
-            inputs[..., 3:],
+            flat_inputs[:, :2],
+            torch.full_like(flat_inputs[:, 2:3], reference_height),
+            flat_inputs[:, 3:],
         ), dim=-1)
-        magnetic_raw = self.network(magnetic_inputs.reshape(-1, magnetic_inputs.shape[-1])).reshape(
-            *magnetic_inputs.shape[:-1], -1
-        )
+        # Evaluate stratified and fixed-height points in the same network pass.
+        outputs = self.network(torch.cat((flat_inputs, magnetic_inputs), dim=0))
+        raw, magnetic_raw = outputs.reshape(2, *inputs.shape[:-1], -1).unbind(0)
         return torch.cat((raw[..., :4], magnetic_raw[..., 4:7], raw[..., 7:]), dim=-1)
 
     def forward(self, coords: torch.Tensor, geometric_height_m) -> StratifiedAtmosphere:

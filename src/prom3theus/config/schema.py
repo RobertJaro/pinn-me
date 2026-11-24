@@ -89,8 +89,8 @@ class DataLoaderConfig(ConfigNode):
     batch_size: int
     validation_batch_size: int | None = None
     validation_stride: int = 1
-    preparation_workers: int = 1
-    workers: int = 2
+    preparation_workers: int = 4
+    workers: int = 4
     pin_memory: bool = False
     progress: bool = True
 
@@ -167,10 +167,10 @@ class HMISelectionConfig(ConfigNode):
 class HMICalibrationConfig(ConfigNode):
     transmission_profile_directory: Path
     require_quality_zero: bool
-    quiet_sun_max_fractional_polarization: float
-    quiet_sun_trim_quantiles: tuple[float, float]
-    minimum_quiet_sun_pixels: int
-    calibration_sample_limit: int
+    quiet_sun_max_fractional_polarization: float = 0.01
+    quiet_sun_trim_quantiles: tuple[float, float] = (0.05, 0.95)
+    minimum_quiet_sun_pixels: int = 128
+    calibration_sample_limit: int = 4096
 
     def __post_init__(self) -> None:
         _positive(
@@ -573,26 +573,20 @@ class CoarseToFineConfig(ConfigNode):
 @dataclass(frozen=True, slots=True)
 class CollocationConfig(ConfigNode):
     volume_points_per_step: int
-    height_layers_per_step: int
-    upper_boundary_points_per_step: int
-    validation_height_layers: int
-    validation_points_per_height: int
+    height_layers_per_step: int = 0
+    upper_boundary_points_per_step: int = 0
+    validation_height_layers: int = 0
+    validation_points_per_height: int = 32
     upper_volume_points_per_step: int = 0
     upper_height_layers_per_step: int = 0
     side_boundary_points_per_step: int = 0
     validation_side_boundary_points: int = 0
     validation_upper_height_layers: int = 0
     height_sampling_power: float = 1.0
-    # "height_grouped" draws height_layers_per_step discrete heights, each
-    # shared by volume_points_per_step / height_layers_per_step points (the
-    # original behavior; height_layers_per_step must divide evenly and is
-    # otherwise unused). "fully_random" draws volume_points_per_step fully
-    # independent points across the whole volume instead -- no discrete
-    # height layers at all -- and every per-height-group normalization scale
-    # in magnetofluid.py becomes a per-point local scale as a result (a group
-    # of one point). height_layers_per_step is still validated but ignored
-    # in this mode. Required by hard_example_enabled below.
-    volume_sampling: Literal["height_grouped", "fully_random"] = "height_grouped"
+    # height_grouped shares stratified heights across multiple points.
+    # fully_random uses one point per height stratum and supports hard examples.
+    # uniform_volume draws independent points with constant density per cubic metre.
+    volume_sampling: Literal["height_grouped", "fully_random", "uniform_volume"] = "height_grouped"
     # Persistent hard-example carry-forward: each step keeps the
     # highest-residual points from the previous step (jittered) instead of
     # redrawing every collocation point from scratch, so a thin high-error
@@ -604,15 +598,15 @@ class CollocationConfig(ConfigNode):
     hard_example_start_step: int = 0
     hard_example_jitter_length_m: float = 50_000.0
     hard_example_jitter_time_hours: float = 0.0
+    validation_volume_points: int | None = None
 
     def __post_init__(self) -> None:
-        for name in (
-            "volume_points_per_step",
-            "height_layers_per_step",
-            "validation_height_layers",
-            "validation_points_per_height",
-        ):
-            _positive(getattr(self, name), name)
+        _positive(self.volume_points_per_step, "volume_points_per_step")
+        _positive(self.validation_points_per_height, "validation_points_per_height")
+        _positive(self.height_layers_per_step, "height_layers_per_step",
+                  allow_zero=self.volume_sampling != "height_grouped")
+        _positive(self.validation_height_layers, "validation_height_layers",
+                  allow_zero=self.volume_sampling == "uniform_volume")
         for name in (
             "upper_volume_points_per_step",
             "upper_height_layers_per_step",
@@ -623,6 +617,11 @@ class CollocationConfig(ConfigNode):
         ):
             _positive(getattr(self, name), name, allow_zero=True)
         _positive(self.height_sampling_power, "height_sampling_power")
+        if self.volume_sampling == "uniform_volume":
+            if self.validation_volume_points is None or self.validation_volume_points < 1:
+                raise ValueError("uniform_volume requires a positive validation_volume_points")
+        elif self.validation_volume_points is not None:
+            raise ValueError("validation_volume_points requires volume_sampling: uniform_volume")
         if type(self.hard_example_enabled) is not bool:
             raise TypeError("hard_example_enabled must be boolean")
         _positive(self.hard_example_count, "hard_example_count", allow_zero=True)
@@ -659,6 +658,8 @@ class PhysicsNormalizationConfig(ConfigNode):
     force_balance_pressure_scale_pa: float | None = None
     force_balance_pressure_floor_pa: float = 0.0
     detach_normalization_scale: bool = True
+    normalize_force_balance: bool = True
+    normalize_boundary_current: bool = True
 
     def __post_init__(self) -> None:
         _positive(self.length_m, "length_m")
@@ -674,6 +675,9 @@ class PhysicsNormalizationConfig(ConfigNode):
             "force_balance_pressure_floor_pa",
             allow_zero=True,
         )
+        for name in ("normalize_force_balance", "normalize_boundary_current"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
         if type(self.detach_normalization_scale) is not bool:
             raise TypeError("detach_normalization_scale must be boolean")
 
@@ -933,13 +937,6 @@ class PhysicsConfig(ConfigNode):
             "physics.robust_loss_delta",
             allow_zero=True,
         )
-        if self.equations.magnetic_current_free.enabled != (
-            self.magnetic_current_free_steps > 0
-        ):
-            raise ValueError(
-                "magnetic_current_free must be enabled exactly when "
-                "magnetic_current_free_steps is positive"
-            )
         force_balance_equations = (
             self.equations.hydrostatic_equilibrium,
             self.equations.magnetohydrostatic_equilibrium,
@@ -1005,7 +1002,8 @@ class PhysicsConfig(ConfigNode):
                 "Vector differential equations require "
                 "vector_basis_matches_spatial_coordinates=true"
             )
-        if volume_active and (
+        grouped_volume = self.collocation.volume_sampling != "uniform_volume"
+        if volume_active and self.collocation.volume_sampling == "height_grouped" and (
             self.collocation.height_layers_per_step
             > self.collocation.volume_points_per_step
             or self.collocation.volume_points_per_step
@@ -1016,7 +1014,7 @@ class PhysicsConfig(ConfigNode):
                 "Active volume physics requires volume_points_per_step to be "
                 "divisible by height_layers_per_step"
             )
-        if volume_active and self.collocation.validation_height_layers < 2:
+        if volume_active and grouped_volume and self.collocation.validation_height_layers < 2:
             raise ValueError(
                 "Active volume physics requires at least two validation height layers"
             )
@@ -1028,17 +1026,20 @@ class PhysicsConfig(ConfigNode):
                 self.equations.coronal_energy,
             )
         )
-        if upper_volume_active and (
+        if upper_volume_active and not volume_active and self.collocation.upper_volume_points_per_step < 1:
+            raise ValueError("Active upper-domain physics requires positive upper_volume_points_per_step")
+        if upper_volume_active and not volume_active and grouped_volume and (
             self.collocation.upper_height_layers_per_step < 1
             or self.collocation.upper_volume_points_per_step
             % self.collocation.upper_height_layers_per_step
             != 0
-            or self.collocation.validation_upper_height_layers < 2
         ):
             raise ValueError(
                 "Active upper-domain physics requires positive, divisible upper "
-                "collocation counts and at least two validation height layers"
+                "collocation counts"
             )
+        if upper_volume_active and grouped_volume and self.collocation.validation_upper_height_layers < 2:
+            raise ValueError("Active upper-domain physics requires at least two validation height layers")
         side_boundary_active = any(
             equation.enabled and equation.weight > 0.0
             for equation in (

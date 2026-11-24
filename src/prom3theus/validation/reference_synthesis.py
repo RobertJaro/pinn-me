@@ -328,6 +328,7 @@ class LTESynthesizer(nn.Module):
         path: TransferPath,
         return_diagnostics: bool = False,
         radiance_scale: torch.Tensor | float | None = None,
+        bottom_boundary: torch.Tensor | None = None,
     ):
         """Synthesize emergent Stokes profiles with shape ``[..., 4, wavelength]``.
 
@@ -335,6 +336,9 @@ class LTESynthesizer(nn.Module):
         ``v_los`` chosen by the observation adapter. Instrument-specific frame
         handling (for example HMI observer motion or the Hinode Level-1
         wavelength gauge) is deliberately outside this standalone solver.
+        An explicit bottom_boundary has shape [..., wavelength, 4] in the
+        same radiance units and polarization frame as the synthesized source.
+        None retains the local thermal boundary.
         """
 
         if not isinstance(
@@ -479,6 +483,7 @@ class LTESynthesizer(nn.Module):
             reference_extinction_m1=(
                 alpha500 if isinstance(path, GeometricHeightPath) else None
             ),
+            **({"bottom_boundary": bottom_boundary} if bottom_boundary is not None else {}),
         )
 
         stokes = emergent.movedim(-1, -2)

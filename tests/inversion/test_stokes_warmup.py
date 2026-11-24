@@ -135,7 +135,7 @@ def test_training_lifecycle_sets_observation_and_shared_steps():
 
 
 @pytest.mark.parametrize("path", sorted(
-    path for path in Path("configs").rglob("*.yaml") if path.name != "synthesis.yaml"
+    path for path in Path("configs").rglob("*.yaml") if path.name not in {"synthesis.yaml", "surrogate.yaml"}
 ))
 def test_presets_default_to_no_warmup(path):
     from prom3theus.config import load_config

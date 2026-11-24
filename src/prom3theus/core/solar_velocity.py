@@ -35,7 +35,7 @@ def carrington_rotation_velocity_cartesian(
         if position.shape[-1:] != (3,):
             raise ValueError('position_m must end in a finite Cartesian three-vector.')
         require_tensor(
-            torch.isfinite(position).all(),
+            lambda: torch.isfinite(position).all(),
             'position_m must end in a finite Cartesian three-vector.')
         omega = torch.as_tensor(
             CARRINGTON_ANGULAR_VELOCITY_RAD_PER_S
@@ -47,7 +47,7 @@ def carrington_rotation_velocity_cartesian(
         if omega.numel() != 1:
             raise ValueError('angular_velocity_rad_per_s must be one finite scalar.')
         require_tensor(
-            torch.isfinite(omega).all(),
+            lambda: torch.isfinite(omega).all(),
             'angular_velocity_rad_per_s must be one finite scalar.')
         zeros = torch.zeros_like(position[..., 0])
         return torch.stack(

@@ -243,3 +243,50 @@ def test_centered_float32_wavelengths_preserve_subpixel_line_offsets_and_gradien
     assert spectrum.velocity_offsets[0, 0] < spectrum.velocity_offsets[0, 1] < spectrum.velocity_offsets[0, 2]
     derivative = torch.autograd.grad(spectrum.velocity_offsets.sum(), offset)[0]
     torch.testing.assert_close(derivative, torch.full_like(offset, (SPEED_OF_LIGHT / 1000.) / center), rtol=1e-6, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_point_geometry_keeps_full_precision_with_fast_matmul(device, monkeypatch):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Requires CUDA")
+    # An oblique right-handed frame, with broadcast over rays and depth.
+    q, _ = torch.linalg.qr(torch.tensor(
+        [[0.3, 0.7, -0.2], [0.8, -0.4, 0.1], [0.5, 0.2, 0.9]],
+        dtype=torch.float64))
+    if torch.linalg.det(q) < 0:
+        q[:, 0] *= -1
+    basis = q.float().to(device).expand(2, 3, 3, 3)
+    direction = basis[..., 2, :]
+    state = {
+        name: torch.ones(2, 3, device=device)
+        for name in ("temperature", "gas_pressure", "microturbulence")
+    }
+    state["velocity_field"] = torch.ones(2, 3, 3, device=device)
+    magnetic = torch.tensor([250., -350., 900.], device=device).expand(2, 3, 3)
+    state["magnetic_field"] = magnetic.clone().requires_grad_()
+    original_matmul = torch.Tensor.__matmul__
+
+    if device == "cpu":
+        # Reproduce loss of input mantissa bits without requiring an NVIDIA GPU.
+        def reduced_matmul(left, right):
+            def truncate(value):
+                return (value.contiguous().view(torch.int32) & -8192).view(torch.float32)
+            return original_matmul(truncate(left), truncate(right))
+        monkeypatch.setattr(torch.Tensor, "__matmul__", reduced_matmul)
+        assert not torch.isclose(basis @ basis.transpose(-1, -2),
+                                 torch.eye(3), atol=2e-5, rtol=2e-5).all()
+
+    previous = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision("high")
+        result = LTELocalCoefficients._point_fields(state, direction, basis)[-1]
+        expected = original_matmul(basis.double(), magnetic.double()[..., None])[..., 0]
+        torch.testing.assert_close(result.double(), expected, rtol=2e-6, atol=1e-4)
+        result.sum().backward()
+        torch.testing.assert_close(state["magnetic_field"].grad, basis.sum(dim=-2))
+        invalid = basis.clone()
+        invalid[..., 0, :] *= 1.001
+        with pytest.raises(ValueError, match="orthonormal"):
+            LTELocalCoefficients._point_fields(state, direction, invalid)
+    finally:
+        torch.set_float32_matmul_precision(previous)

@@ -1,0 +1,32 @@
+source_path: /glade/campaign/hao/radmhd/Rempel/ASD_2023/Run_Corona_1728x1024x1024_ASD_open/3D
+iteration: 2000000
+instrument_config: synthesis.yaml
+output_dir: /glade/work/rjarolim/lte/mappers/muram_hinode_ar11158_2000000_6302_rest_linear_residual_128x4_b_scale_10pct
+
+line_ids:
+  - FeI_6301.5008
+  - FeI_6302.4932
+wavelength_bounds_vacuum_angstrom: [6300.0, 6307.0]
+architecture: silu
+width: 128
+hidden_layers: 4
+knots: 2049
+wavelength_count: 2049
+wavelength_jitter_fraction: 0.288675  # Gaussian standard deviation in grid intervals
+workers: 4
+batch_size: 1024
+jitter:
+  # Gaussian standard deviations for temperature and pressure (natural log units) and speeds (m/s)
+  log_temperature: 0.05
+  log_pressure: 0.2
+  microturbulence_m_s: 2500.0
+  velocity_m_s: 500.0
+  magnetic_field_fraction: 0.10  # Uniform field-strength variation of ±10% per point.
+replay_fraction: 0.5
+replay_buffer_size: 4096
+steps: 100000
+validate_every: 5000
+optimizer: soap
+learning_rate: 0.001
+final_learning_rate: 0.0001
+learning_rate_decay_steps: 10000

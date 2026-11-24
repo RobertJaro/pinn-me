@@ -37,13 +37,17 @@ class JointDataModule:
     def setup(self, stage=None):
         """A restored module is already prepared."""
 
-    def train_dataloader(self, *, batch_sizes=None, **options):
+    def train_dataloader(self, *, batch_sizes=None, workers=None, **options):
         if self.train_loaders is None:
             raise ValueError("This data module has no prepared training pools")
         from .tensor_loader import PackedLoaderSpec
 
         return {
-            name: spec.bind(batch_size=(batch_sizes or {}).get(name), **options)
+            name: spec.bind(
+                batch_size=(batch_sizes or {}).get(name),
+                num_workers=(workers or {}).get(name),
+                **options,
+            )
             if isinstance(spec, PackedLoaderSpec)
             else spec
             for name, spec in self.train_loaders.items()
@@ -241,12 +245,15 @@ def _publication_path(path):
 
 
 def restore_or_create_data_module(
-    path, build, *, rebuild=False, timeout=1800, finalize=None
+    path, build, *, rebuild=False, timeout=1800, finalize=None, before_handoff=None
 ):
     """Rank zero builds/finalizes once; workers reload its published snapshot.
 
     The status broadcast completes only after the atomic snapshot publication.
-    Worker ranks never call either callback, including during explicit rebuilds.
+    Worker ranks never call build or finalize, including during explicit rebuilds.
+    When supplied, before_handoff runs on every rank immediately before snapshot
+    handoff. Rank zero has finished preparation by then, so it can launch workers
+    without leaving a process group waiting through data preparation.
     """
     path = Path(path).resolve()
     distributed = (
@@ -259,6 +266,7 @@ def restore_or_create_data_module(
         and (rebuild or int(os.environ.get("WORLD_SIZE", "1")) > 1)
         and rank != 0
         and status_path is None
+        and before_handoff is None
     ):
         raise RuntimeError(
             "Worker publication requires an initialized process group or a unique PROM3THEUS_RUN_ID"
@@ -292,11 +300,17 @@ def restore_or_create_data_module(
             elif status_path is not None:
                 _publish_status(status_path, status)
             raise
+        if before_handoff is not None:
+            before_handoff()
+            distributed = torch.distributed.is_initialized()
         if distributed:
             torch.distributed.broadcast_object_list([status], src=0)
         elif status_path is not None:
             _publish_status(status_path, status)
         return module
+    if before_handoff is not None:
+        before_handoff()
+        distributed = torch.distributed.is_initialized()
     if distributed:
         print(f"Data module [rank {rank}]: waiting for rank 0 publication", flush=True)
         message = [None]

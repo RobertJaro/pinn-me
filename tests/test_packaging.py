@@ -16,17 +16,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_CONFIGS = {
     "sdo/hmi_aia_dynamic.yaml",
+    "sdo/hmi_aia_energy.yaml",
     "hinode/mhs.yaml",
     "hinode/mhs_extrapolation.yaml",
-    "sdo/hmi_dynamic.yaml",
-    "sdo/hmi_aia_dynamic_energy.yaml",
-    "sdo/hmi_aia_potential.yaml",
-    "sdo/hmi_aia_vector_potential.yaml",
-    "muram/sdo/stokes_only.yaml",
-    "muram/sdo/joint.yaml",
-    "muram/sdo/mhs.yaml",
     "muram/hinode/mhs.yaml",
     "muram/hinode/stokes_only.yaml",
+    "muram/hinode/surrogate.yaml",
     "muram/hinode/synthesis.yaml",
 }
 RESOURCE_FILES = {
@@ -197,11 +192,7 @@ def test_sdist_excludes_repository_tests_and_nonpackage_trees(
         for name in members
         if name.startswith("scripts/") and name.endswith(".sh")
     } == {path.relative_to(PROJECT_ROOT / "scripts").as_posix() for path in (PROJECT_ROOT / "scripts").rglob("*.sh")}
-    assert {
-        name.removeprefix("scripts/")
-        for name in members
-        if name.startswith("scripts/") and name.endswith(".py")
-    } == {path.relative_to(PROJECT_ROOT / "scripts").as_posix() for path in (PROJECT_ROOT / "scripts").rglob("*.py")}
+    assert not any(name.startswith("scripts/") and name.endswith(".py") for name in members)
     assert not any(
         name.startswith("scripts/") and name.endswith(".json") for name in members
     )
@@ -300,20 +291,15 @@ assert {path.relative_to(configs).as_posix() for path in configs.rglob("*.yaml")
     "hinode/mhs.yaml",
     "hinode/mhs_extrapolation.yaml",
     "sdo/hmi_aia_dynamic.yaml",
-    "sdo/hmi_dynamic.yaml",
-    "sdo/hmi_aia_dynamic_energy.yaml",
-    "sdo/hmi_aia_potential.yaml",
-    "sdo/hmi_aia_vector_potential.yaml",
-    "muram/sdo/stokes_only.yaml",
-    "muram/sdo/joint.yaml",
-    "muram/sdo/mhs.yaml",
+    "sdo/hmi_aia_energy.yaml",
     "muram/hinode/mhs.yaml",
     "muram/hinode/stokes_only.yaml",
+    "muram/hinode/surrogate.yaml",
     "muram/hinode/synthesis.yaml",
 }
 from prom3theus.muram import config as muram_config_registration
 for path in configs.rglob("*.yaml"):
-    if path.name == "synthesis.yaml":
+    if path.name in {"synthesis.yaml", "surrogate.yaml"}:
         continue
     config = load_config(path)
     assert config.schema_version == 5 and config.solver.kind == "joint"

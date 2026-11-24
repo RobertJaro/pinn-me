@@ -10,6 +10,6 @@ set -euo pipefail
 test "$#" -eq 0
 cd /glade/u/home/rjarolim/projects/lte
 
-# First run scripts/muram_hinode/synthesize.sh once.
+# Prepare the Hinode store with scripts/muram/synthesize_ar11158.pbs.
 # Automatic GPU selection launches Lightning DDP before data/model setup.
 PYTHONPATH=src python -m prom3theus.muram.cli invert configs/muram/hinode/stokes_only.yaml

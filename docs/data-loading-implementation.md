@@ -100,7 +100,12 @@ not an implicit change to spatial mixing or reproducible data order.
 
 ## Distributed behavior
 
-An externally launched process group is initialized before data/model setup. Each rank
+For native launches, rank zero starts the configured logger, prepares and publishes
+the CPU data module and training tensors, then launches DDP. Workers restore that
+published generation, while rank zero keeps its prepared module. Model construction
+follows the handoff, and the Trainer reuses the startup logger. Preparation adds no
+metrics. Externally launched processes join their existing group before data/model
+setup so global rank ownership and failure propagation remain available. Each rank
 uses its local CUDA device, with Lightning DDP and explicit batch ownership. The
 reference stream defines the global epoch. Its real batch IDs occur once across ranks;
 other streams continue cyclically. If the final group has fewer batches than ranks,

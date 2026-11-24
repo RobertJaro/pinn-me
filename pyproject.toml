@@ -91,20 +91,13 @@ version = {attr = "prom3theus.__version__"}
   "configs/hinode/mhs_extrapolation.yaml",
 ]
 "share/prom3theus/configs/sdo" = [
-  "configs/sdo/hmi_dynamic.yaml",
   "configs/sdo/hmi_aia_dynamic.yaml",
-  "configs/sdo/hmi_aia_dynamic_energy.yaml",
-  "configs/sdo/hmi_aia_potential.yaml",
-  "configs/sdo/hmi_aia_vector_potential.yaml",
-]
-"share/prom3theus/configs/muram/sdo" = [
-  "configs/muram/sdo/stokes_only.yaml",
-  "configs/muram/sdo/joint.yaml",
-  "configs/muram/sdo/mhs.yaml",
+  "configs/sdo/hmi_aia_energy.yaml",
 ]
 "share/prom3theus/configs/muram/hinode" = [
   "configs/muram/hinode/mhs.yaml",
   "configs/muram/hinode/stokes_only.yaml",
+  "configs/muram/hinode/surrogate.yaml",
   "configs/muram/hinode/synthesis.yaml",
 ]
 

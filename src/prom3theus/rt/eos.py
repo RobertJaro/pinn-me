@@ -308,7 +308,7 @@ class HybridSolarEOS(nn.Module):
             raise TypeError("Thermodynamic EoS supports float32 and float64 only.")
         temperature, pressure = torch.broadcast_tensors(temperature, pressure)
         require_tensor(
-            (torch.isfinite(temperature) & torch.isfinite(pressure)
+            lambda: (torch.isfinite(temperature) & torch.isfinite(pressure)
              & (temperature > 0.0) & (pressure > 0.0)).all(),
             'temperature and gas_pressure must be finite and strictly positive')
         return temperature, pressure
@@ -753,7 +753,7 @@ class HybridSolarEOS(nn.Module):
         stic_non_electron_particles = stic_particles - stic_electrons
         chianti_endpoint_electrons = torch.pow(ten, chianti_endpoint_log_electrons)
         require_tensor(
-            ((stic_electrons > 0.0) & (stic_electrons < fully_ionized_electrons)
+            lambda: ((stic_electrons > 0.0) & (stic_electrons < fully_ionized_electrons)
              & (stic_non_electron_particles > 0.0)
              & (chianti_endpoint_electrons > 0.0)
              & (chianti_endpoint_electrons < fully_ionized_electrons)).all(),
@@ -813,7 +813,7 @@ class HybridSolarEOS(nn.Module):
             - upper_charge_change
         )
         require_tensor(
-            ((stic_charge_slope >= 0.0) & (chianti_charge_slope >= 0.0)
+            lambda: ((stic_charge_slope >= 0.0) & (chianti_charge_slope >= 0.0)
              & (middle_charge_change >= 0.0)).all(),
             'The STiC/CHIANTI charge bridge is not monotone for this state.', error=RuntimeError)
         charge_coordinate = (

@@ -189,9 +189,9 @@ class PhysicsConstraintTerm(SharedObjectiveTerm):
         self.current_step.fill_(step)
 
     def _magnetic_current_free_factor(self) -> float:
-        if self.magnetic_current_free_steps == 0:
+        if not self.constraints.is_active(self._VOLUME_CURRENT_FREE):
             return 0.0
-        if int(self.current_step) < self.magnetic_current_free_steps:
+        if self.magnetic_current_free_steps == 0 or int(self.current_step) < self.magnetic_current_free_steps:
             return 1.0
         return self.magnetic_current_free_final_factor
 
@@ -423,23 +423,24 @@ class PhysicsConstraintTerm(SharedObjectiveTerm):
         device = reference.device
         samples: dict[str, torch.Tensor] = {}
         if self.constraints.volume_active:
-            height_count = self.height_layers_per_step
-            points_per_height = self.volume_points_per_step // height_count
-            hard_example_active = atmosphere_model is not None and (
-                self._hard_example_active(atmosphere_model)
-            )
-            if self.volume_sampling == "fully_random":
+            if self.volume_sampling == "uniform_volume":
+                volume = self.sampling_domain.random_volume(
+                    self.volume_points_per_step, device=device
+                )
+            elif self.volume_sampling == "fully_random":
                 # Every point is its own height group, so the carry-forward
                 # set ranks globally over the flat pool.
                 volume = self._random_volume_samples(
                     device=device,
-                    hard_example_active=hard_example_active,
+                    hard_example_active=(
+                        atmosphere_model is not None and self._hard_example_active(atmosphere_model)
+                    ),
                 )
             else:
                 volume = self._call_grouped_sampler(
                     self.sampling_domain,
-                    height_count,
-                    points_per_height,
+                    self.height_layers_per_step,
+                    self.volume_points_per_step // self.height_layers_per_step,
                     height_power=self.height_sampling_power,
                     device=device,
                 )
@@ -464,13 +465,18 @@ class PhysicsConstraintTerm(SharedObjectiveTerm):
                     raise RuntimeError(
                         "Training-active upper physics requires its sampling domain."
                     )
-                upper = self._call_grouped_sampler(
-                    self.upper_sampling_domain,
-                    self.upper_height_layers_per_step,
-                    self.upper_volume_points_per_step // self.upper_height_layers_per_step,
-                    height_power=self.height_sampling_power,
-                    device=device,
-                )
+                if self.volume_sampling == "uniform_volume":
+                    upper = self.upper_sampling_domain.random_volume(
+                        self.upper_volume_points_per_step, device=device
+                    )
+                else:
+                    upper = self._call_grouped_sampler(
+                        self.upper_sampling_domain,
+                        self.upper_height_layers_per_step,
+                        self.upper_volume_points_per_step // self.upper_height_layers_per_step,
+                        height_power=self.height_sampling_power,
+                        device=device,
+                    )
                 samples.update(
                     upper_position_m=upper["position_m"],
                     upper_time_hours=upper["time_hours"],
@@ -526,7 +532,7 @@ class PhysicsConstraintTerm(SharedObjectiveTerm):
             if self.constraints.volume_active:
                 position = samples["volume_position_m"]
                 time = samples["volume_time_hours"]
-                shape = tuple(map(int, position.shape[:2]))
+                shape = (position.shape[0], 1) if position.ndim == 2 else tuple(position.shape[:2])
                 volume_kwargs = dict(
                     create_graph=self.create_graph,
                     return_state=False,
@@ -550,7 +556,7 @@ class PhysicsConstraintTerm(SharedObjectiveTerm):
             if self.constraints.upper_volume_active:
                 position = samples["upper_position_m"]
                 time = samples["upper_time_hours"]
-                upper_shape = tuple(map(int, position.shape[:2]))
+                upper_shape = (position.shape[0], 1) if position.ndim == 2 else tuple(position.shape[:2])
                 available.update(
                     self.constraints.upper_domain(
                         atmosphere_model,

@@ -1,6 +1,8 @@
 """Regression coverage for global mixing and tensor-slice-only training."""
 
 from itertools import pairwise
+import os
+from threading import Barrier, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -337,5 +339,76 @@ def test_training_preparation_finishes_before_batch_iteration(tmp_path, monkeypa
         assert list(tmp_path.rglob("manifest.json"))
         monkeypatch.setattr(BulkReader, "read", lambda *args: pytest.fail("preparation during training"))
         assert len(list(loader)) == 15
+    finally:
+        loader.close()
+
+
+def test_cold_prepare_reads_concurrently_and_preserves_layout(monkeypatch):
+    source = dataset(0, 128)
+    serial = PersistentTensorLoader(source, 4, block_bytes=2048, num_workers=0)
+    parallel = PersistentTensorLoader(source, 4, block_bytes=2048, num_workers=4)
+    serial.prepare()
+    barrier = Barrier(4, timeout=10)
+    threads = set()
+    read = BulkReader.read
+
+    def synchronized_read(reader, pool, start, stop):
+        thread = get_ident()
+        if thread not in threads:
+            threads.add(thread)
+            barrier.wait()
+        return read(reader, pool, start, stop)
+
+    monkeypatch.setattr(BulkReader, "read", synchronized_read)
+    parallel.prepare()
+    assert len(threads) == 4
+    torch.testing.assert_close(parallel._stores[0].read(0, 128), serial._stores[0].read(0, 128))
+
+
+class _ReportWorker:
+    def __init__(self, batches):
+        self.batches = batches
+
+    def __getitem__(self, index):
+        info = torch.utils.data.get_worker_info()
+        return self.batches[index], info.id, info.num_workers, os.getpid()
+
+
+@pytest.mark.parametrize("training", [True, False])
+def test_native_batches_use_all_four_loader_workers(training, monkeypatch):
+    from prom3theus.observations import bulk
+    from torch.utils.data import DataLoader
+
+    def report_workers(dataset, **options):
+        return DataLoader(_ReportWorker(dataset), **options)
+
+    source = dataset(0, 32)
+    source_loader = buffered_dataloader(source, batch_size=4, shuffle=training)
+    loader = source_loader.snapshot().bind() if training else source_loader
+
+    reference = (source_loader.snapshot().bind(num_workers=0) if training
+                 else buffered_dataloader(source, batch_size=4, num_workers=0))
+    expected = list(reference.iter_random(range(8)) if training else reference)
+    reference.close()
+
+    monkeypatch.setattr(bulk, "DataLoader", report_workers)
+    iterator = loader.iter_random(range(8)) if training else iter(loader)
+    try:
+        pids = {}
+        for (batch, worker_id, worker_count, pid), original in zip(iterator, expected, strict=True):
+            torch.testing.assert_close(batch, original)
+            assert worker_count == 4
+            pids[worker_id] = pid
+        assert set(pids) == set(range(4))
+        if training:
+            # A new schedule after an early exit reuses the processes and discards lookahead.
+            partial = loader.iter_indices(range(8))
+            next(partial)
+            partial.close()
+            for (batch, worker_id, _, pid), original in zip(
+                loader.iter_random(reversed(range(8))), reversed(expected), strict=True
+            ):
+                torch.testing.assert_close(batch, original)
+                assert pids[worker_id] == pid
     finally:
         loader.close()

@@ -101,6 +101,7 @@ def test_prepared_training_loader_restores_without_preparation(tmp_path):
         channels=(),
         _active=[],
         _iteration_start=0,
+        num_workers=0,
         pin_memory=False,
         max_batch_bytes=10000,
         _temporary_directory=None,
@@ -108,7 +109,7 @@ def test_prepared_training_loader_restores_without_preparation(tmp_path):
     path = tmp_path / "data_module.pt"
     save_data_module(JointDataModule({}, None, {"x": loader}), path)
     restored = load_data_module(path).train_dataloader()["x"]
-    values = torch.cat([b["x"] for b in restored._batches(0, 4)])
+    values = torch.cat([b["x"] for b in restored.iter_from(0, 4)])
     torch.testing.assert_close(values.sort().values, torch.arange(10))
 
 

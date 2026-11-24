@@ -53,7 +53,6 @@ def _runtime(tmp_path):
             ),
         ),
         training=replace(config.training, reference_stream=stream.id),
-        dry_run=replace(config.dry_run, quadrature_samples=(6, 12, 24)),
     )
     radius = 6.957e8
     scene = SceneContract(
@@ -363,6 +362,7 @@ def test_third_observation_type_registers_without_runner_changes(tmp_path, monke
             config.training,
             max_steps=2,
             max_epochs=-1,
+            steps_per_epoch=None,  # The point provider supplies a finite sequence.
             device="cpu",
             checkpoint_every_n_steps=1,
             validation_every_n_steps=1,
@@ -465,6 +465,9 @@ def test_stokes_snapshot_restores_prediction_and_export_facade(tmp_path):
     # Earlier formal-LTE saves used float64 fixed synthesis buffers. Reload
     # those into the float32 runtime without accepting parameter dtype changes.
     payload = torch.load(path, weights_only=False)
+    payload["context"]["configuration"]["dry_run"] = {"evaluate_gradients": True}
+    payload["context"]["configuration"]["synthesis"]["windows"][0]["wavelength_chunk_size"] = 16
+    payload["context"]["synthesis_windows"][field_config.id]["wavelength_chunk_size"] = 16
     buffers = dict(runtime.model.named_buffers(remove_duplicate=False))
     promoted = [name for name, value in payload["state_dict"].items()
                 if name.startswith("synthesis_windows.") and name in buffers

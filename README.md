@@ -8,8 +8,8 @@
 
 PROM3THEUS fits a continuous solar atmosphere with PyTorch and PyTorch Lightning.
 For each observed ray, local LTE coefficients feed differentiable formal Stokes
-integration and the instrument response. An ordered tree reduction parallelizes
-the depth calculation; no radiation network or RT residual loss is trained.
+integration and the instrument response. An ordered matrix prefix scan gives the transmission
+above each layer, and a cumulative sum integrates its contribution to the emergent Stokes vector.
 Magnetofluid constraints act on the same atmosphere at separate physical samples.
 
 The inversion presets use SIREN atmosphere networks with width 256 and eight
@@ -46,9 +46,9 @@ parallel formal Stokes integration ---- instrument response ---- data loss
 ```
 
 Hinode and HMI share scene-owned LTE synthesis windows while retaining their
-observation contracts and response operators. `rt.formal_transfer` composes
-ordered affine layer maps in O(log depth) batched stages, with ordinary PyTorch
-autograd. The independent sequential implementation in `prom3theus.validation`
+observation contracts and response operators. `rt.formal_transfer` computes ordered
+layer transmissions across the full batch of rays and wavelengths. On supported
+CUDA GPUs the forward and reverse transmission scans each use one kernel. The independent sequential implementation in `prom3theus.validation`
 remains available for accuracy checks and synthetic-data generation.
 
 Transfer uses dimensional propagation coefficients and the Planck source,
@@ -138,26 +138,21 @@ fallback lookup into the former flat resource directory.
 
 ## Run configurations
 
-Configurations are grouped by observation source. Synthetic MURaM runs have
-separate Hinode and SDO presets:
+Configurations are grouped by observation source. The packaged MURaM workflow uses Hinode/SP.
 
 | Directory | Presets |
 | --- | --- |
 | `configs/hinode/` | [MHS](configs/hinode/mhs.yaml), [MHS extrapolation](configs/hinode/mhs_extrapolation.yaml) |
-| `configs/sdo/` | [HMI dynamic](configs/sdo/hmi_dynamic.yaml), [HMI+AIA dynamic](configs/sdo/hmi_aia_dynamic.yaml), [dynamic with energy](configs/sdo/hmi_aia_dynamic_energy.yaml), [potential boundary](configs/sdo/hmi_aia_potential.yaml), [vector potential](configs/sdo/hmi_aia_vector_potential.yaml) |
-| `configs/muram/hinode/` | [Stokes only](configs/muram/hinode/stokes_only.yaml), [MHS](configs/muram/hinode/mhs.yaml), [synthetic instrument settings](configs/muram/hinode/synthesis.yaml) |
-| `configs/muram/sdo/` | [Stokes only](configs/muram/sdo/stokes_only.yaml), [MHS](configs/muram/sdo/mhs.yaml), [joint HMI+AIA](configs/muram/sdo/joint.yaml) |
+| `configs/sdo/` | [Dynamic HMI inversion with AIA EUV rendering](configs/sdo/hmi_aia_dynamic.yaml), [joint HMI+AIA fit with coronal energy](configs/sdo/hmi_aia_energy.yaml) |
+| `configs/muram/hinode/` | [Stokes only](configs/muram/hinode/stokes_only.yaml), [MHS](configs/muram/hinode/mhs.yaml), [synthetic instrument settings](configs/muram/hinode/synthesis.yaml), [surrogate window](configs/muram/hinode/surrogate.yaml) |
 
-For the current synthetic Hinode inversion, submit
-`qsub scripts/muram_hinode/run_stokes_only.sh`; see the
-[server workflow](scripts/muram_hinode/README.md).
+The [MURaM Hinode workflow](scripts/muram_hinode/README.md) covers observation synthesis, mapper pretraining, and Stokes-only or MHS inversion.
 Keep private local configurations with their runs and pass their paths explicitly.
-Maintained YAML files list required fields, nondefault overrides, and a few
-intentional pins such as ray depth count and transfer precision. Loader/cache
-tuning, optional nulls, and disabled equations otherwise use the typed schema
-defaults. Omitted physics equations are disabled; activate an equation explicitly
-with `enabled: true` and a positive `weight`. Existing nondefault settings remain
-explicit, including sampling and normalization choices prepared for physics runs.
+The inversion presets specify their atmosphere, observations, objectives, and
+run settings. Stokes-only runs omit `physics`. Individual equations default
+to disabled and take a positive `weight` when enabled. See the
+[parameter review](docs/yaml-parameters.md) for the role of each group and the
+settings used only by particular instruments or sampling modes.
 
 To inspect a complete configuration with all defaults expanded:
 
@@ -177,9 +172,9 @@ All maintained inversion configurations use strict schema version 5 and the same
 runner. Each Stokes term uses `type: lte_stokes` and references a
 `synthesis_window` in `synthesis.windows`. A window owns line IDs, vacuum spectral
 bounds, radiance normalization, physical shell and numerical integration controls.
-The defaults are 257 depth points, 16 wavelengths per block and float32 transfer
-arithmetic. Inversion presets enable stratified interior ray jitter during training.
-The Hinode Stokes-only preset uses 32 coarse plus 32 contribution-guided fine
+Each ray batch covers the full wavelength grid. The defaults are 257 depth
+points and float32 transfer arithmetic. Inversion presets enable stratified interior ray jitter during training.
+The MURaM Hinode Stokes-only preset uses 16 coarse plus 16 contribution-guided fine
 points (`coarse_to_fine`), sorted with epsilon separation before integration.
 Coarse coefficients are reused and only fine points receive a second network
 evaluation. Evaluation uses deterministic coarse points and fine quantiles.
@@ -192,9 +187,9 @@ schema_version: 5
 solver
 scene
 atmosphere
-synthesis: {windows, source_closure}
-physics
-atmosphere_regularization
+synthesis: {windows}
+physics (optional)
+atmosphere_regularization (optional)
 streams: [{id, observation, data_term}]
 training
 diagnostics
@@ -213,8 +208,7 @@ the same detached observed denominator for both profiles, preserving sensitivity
 to absolute intensity errors. `continuum_quantile` defaults to 0.9; raw predictions and
 stored observations retain their original units.
 Thus Q/U/V residuals are multiplied by 10 and their squared errors by 100;
-there is no asinh stretch. The separate `stokes_weights` are all one in the
-presets, avoiding additional component reweighting. In general the reduction is
+there is no asinh stretch. The presets use unit `stokes_weights` for all four components. In general the reduction is
 `loss = sum(weight[c] * mean(((prediction[c]-target[c])/scale[c])**2))`.
 Q/U warmup sets only their weights to zero, leaving I/V unchanged. Omitted
 `stokes_scales` preserve unscaled legacy objectives; archived `asinh_mse` remains
@@ -239,8 +233,6 @@ Inspect the fully resolved, typed configuration before a run:
 ```bash
 prom3theus validate-config configs/hinode/mhs.yaml
 prom3theus validate-config configs/hinode/mhs_extrapolation.yaml
-prom3theus validate-config configs/sdo/hmi_aia_potential.yaml
-prom3theus validate-config configs/sdo/hmi_dynamic.yaml
 prom3theus validate-config configs/sdo/hmi_aia_dynamic.yaml
 ```
 
@@ -256,26 +248,24 @@ condition drives its normal derivative to zero without selecting inward or
 outward flow. The maintained extrapolation configuration reaches 20 megameter while
 retaining one PINN for both domains.
 
-### HMI static and dynamic inversions
+### Dynamic SDO inversion
 
-The static HMI+AIA potential and vector-potential presets fit selected
-acquisitions with a shared time-independent atmosphere and their configured
-magnetic and thermodynamic constraints.
-`configs/sdo/hmi_dynamic.yaml` represents the observed time sequence explicitly over a
-single -0.1--50 megameter PINN. HMI line formation remains below 1.5 megameter. The three
-Cartesian magnetic network components are a vector potential `A` in G m;
-the physical field used by synthesis and physics is `B = curl(A)` in G. Ideal
-induction, momentum, continuity, and the exact vector-potential `div B` constraint
-act throughout the full shell. The
-maintained run disables the adiabatic-pressure and radial magnetic-energy
-heuristics and has no potential- or NLFFF-volume loss. A weak prescribed
-temperature stabilization acts only in the invisible upper domain. A
-transmissive velocity condition, tangential magnetic Neumann condition, and an
-external-pressure condition apply at the 50 megameter boundary. Independent random
-samples cover the four angular side faces with equal face counts and no shared
-height groups. Those faces use zero normal velocity gradient and zero normal
-gradient of the tangential magnetic field; no zero-field or zero-normal-flux
-condition is imposed.
+`configs/sdo/hmi_aia_dynamic.yaml` fits the
+HMI time sequence over a -0.5–50 megameter shell and retains AIA 171, 193, and
+211 Å observations and optically thin EUV rendering at zero training weight.
+It uses the SIREN network, vector-potential scaling, SOAP optimizer, and 2,048 volume points per step in a time-dependent atmosphere.
+HMI line formation extends to 2.5 megameter, with the transition-region top at
+3.5 megameter. The physical magnetic field is `B = curl(A)`.
+
+Momentum, ideal induction, and continuity replace static MHS equilibrium.
+Weak current-free penalties apply at the top and four side faces; the upper
+pressure prior and top/side no-inflow constraints remain enabled. Potential-field
+boundary fitting and the vector-potential gauge penalty are disabled. Coronal
+energy and adiabatic-pressure losses remain disabled. Training uses 1,000 steps
+per epoch and decays the learning rate from 0.001 to 0.0001 over 10,000 steps;
+both stopping limits are disabled, so it runs until stopped. Output and work
+paths use the `hmi_aia_20260916_01` run name. The companion energy preset adds
+a coronal-energy residual above 4 Mm and fits the AIA observations at weight 1.
 
 HMI acquisition selection is explicit in `observation.selection`.
 `acquisition_indices: null` uses the complete source sequence; a zero-based
@@ -332,8 +322,8 @@ particular current sheet is artificial.
 
 The atmosphere is a continuous spherical shell configured by physical height
 bounds. Each Stokes ray crosses the true lower boundary and the outer line shell.
-Uniform ray-distance nodes sample the atmosphere; frozen midpoint layers are
-composed with a balanced, order-preserving tree. `synthesis.windows[].depth_count`
+The solver samples the atmosphere along each ray and integrates midpoint-layer
+emission using the ordered transmission above each layer. `synthesis.windows[].depth_count`
 controls quadrature accuracy and must be checked for convergence. Unsupported
 grazing rays and unspecified lateral inflow fail explicitly.
 
@@ -586,8 +576,7 @@ checksums are derived during preprocessing, and calibration provenance remains
 in its calibration manifest. No download or joint-request manifest is required.
 
 Run download and preparation with Python 3.12 on a host with JSOC/SSW network
-access, then run the dry check where the configured `device: auto` GPU is
-visible. Existing immutable instrument outputs are validated and reused.
+access, then run the inversion on the configured training device. Existing immutable instrument outputs are validated and reused.
 
 AIA calibration download and preparation require Python 3.12 and the
 `aia-preparation` extra. Training consumption of the resulting
@@ -631,11 +620,9 @@ email, or removed namespace assumptions.
 ```bash
 prom3theus invert configs/hinode/mhs.yaml
 prom3theus invert configs/hinode/mhs_extrapolation.yaml
-prom3theus invert configs/sdo/hmi_aia_potential.yaml
-prom3theus invert configs/sdo/hmi_dynamic.yaml
 ```
 
-Start joint optimization:
+Start the dynamic SDO inversion with EUV rendering:
 
 ```bash
 prom3theus invert configs/sdo/hmi_aia_dynamic.yaml
@@ -681,8 +668,8 @@ gains remain in local JSON reports. Optimizer logging retains one shared
 `train.optimizer.learning_rate`. Optional loss-balancing diagnostics remain
 available when enabled. Previously logged W&B history is not deleted.
 
-The maintained joint run fits HMI Stokes and AIA EUV data with weights 1.0 and
-0.1. Both use the shared atmosphere. AIA uses 96 coarse plus 96 emission-guided
+The SDO dynamic preset fits HMI Stokes and renders AIA EUV at zero fitting weight.
+The SDO energy preset fits both streams at weight 1.0. Both use the shared atmosphere. AIA uses 96 coarse plus 96 emission-guided
 fine points per ray. Training perturbs interior coarse points and uses stratified
 random fine quantiles; validation/export uses fixed points and quantiles. The
 final merged grid supplies physical line elements in metres, including half-interval
@@ -864,8 +851,8 @@ penalty, separate radiation optimizer group or residual certification stage.
 Atmosphere loss balancing is supported. A zero-weight Stokes stream does not
 add an independent transport objective.
 
-The tree removes the sequential depth recurrence, but local coefficients and
-matrix exponentials still cost time. Production Stokes forward/backward arithmetic
+The scan batches depth products across rays and wavelengths. Local coefficient
+evaluation and matrix exponentials also contribute to the cost. Production Stokes forward/backward arithmetic
 uses float32; explicit float64 transfer remains available for reference checks.
 Depth convergence still needs scientific validation for the chosen column.
 CPU timing does not establish GPU speedup. See

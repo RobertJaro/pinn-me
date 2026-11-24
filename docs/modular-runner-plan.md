@@ -7,8 +7,6 @@ There is one optimizer runner: `application.joint_training.run_joint_inversion`.
 A Stokes-only run is a schema-v3 configuration containing one stream. Joint
 Stokes/EUV runs and additional registered observation types use the same
 assembly, training lifecycle, scheduler, diagnostics and snapshot format.
-`application.joint_runner` is its setup/forward diagnostic operation, not another
-optimizer implementation.
 
 ## Extension contracts
 

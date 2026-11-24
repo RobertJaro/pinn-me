@@ -14,12 +14,13 @@ from .sampling import map_coordinates
 class StokesPlotter(DiagnosticPlotter):
     """Build observed-versus-predicted Stokes validation figures."""
 
-    def individual_profiles_figure(self, outputs, wavelength_angstrom, label):
+    def individual_profiles_figure(
+        self, outputs, wavelength_angstrom, label, *, radiance_scale_w_m3_sr=None
+    ):
         """Retain signs and individual line shapes that ensemble medians hide.
 
         Selection uses the observed profiles in the deterministic reservoir,
-        never model predictions. Raw atlas units expose intensity errors before
-        continuum normalization or an asinh transform can magnify them.
+        never model predictions. Both curves use the observation's radiance scale.
         """
         reference = outputs["raw_stokes_reference"].numpy()
         prediction = outputs["raw_stokes_pred"].numpy()
@@ -41,7 +42,8 @@ class StokesPlotter(DiagnosticPlotter):
                 axis = axes[row, component]
                 axis.plot(wave, reference[index, component], "o-", color="black", markersize=3, label="observed")
                 axis.plot(wave, prediction[index, component], "o-", color="tab:red", markersize=3, label="predicted")
-                axis.axhline(0, color="0.75", linewidth=0.6)
+                if component != 0:
+                    axis.axhline(0, color="0.75", linewidth=0.6)
                 axis.grid(alpha=0.18)
                 axis.set_title(name)
                 if component == 0:
@@ -50,10 +52,14 @@ class StokesPlotter(DiagnosticPlotter):
         axes[0, 0].legend(loc="best")
         figure.suptitle(
             f"Individual Stokes profiles — {label}\n"
-            "Observed selection within the bounded validation sample; atlas units before loss transforms"
+            "Pixels selected from observed profiles in the validation sample"
         )
         figure.supxlabel(r"air wavelength [$\AA$]")
-        figure.supylabel(r"Stokes component / $I_{c,\,atlas}(\mu=1)$")
+        unit = (
+            "observation units" if radiance_scale_w_m3_sr is None
+            else rf"{radiance_scale_w_m3_sr:g} $\mathrm{{W\,m^{{-3}}\,sr^{{-1}}}}$"
+        )
+        figure.supylabel(f"Stokes spectral radiance [{unit}]")
         return figure
 
     def validation_figure(
@@ -194,9 +200,12 @@ class StokesPlotter(DiagnosticPlotter):
             )
             if scales is not None:
                 display_name = f"{name}/{scales[name]:g}"
-            finite = reference_maps[..., component][
-                np.isfinite(reference_maps[..., component])
-            ]
+            scale_values = reference_maps[..., component]
+            if component == 0:
+                # The observed continuum normalization can leave a narrow I
+                # range while the predicted continuum still varies widely.
+                scale_values = np.stack((scale_values, prediction_maps[..., component]))
+            finite = scale_values[np.isfinite(scale_values)]
             if finite.size:
                 vmin, vmax = float(finite.min()), float(finite.max())
                 if not vmax > vmin:

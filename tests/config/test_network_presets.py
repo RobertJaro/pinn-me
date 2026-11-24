@@ -8,13 +8,17 @@ from prom3theus.muram import config as _register_muram_schema
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("path", [p for p in sorted((ROOT / "configs").rglob("*.yaml")) if p.name != "synthesis.yaml"])
+@pytest.mark.parametrize("path", [p for p in sorted((ROOT / "configs").rglob("*.yaml")) if p.name not in {"synthesis.yaml", "surrogate.yaml"}])
 def test_inversion_presets_use_siren(path):
     config = load_config(path)
     network = config.atmosphere.network
     assert network.type == "siren"
     assert network.activation is None and network.encoding is None
-    expected_first_omega = 5. if path == ROOT / "configs/muram/hinode/mhs.yaml" else 30.
+    low_frequency_presets = {
+        "sdo/hmi_aia_dynamic.yaml",
+        "sdo/hmi_aia_energy.yaml",
+    }
+    expected_first_omega = 5. if path.relative_to(ROOT / "configs").as_posix() in low_frequency_presets else 30.
     assert network.first_omega_0 == expected_first_omega and network.hidden_omega_0 == 1.
     assert network.radial_weighting is None
     assert parse_config(config.to_dict(), base_directory=ROOT) == config

@@ -151,3 +151,25 @@ def test_random_samplers_allocate_in_bulk_without_point_or_face_loops(monkeypatc
             method(*args, dtype=dtype)
             assert len(calls) == expected_calls
             assert min(calls) >= 512
+
+
+def test_points_uniform_in_shell_volume_are_independent_and_unlayered():
+    domain = SphericalShellDomain(0.0, (-0.8, 0.8), (-0.9, 0.9), (2.0, 5.0), (0.0, 1.0), 1e6)
+    count = 4093
+    sample = domain.random_volume(count, generator=torch.Generator().manual_seed(28))
+    xyz = sample["position_m"]
+    time = sample["time_hours"]
+    assert xyz.shape == (count, 3)
+    assert time.shape == (count, 1)
+    radius = xyz.norm(dim=-1) / 1e6
+    assert radius.unique().numel() == count
+
+    # Equal-volume octants split at the midpoint in r³, longitude and sin(latitude).
+    radial_fraction = (radius.pow(3) - 1) / 7
+    lon = torch.atan2(xyz[:, 1], xyz[:, 0])
+    octant = (radial_fraction > 0.5).long() * 4 + (lon > 0).long() * 2 + (xyz[:, 2] > 0).long()
+    assert torch.all((octant.bincount(minlength=8) - count / 8).abs() < 85)
+    assert torch.all((radial_fraction >= 0) & (radial_fraction <= 1))
+    assert torch.all((time >= 2) & (time <= 5))
+    # Independent radii can fall in the same radial stratum.
+    assert (radial_fraction * count).long().unique().numel() < count

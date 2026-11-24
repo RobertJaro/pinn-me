@@ -41,7 +41,7 @@ The LTE workflows are grouped by observation source:
 
 - `configs/hinode/mhs.yaml`
 - `configs/hinode/mhs_extrapolation.yaml`
-- `configs/sdo/hmi_dynamic.yaml`
+- `configs/sdo/hmi_aia_dynamic.yaml`
 
 The Hinode file preserves the full-resolution static MHS run for raster
 `20110214_000004`, translated from its earlier operational configuration. The

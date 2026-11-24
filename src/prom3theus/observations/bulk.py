@@ -3,11 +3,10 @@
 import math
 from bisect import bisect_right
 from collections import OrderedDict
-from queue import Full, Queue
-from threading import Event, Thread
+from dataclasses import dataclass
 
 import torch
-from torch.utils.data import ConcatDataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset, get_worker_info
 
 def configure_readers(count):
     if type(count) is not int or count < 1:
@@ -257,54 +256,19 @@ class BulkReader:
         return self._leaf(dataset, slice(start, stop))
 
 
-class _Producer:
-    """Cancelable bounded prefetch; no live raster serialization or CUDA workers."""
+def _yield_batches(iterator):
+    # Expose close() to the stream scheduler for early exits and resume.
+    yield from iterator
 
-    def __init__(self, source, count):
-        self.source = source
-        self.queue = Queue(maxsize=count)
-        self.stop = Event()
-        self.thread = Thread(
-            target=self._run, daemon=True, name="observation-bulk-reader"
-        )
-        self.thread.start()
 
-    def _put(self, value):
-        while not self.stop.is_set():
-            try:
-                self.queue.put(value, timeout=0.1)
-                return
-            except Full:
-                pass
+class _BatchSchedule:
+    """The rank supplies fresh batch indices to the same workers each epoch."""
 
-    @torch.no_grad()
-    def _run(self):
-        try:
-            for value in self.source:
-                if self.stop.is_set():
-                    break
-                self._put((True, value))
-        except BaseException as error:  # noqa: BLE001 - propagate producer failures to its consumer
-            self._put((False, error))
-        finally:
-            self._put((False, StopIteration()))
-            self.source.close()
+    def __init__(self, indices):
+        self.indices = indices
 
     def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self.stop.is_set():
-            raise StopIteration
-        ok, value = self.queue.get()
-        if not ok:
-            self.close()
-            raise value
-        return value
-
-    def close(self):
-        self.stop.set()
-        self.thread.join()  # Reader executes bounded slabs; never waits on consumer.
+        return iter(self.indices)
 
 
 class BulkBatchLoader:
@@ -316,6 +280,7 @@ class BulkBatchLoader:
         batch_size,
         *,
         channels=None,
+        num_workers=4,
         pin_memory=False,
         block_bytes=32 * 1024**2,
         cache_bytes=128 * 1024**2,
@@ -327,6 +292,9 @@ class BulkBatchLoader:
         if not channels and isinstance(dataset, ConcatDataset):
             dataset = ConcatDataset(sorted(dataset.datasets, key=chronological_key))
         self.dataset, self.batch_size = dataset, batch_size
+        if type(num_workers) is not int or num_workers < 0:
+            raise ValueError("num_workers must be a non-negative integer")
+        self.num_workers = num_workers
         self.channels = tuple(channels or ())
         if self.channels and batch_size < len(self.channels):
             raise ValueError("batch_size must include every channel")
@@ -340,6 +308,8 @@ class BulkBatchLoader:
         self.block_bytes, self.cache_bytes = block_bytes, cache_bytes
         self.prefetch_batches, self.max_batch_bytes = prefetch_batches, max_batch_bytes
         self._active = []
+        self._worker_loader = None
+        self._worker_settings = None
         self._reader = None
 
     def __len__(self):
@@ -367,13 +337,43 @@ class BulkBatchLoader:
             or [describe(self.dataset)],
         }
 
-    def iter_from(self, start, count):
+    def _load_batches(self, dataset, indices, *, persist=False):
         for active in self._active:
             active.close()
-        producer = _Producer(self._batches(start, count), self.prefetch_batches)
-        self._active = [item for item in self._active if item.thread.is_alive()]
-        self._active.append(producer)
-        return producer
+        self._active.clear()
+        settings = (self.num_workers, self.pin_memory, self.prefetch_batches,
+                    self.batch_size, self.max_batch_bytes)
+        if self._worker_settings != settings:
+            self._worker_loader = None
+        if self._worker_loader is None:
+            options = {}
+            if self.num_workers:
+                options.update(
+                    multiprocessing_context="spawn",
+                    prefetch_factor=self.prefetch_batches,
+                    persistent_workers=persist,
+                )
+            loader = DataLoader(
+                dataset,
+                sampler=_BatchSchedule(indices),
+                batch_size=None,  # Each item is already a complete batch.
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+                generator=torch.Generator(),
+                **options,
+            )
+            if persist and self.num_workers:
+                self._worker_loader = loader
+                self._worker_settings = settings
+        else:
+            loader = self._worker_loader
+            loader.sampler.indices = indices
+        batches = _yield_batches(iter(loader))
+        self._active.append(batches)
+        return batches
+
+    def iter_from(self, start, count):
+        return self.iter_indices(range(start, start + count))
 
     def __iter__(self):
         producer = self.iter_from(0, len(self))
@@ -386,36 +386,53 @@ class BulkBatchLoader:
         for producer in self._active:
             producer.close()
         self._active.clear()
+        self._worker_loader = None
+        self._worker_settings = None
         self._reader = None
 
 
 class SequentialBulkLoader(BulkBatchLoader):
     """Sequential native reads for preparation and image diagnostics."""
 
-    def _batches(self, start, count):
+    def iter_indices(self, indices):
         if self.channels:
             raise ValueError("Channel-balanced training uses PersistentTensorLoader")
         estimated = min(self.batch_size, len(self.dataset)) * sample_bytes(self.dataset)
         if estimated > self.max_batch_bytes:
-            raise ValueError(
-                "Batch exceeds max_batch_bytes; increase the loader budget"
-            )
+            raise ValueError("Batch exceeds max_batch_bytes; increase the loader budget")
         if self._reader is None:
             self._reader = BulkReader(self.block_bytes, self.cache_bytes)
-        for number in range(start, start + count):
-            begin = (number % len(self)) * self.batch_size
-            batch = self._reader.read(
-                self.dataset, begin, min(begin + self.batch_size, len(self.dataset))
-            )
-            if tensor_bytes(batch) > self.max_batch_bytes:
-                raise ValueError(
-                    "Batch exceeds max_batch_bytes; increase the loader budget"
-                )
-            if self.pin_memory:
-                from torch.utils.data._utils.pin_memory import pin_memory
+        dataset = _SequentialBatches(
+            self.dataset, self.batch_size, self.max_batch_bytes, self._reader
+        )
+        return self._load_batches(dataset, indices)
 
-                batch = pin_memory(batch)
-            yield batch
+
+@dataclass
+class _SequentialBatches:
+    dataset: object
+    batch_size: int
+    max_batch_bytes: int
+    reader: BulkReader
+
+    def __getitem__(self, number):
+        size = len(self.dataset)
+        begin = (number % math.ceil(size / self.batch_size)) * self.batch_size
+        batch = self.reader.read(self.dataset, begin, min(begin + self.batch_size, size))
+        if tensor_bytes(batch) > self.max_batch_bytes:
+            raise ValueError("Batch exceeds max_batch_bytes; increase the loader budget")
+        if get_worker_info() is not None:
+            # A small view into a cached slab would transfer the whole backing storage.
+            return _own_batch(batch)
+        return batch
+
+
+def _own_batch(batch):
+    if isinstance(batch, dict):
+        return {key: _own_batch(value) for key, value in batch.items()}
+    if batch.untyped_storage().nbytes() > batch.nbytes:
+        return batch.clone()
+    return batch
 
 
 def grid_indices(dataset, rows, columns):

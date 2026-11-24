@@ -128,7 +128,7 @@ def test_schema_rejects_invalid_binning(factor):
     from prom3theus.muram import config as _registration  # noqa: F401
     from prom3theus.config import load_config
 
-    for name in ("configs/muram/hinode/mhs.yaml", "configs/muram/sdo/joint.yaml"):
+    for name in ("configs/muram/hinode/mhs.yaml", "configs/sdo/hmi_aia_dynamic.yaml"):
         for stream in load_config(name).streams:
             with pytest.raises((TypeError, ValueError), match="binning"):
                 replace(stream.observation, binning=factor)
@@ -144,7 +144,8 @@ def test_native_scripts_and_loading_presets():
         assert "--binning" not in (root / name).read_text()
         assert "--stride" not in (root / name).read_text()
     for path in (root / "configs/muram").glob("*/*.yaml"):
-        if path.name == "synthesis.yaml":
+        if path.name in {"synthesis.yaml", "surrogate.yaml"}:
             continue
         for stream in load_config(path).streams:
-            assert stream.observation.binning == 4
+            # Loading resolution is user-configurable; synthesis stays native.
+            assert stream.observation.binning >= 1

@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 from prom3theus.core import SPEED_OF_LIGHT
-from prom3theus.core.validation import require_tensor
+from prom3theus.core.validation import require_tensor, tensor_validation_enabled
 
 from .atomic import AtomicDatabase, SpectralLine
 from .opacity import STICSpectralState, planck_lambda
@@ -49,13 +49,6 @@ class PreparedSpectrum:
     velocity_offsets: torch.Tensor
     continuum: STICSpectralState
 
-    def block(self, start, stop):
-        return PreparedSpectrum(
-            self.vacuum[..., start:stop], self.velocity_offsets[..., start:stop],
-            STICSpectralState(self.continuum.lower_indices[..., start:stop],
-                              self.continuum.upper_indices[..., start:stop],
-                              self.continuum.weight[..., start:stop]))
-
 
 class LTELocalCoefficients(nn.Module):
     """Evaluate local K and B_lambda for arbitrary atmospheric points.
@@ -66,7 +59,7 @@ class LTELocalCoefficients(nn.Module):
     rows (e1, e2, direction), in the same physical Cartesian frame as the fields.
     Wavelengths are vacuum Angstrom in the common inertial spectral frame.
 
-    ``forward``/``evaluate`` uses a shared wavelength block and returns point
+    ``forward``/``evaluate`` uses a shared wavelength grid and returns point
     shape + [W,4,4] and [W,4]. ``evaluate_paired`` instead evaluates one wavelength
     per point, returning point shape + [4,4] and [4], without a Cartesian product.
     Material velocities must already include any rotating-to-inertial correction;
@@ -125,7 +118,7 @@ class LTELocalCoefficients(nn.Module):
             raise TypeError("Radiation wavelengths require float32 or float64")
         if result.numel() == 0:
             raise ValueError("Radiation wavelengths must be nonempty")
-        require_tensor((torch.isfinite(result) & (result > 0)).all(),
+        require_tensor(lambda: (torch.isfinite(result) & (result > 0)).all(),
                        "Radiation wavelengths must be finite and positive")
         return result
 
@@ -158,8 +151,8 @@ class LTELocalCoefficients(nn.Module):
         self._prepared_spectral_weight = spectral.weight.detach().clone()
 
     @staticmethod
-    def _point_fields(atmosphere, direction, stokes_basis):
-        required = ("temperature", "gas_pressure", "microturbulence", "velocity_field", "magnetic_field")
+    def _point_fields(atmosphere, direction, stokes_basis, *, thermodynamic_field="gas_pressure"):
+        required = ("temperature", thermodynamic_field, "microturbulence", "velocity_field", "magnetic_field")
         missing = set(required).difference(atmosphere)
         if missing:
             raise KeyError(f"Missing local atmospheric fields: {sorted(missing)}")
@@ -177,17 +170,21 @@ class LTELocalCoefficients(nn.Module):
         basis = torch.as_tensor(stokes_basis, dtype=temperature.dtype, device=temperature.device)
         direction = torch.broadcast_to(direction, (*temperature.shape, 3))
         basis = torch.broadcast_to(basis, (*temperature.shape, 3, 3))
-        tolerance = 2.0e-5 if temperature.dtype == torch.float32 else 1.0e-9
-        identity = torch.eye(3, dtype=temperature.dtype, device=temperature.device)
-        require_tensor(
-            torch.isclose(basis @ basis.transpose(-1, -2), identity, atol=tolerance, rtol=tolerance).all()
-            & torch.isclose(basis[..., 2, :], direction, atol=tolerance, rtol=tolerance).all()
-            & torch.isclose(torch.linalg.cross(basis[..., 0, :], basis[..., 1, :]), direction,
-                            atol=tolerance, rtol=tolerance).all(),
-            "stokes_basis must be right-handed orthonormal rows (e1,e2,direction)")
+        if tensor_validation_enabled():
+            tolerance = 2.0e-5 if temperature.dtype == torch.float32 else 1.0e-9
+            identity = torch.eye(3, dtype=temperature.dtype, device=temperature.device)
+            # Keep geometry checks and vector projections at the field precision,
+            # even when neural-network matmuls use TF32 (matmul_precision="high").
+            gram = (basis[..., :, None, :] * basis[..., None, :, :]).sum(dim=-1)
+            require_tensor(
+                lambda: torch.isclose(gram, identity, atol=tolerance, rtol=tolerance).all()
+                & torch.isclose(basis[..., 2, :], direction, atol=tolerance, rtol=tolerance).all()
+                & torch.isclose(torch.linalg.cross(basis[..., 0, :], basis[..., 1, :]), direction,
+                                atol=tolerance, rtol=tolerance).all(),
+                "stokes_basis must be right-handed orthonormal rows (e1,e2,direction)")
         velocity_los = -(atmosphere["velocity_field"] * direction).sum(dim=-1)
-        magnetic = (basis @ atmosphere["magnetic_field"][..., None])[..., 0]
-        return temperature, atmosphere["gas_pressure"], atmosphere["microturbulence"], velocity_los, magnetic
+        magnetic = (basis * atmosphere["magnetic_field"][..., None, :]).sum(dim=-1)
+        return temperature, atmosphere[thermodynamic_field], atmosphere["microturbulence"], velocity_los, magnetic
 
     def prepare_atmosphere(self, atmosphere, *, direction, stokes_basis):
         """Prepare wavelength-independent physics once; retain all gradients."""

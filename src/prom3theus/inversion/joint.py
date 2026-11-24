@@ -1,4 +1,4 @@
-"""Plain multimodal forward model shared by setup checks and joint fitting."""
+"""Plain multimodal forward model for joint training and validation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 from torch import nn
+
+from prom3theus.core.validation import require_tensor
 
 from .data_terms import (
     DataTermBatchResult,
@@ -383,8 +385,8 @@ class JointForwardModel(nn.Module):
             total = shared_result.loss if total is None else total + shared_result.loss
         if total is None:  # pragma: no cover - constructor rejects empty terms
             raise RuntimeError("Joint evaluation produced no objective.")
-        if not torch.isfinite(total):
-            raise FloatingPointError("The assembled joint objective is non-finite.")
+        require_tensor(lambda: torch.isfinite(total), "The assembled joint objective is non-finite.",
+                       error=FloatingPointError)
         return JointEvaluation(
             loss=total,
             streams=results,

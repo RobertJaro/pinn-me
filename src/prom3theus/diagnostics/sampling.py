@@ -37,7 +37,7 @@ def subsample_grid(
 
 
 def display_grid(trainer, raster, maximum: int) -> tuple[np.ndarray, np.ndarray]:
-    """Choose one validation-derived grid shared by every diagnostic map."""
+    """Choose the validation-derived grid for atmosphere diagnostics."""
 
     data_module = getattr(trainer, "datamodule", None)
     validation = getattr(data_module, "validation_dataset", None)

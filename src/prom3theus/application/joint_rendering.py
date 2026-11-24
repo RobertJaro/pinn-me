@@ -36,7 +36,7 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
     # The common lifecycle uploads returned artifacts exactly once.
     trainer = SimpleNamespace(global_step=trainer.global_step, logger=None)
     options = runtime.config.diagnostics.visualization
-    if not options.enabled:
+    if not options.enabled or not (options.render_streams or options.render_atmosphere):
         return DiagnosticOutput([])
     sampling = AtmosphereSampling.from_options(
         ray_sampling=options.ray_sampling.to_dict(),
@@ -57,9 +57,6 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
             continue
         data = runtime.streams[stream_id].data_module
         raster = data.raster
-        rows, columns = display_grid(
-            SimpleNamespace(datamodule=data), raster, sampling.max_ray_pixels
-        )
         label = stream_id
         # Terms reference shared modules without registering duplicate owners.
         with _temporary_eval_mode(
@@ -67,62 +64,74 @@ def _render_stokes_diagnostics(runtime, trainer, output_directory, *, stream_ids
         ), torch.no_grad():
             if options.render_streams:
                 dataset = data.evaluation_dataset()
+                # Fit metrics use a sparse validation lattice. Sample the map from
+                # the full observation raster at the requested diagnostic resolution.
+                rows, columns = subsample_grid(*raster.spatial_shape, sampling.max_ray_pixels)
                 indices = grid_indices(dataset, rows, columns)
+                if len(indices) == 0:
+                    # Keep the sampling density and align the grid to a known valid pixel.
+                    row, col = map(int, dataset[0]["pixel_index"])
+                    rows = rows + row - rows[rows.searchsorted(row, side="right") - 1]
+                    columns = columns + col - columns[columns.searchsorted(col, side="right") - 1]
+                    height, width = raster.spatial_shape
+                    rows, columns = rows[rows < height], columns[columns < width]
+                    indices = grid_indices(dataset, rows, columns)
                 loader = buffered_dataloader(
                     Subset(dataset, indices.tolist()),
                     batch_size=sampling.ray_evaluation_batch_size,
-                    num_workers=getattr(data, "num_workers", 2),
+                    num_workers=getattr(data, "num_workers", 4),
                     collate_fn=data.evaluation_collate_fn(),
                 )
-                collector = (
-                    ValidationSampleCollector(sampling.max_profile_samples)
-                    if options.render_streams
-                    else None
-                )
+                collector = ValidationSampleCollector(sampling.max_profile_samples)
                 for batch in loader:
                     device_batch = _move_value(batch, runtime.device)
-                    if options.render_streams:
-                        result = term.evaluate_batch(device_batch)
-                        payload = result.diagnostics
-                        compared_prediction, compared_target = term.objective.comparison_profiles(
-                            payload["prediction"], payload["target"]
-                        )
-                        collector.add(
-                            compared_prediction,
-                            compared_target,
-                            payload["pixel_index"],
-                            term.wavelength_angstrom,
-                            term.wavelength_weights,
-                            raw_prediction=payload["prediction"],
-                            raw_reference=payload["target"],
-                        )
-                if options.render_streams:
-                    paths.append(
-                        renderer.render_stokes_validation(
-                            trainer,
-                            collector.local_payload(),
-                            raster,
-                            term.wavelength_angstrom,
-                            label,
-                            rows=rows,
-                            columns=columns,
-                            objective_config=term.objective.configuration(),
-                            exclusion_windows_angstrom=stream_configs[
-                                stream_id
-                            ].data_term.excluded_wavelength_windows_angstrom,
-                            line_centers_angstrom=[
-                                line.wavelength_air_angstrom
-                                for line in term.synthesis_window.coefficients.lines
-                            ],
-                        )
+                    prediction = term.predict(device_batch)
+                    target = device_batch["stokes"]
+                    compared_prediction, compared_target = term.objective.comparison_profiles(
+                        prediction, target
                     )
-                    paths.append(
-                        renderer.render_stokes_profiles(
-                            trainer, collector.local_payload(),
-                            term.wavelength_angstrom, label,
-                        )
+                    collector.add(
+                        compared_prediction,
+                        compared_target,
+                        device_batch["pixel_index"],
+                        term.wavelength_angstrom,
+                        term.wavelength_weights,
+                        raw_prediction=prediction,
+                        raw_reference=target,
                     )
+                payload = collector.local_payload()
+                paths.append(
+                    renderer.render_stokes_validation(
+                        trainer,
+                        payload,
+                        raster,
+                        term.wavelength_angstrom,
+                        label,
+                        rows=rows,
+                        columns=columns,
+                        objective_config=term.objective.configuration(),
+                        exclusion_windows_angstrom=stream_configs[
+                            stream_id
+                        ].data_term.excluded_wavelength_windows_angstrom,
+                        line_centers_angstrom=[
+                            line.wavelength_air_angstrom
+                            for line in term.synthesis_window.coefficients.lines
+                        ],
+                    )
+                )
+                paths.append(
+                    renderer.render_stokes_profiles(
+                        trainer, payload,
+                        term.wavelength_angstrom, label,
+                        radiance_scale_w_m3_sr=(
+                            runtime.streams[stream_id].specification.radiance_scale_w_m3_sr
+                        ),
+                    )
+                )
             if options.render_atmosphere:
+                rows, columns = display_grid(
+                    SimpleNamespace(datamodule=data), raster, sampling.max_ray_pixels
+                )
                 view = SimpleNamespace(
                     atmosphere_model=runtime.model.atmosphere_model,
                     synthesis_window=term.synthesis_window,
@@ -263,7 +272,7 @@ def _aia_render_results(
             Subset(dataset, indices.tolist()),
             batch_size=batch_size,
             shuffle=False,
-            num_workers=getattr(data_module, "num_workers", 2),
+            num_workers=getattr(data_module, "num_workers", 4),
             pin_memory=False,
             collate_fn=collator,
         )
@@ -290,7 +299,7 @@ def _aia_render_results(
             Subset(dataset, indices.tolist()),
             batch_size=batch_size,
             shuffle=False,
-            num_workers=getattr(data_module, "num_workers", 2),
+            num_workers=getattr(data_module, "num_workers", 4),
             pin_memory=False,
             collate_fn=collator,
         )

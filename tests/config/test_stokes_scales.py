@@ -8,8 +8,8 @@ from prom3theus.muram import config as _register_muram_schema
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("path", [p for p in sorted((ROOT / "configs").rglob("*.yaml")) if p.name != "synthesis.yaml"])
-def test_stokes_presets_use_linear_scales_without_extra_weights(path):
+@pytest.mark.parametrize("path", [p for p in sorted((ROOT / "configs").rglob("*.yaml")) if p.name not in {"synthesis.yaml", "surrogate.yaml"}])
+def test_stokes_presets_use_configured_weights_and_linear_scales(path):
     config = load_config(path)
     for stream in config.streams:
         if stream.data_term.type != "lte_stokes":

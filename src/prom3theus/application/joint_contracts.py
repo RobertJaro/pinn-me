@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -13,7 +12,7 @@ from torch import nn
 
 from prom3theus.config.joint_schema import JointInversionConfig
 from prom3theus.inversion.data_terms import ObservationDataTerm, SharedObjectiveTerm
-from prom3theus.inversion.joint import JointEvaluation, JointForwardModel
+from prom3theus.inversion.joint import JointForwardModel
 from prom3theus.observations import PreparedObservationStream, SceneContract
 
 
@@ -89,22 +88,4 @@ class JointRuntime:
     validation_batches: Mapping[str, Mapping[str, Any]]
     device: torch.device
     shared_metadata: Mapping[str, Any]
-    state_sha256_at_build: str | None
     data_module: Any = None
-
-
-@dataclass(frozen=True, slots=True)
-class JointRuntimeEvaluation:
-    """Tensor diagnostics and JSON-ready audit report from one evaluation."""
-
-    evaluation: JointEvaluation
-    report: Mapping[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class JointDryRun:
-    """Result of a setup, forward render, gradient smoke test, and report write."""
-
-    runtime: JointRuntime
-    evaluation: JointRuntimeEvaluation
-    report_path: Path

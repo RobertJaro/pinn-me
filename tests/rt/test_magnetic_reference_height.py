@@ -43,7 +43,8 @@ def test_magnetic_reference_freezes_only_magnetic_height_dependence(dynamic, war
     torch.testing.assert_close(new["magnetic_field"], reference["magnetic_field"][:, None].expand(-1, 4, -1), atol=1e-11, rtol=1e-12)
     assert not torch.allclose(old["magnetic_field"][:, 0], old["magnetic_field"][:, -1])
     for name in ("temperature", "gas_pressure", "microturbulence", "velocity_field"):
-        torch.testing.assert_close(new[name], old[name], atol=0, rtol=0)
+        # The fixed-height readout doubles the matrix batch size in this forward.
+        torch.testing.assert_close(new[name], old[name], atol=2e-12, rtol=1e-12)
     assert not torch.allclose(new["temperature"][:, 0], new["temperature"][:, -1])
     assert not torch.allclose(new["gas_pressure"][:, 0], new["gas_pressure"][:, -1])
     assert not torch.allclose(new["velocity_field"][:, 0], new["velocity_field"][:, -1])
@@ -118,7 +119,7 @@ def test_constructor_rejects_invalid_magnetic_reference(value, error):
 
 
 def test_config_wires_reference_and_preserves_default_atmosphere_options():
-    config = load_config(ROOT / "configs/sdo/hmi_dynamic.yaml")
+    config = load_config(ROOT / "configs/sdo/hmi_aia_dynamic.yaml")
     document = config.to_dict()
     magnetic = document["atmosphere"]["parameters"]["magnetic_field"]
     magnetic["representation"] = "direct"

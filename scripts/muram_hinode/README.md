@@ -1,14 +1,27 @@
 # Single-frame MURaM Hinode/SP inversion
 
-Use the already unpacked snapshot `000000` in
-`/glade/derecho/scratch/rjarolim/muram_snapshot`, the same frame used by the
-single-frame HMI MHS experiment. Run from the repository root on Derecho:
+For one snapshot of the X-flare AR 11158 simulation, submit the following
+from the repository root on Derecho with the project Python environment active.
 
 ```bash
-bash scripts/muram_hinode/synthesize.sh
-bash scripts/muram_hinode/check_setup.sh
-qsub scripts/muram_hinode/run.sh
+qsub -v PATH scripts/muram/synthesize_ar11158.pbs
 ```
+
+This job selects iteration 2000000 from the ASD_2023 campaign volume and writes
+`/glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_ar11158_2000000_uniform32`.
+It reads the depth grid from the MHS inversion window. Both inversions and the
+synthesis use 32 equally spaced ray distances including the −1 and +1 Mm shell
+boundaries. The nominal photosphere is set to 7.5 Mm above the bottom native
+cell, so these shell boundaries sample the native columns at 6.5 and 8.5 Mm.
+Both inversion presets read this store at native resolution. [Simulation setup](https://arxiv.org/html/2606.25382v1)
+
+After the synthesis finishes, submit the Stokes-only inversion from the same checkout:
+
+```bash
+qsub scripts/muram_hinode/run_stokes_only.sh
+```
+
+For MHS, use `scripts/muram_hinode/run.sh` in the last command. Both presets use exact LTE coefficients and the polarized formal solver.
 
 For an existing interactive GPU allocation, the training command is:
 
@@ -16,86 +29,66 @@ For an existing interactive GPU allocation, the training command is:
 PYTHONPATH=src python -m prom3theus.muram.cli invert configs/muram/hinode/mhs.yaml
 ```
 
-The single-frame synthesis selects iteration 0 and saves native-resolution profiles. It
+The single-frame synthesis selects iteration 2000000 and saves native-resolution profiles. It
 produces both Fe I 6301.5008 and 6302.4932 lines on 112 wavelength samples
 (21.549 mÅ spacing), with a 25 mÅ Gaussian spectral PSF. No noise, spatial PSF,
 or AIA products are added. Instrument settings and absolute calibration are
 stored with the spectra; no real-Hinode FITS preparation is required.
 The synthesis settings are in `configs/muram/hinode/synthesis.yaml`.
-Native fields are memory-mapped lazily by a dataset of flattened horizontal
-pixels. A DataLoader with two CPU workers loads full-depth columns in batches;
-`--batch-size` controls both loading and the sequential synthesis loop.
-Each batch is read once for synthesis, without overview images, ground-truth maps,
-or continuum optical-depth checks. Synthesis uses every native vertical cell
-and the physical cell spacing, without log-tau interpolation or top truncation.
-All columns and depths are preserved, and outputs are assembled back into 2D maps.
-Output spectra, prefetched batches, and OS file-cache pages also use memory.
-The inversion presets apply `observation.binning: 4` during loading, before
+The renderer linearly interpolates the native column fields at the registered
+radial heights. At disk center the ray spacing is 64.5 km. Toward the edges,
+the shell geometry sets the ray length just as in the inversion.
+For the 64 km vertical mesh, the loader retains the lowest 134 native levels
+through 8.512 Mm to bracket the last interpolation point. Native tau=1
+diagnostics use these loaded cells. Transfer uses only the 32 sampled points.
+The diagnostic maps and overview are saved under `diagnostics/`.
+The inversion presets configure `observation.binning` during loading, before
 profile normalization. Set it to `1` for native-resolution training or when
 reusing older stores already synthesized with 4×4 binning. Loading never changes
 the source store. Changing binning requires fresh work/output directories or an
 explicit observation rebuild; do not resume a different-resolution checkpoint.
+The synthesis contract also stores the native source/frame reference needed for
+later atmospheric evaluation. See [the synthesis and evaluation guide](../../docs/muram-synthesis.md)
+for the complete pipeline, output contents, and native-height registration.
 
-The output store is
-`/glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_single_frame`.
 Existing outputs are resumed: completed snapshots are skipped and an interrupted
-snapshot is restarted. Use `bash scripts/muram_hinode/synthesize.sh --overwrite`
-to replace both output directories and regenerate all requested snapshots.
+snapshot is restarted. The script does not forward command-line arguments.
+To replace an output directory, add `--overwrite` to its synthesis command.
 Batch size and device may change on resume; changes to recorded synthesis
 settings require a new output directory or `--overwrite`.
 
-The setup command validates the configuration, loads the generated store,
-checks the forward contract and gradients, and writes `hinode_setup.json` to
-the configured output directory. It performs no optimizer steps. Run it on
-a compute node with the inversion dependencies and sufficient memory.
+## In-domain MHS inversion
 
-The inversion is static, with one Stokes stream and a −0.5 to 30 megameter domain.
-The magnetic field is the curl of a learned vector potential; the explicit
-magnetic-divergence, gauge, and potential-boundary penalties are disabled.
-`atmosphere.parameters.magnetic_field.scale_vector_potential: 0.01` multiplies
-the vector-potential readout before taking its curl, reducing A and B by 100
-relative to the same network with the default multiplier of 1.0. This factor
-applies throughout training; `scale_gauss` and the model units remain unchanged.
-Use a fresh run when changing this decoder scale.
-Stokes MSE (weight 1), MHS force balance (weight 0.001), and the upper-boundary
-gas-pressure prior (weight 0.0001) are active at full weight from step zero,
-with no Stokes-only warmup or physics ramp. The Stokes objective normalizes
-by each observed profile's 90th-percentile Stokes I and divides I/Q/U/V by
-1/0.1/0.1/0.1 before squaring residuals. Adaptive normalization is detached,
-with 1 G magnetic and 1 Pa force-balance floors. These settings are a starting
-experiment, not a claim of convergence. Check Stokes recovery before interpreting the
-upper atmosphere. There is no UTC selection window: the store contains only
-the requested frame and retains its native simulation time.
+`configs/muram/hinode/mhs.yaml` uses the Stokes-only atmosphere, instrument,
+and training settings. The network predicts the magnetic field directly.
+The LTE and physics domains both span −1 to +1 Mm. The MHS ray tracer uses
+a 0.2 Mm lateral halo. Each optimizer step samples 2,048 new points uniformly in
+physical volume within the observed angular bounds. Both the MHS force
+residual and magnetic divergence use those points with weights 0.01 and 0.1, respectively.
+Validation uses 384 fixed volume points.
 
-The PBS script uses the repository checkout at
-`/glade/u/home/rjarolim/projects/lte` and the existing `sunerf` environment.
-Output and work directories use the distinct name
-`muram_hinode_mhs_isotropic_soap_v04`. An existing `last.ckpt` in
-the output directory is automatically resumed; choose fresh output and work
-directories for a new experiment.
+The preset uses 1,024 Stokes rays per GPU and 32 fixed, equally spaced depth
+samples per ray. Its output and work directories use
+`muram_hinode_ar11158_2000000_mhs_exact_lte_soap_uniform32`.
 
-The MHS preset trials 32 coarse depth points without fine refinement and 128
-rays per GPU. Check convergence against a denser grid after fitting; this
-budget is not a demonstrated fix for mixed magnetic polarities. In the v02
+### Earlier extrapolation experiments
+
+In the v02
 step-5000 snapshot, 16 versus 256 points changed Stokes V by 2.79% of observed
 continuum RMS on 16 pixels sampled across the strongest-polarization quartile.
 The 128-versus-256 difference was 0.029%; 256 versus 512 was 0.0075%.
 At 32 points the Stokes V difference from 256 points was 0.627% of continuum RMS.
 These are fixed-snapshot quadrature checks, not recovered-field accuracy.
 
-The ray and line-formation tops are 2.5 Mm; the MHS domain extends to 30 Mm.
-The transition-region top is 3.5 Mm, retaining its previous 1 Mm separation;
-the configuration requires it to be strictly above the line-formation top. This also
-changes the reference-atmosphere transition profile for the new run. A separate
+A separate
 fixed-snapshot test with matched dense depth spacing found that extending the
-ray top to 2.5 Mm changed V by 1.56% of continuum RMS. Extending to 3 Mm barely
-changed V further, but intensity still changed. Thus the old 1.5 Mm ray top is
+ray top to 2.5 megameters changed V by 1.56% of continuum RMS. Extending to 3 megameters barely
+changed V further, but intensity still changed. Thus the old 1.5 megameters ray top is
 not boundary-converged for that fitted atmosphere. The added layers were not
 constrained by its Stokes fit, so this sensitivity alone does not validate the
 upper atmosphere or establish a remedy for the mixed polarities.
 
-That snapshot used first SIREN frequency 30 and vector-potential multiplier 1,
-so it does not test the current frequency 5 / multiplier 0.01 configuration.
+That snapshot used first SIREN frequency 30 and vector-potential multiplier 1.
 Its sampled continuum tau500=1 surfaces lie 223–435 km above geometric height
 zero, and Br can reverse with height. Interpret zero-height maps alongside
 optical-depth surfaces and the Stokes fit. Analytic bipolar-field controls
@@ -109,11 +102,10 @@ change requires a new fit and does not itself repair the v02 magnetic field.
 network followed by differentiable formal LTE Stokes integration. SOAP's learning
 rate decays from 1e-3 to 1e-4 over 10000 steps; MHD constraints are disabled.
 The objective uses each profile's own 90th-percentile Stokes I and linear
-I/Q/U/V scales of 1/0.1/0.1/0.1. Transfer uses 32 jittered coarse points plus 32 contribution-guided fine points,
-64-wavelength chunks, float32 arithmetic, and the local bottom Planck source.
+I/Q/U/V scales of 1/0.1/0.1/0.1. Transfer uses 32 uniformly spaced points,
+float32 arithmetic, and the local bottom Planck source across the full wavelength grid.
 Check depth convergence and bottom optical thickness for the chosen atmosphere.
-Outputs and work files use `muram_hinode_isotropic_soap_v01`, separate from
-previous SIREN/Adam runs. Existing synthetic observations can be reused.
+Outputs and work files use `muram_hinode_ar11158_2000000_stokes_exact_lte_soap_uniform32`. Both inversions use the new uniform-grid store.
 
 Update the checkout on the server, then submit:
 
@@ -153,12 +145,11 @@ training stops mid-epoch.
 Validation, W&B images, and checkpoint files are published by rank zero.
 
 The Stokes-only preset uses 1024 rays per GPU, giving 4096 rays per optimizer
-update on the four-GPU job. Each ray has 64 sorted depth points and 63 integration
+update on the four-GPU job. Each ray has 32 sorted depth points and 31 integration
 intervals, with epsilon separation between samples. The coarse coefficients are
 reused; only the new fine points require a second atmosphere evaluation. Formal transfer retains a depth and wavelength graph for every ray.
-Measure memory and throughput
-with `scripts/diagnostics/benchmark_lte_inversion.py` before increasing batches;
-wavelength chunks limit individual operations, not the whole backward graph.
+Use `python -m prom3theus.diagnostics.commands.benchmark_lte_inversion` to measure memory and
+throughput. Reduce the per-GPU ray batch size if the full spectrum exceeds device memory.
 The Hinode Stokes-only preset uses a 1000 G magnetic output scale to improve magnetic
 updates. Direct-field initialization compensates for this scale, retaining the
 same weak initial field. This setting improved all four Stokes residuals in the

@@ -52,7 +52,7 @@ def test_loss_balancer_uses_training_reference_stream():
 
 
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf")])
-def test_gradient_checks_preserve_parameter_specific_errors(invalid):
+def test_training_allows_nonfinite_loss_and_gradients(invalid):
     from prom3theus.training.joint import JointInversionModule
     from prom3theus.config.joint_schema import JointTrainingConfig
 
@@ -63,12 +63,14 @@ def test_gradient_checks_preserve_parameter_specific_errors(invalid):
         JointTrainingConfig(max_steps=1, learning_rate=0.01, final_learning_rate=0.001),
         {},
     )
-    module.on_after_backward()  # Parameters without gradients are valid.
-    layer(torch.ones(1, 3)).sum().backward()
+    module.log = lambda *args, **kwargs: None
+    batch = {"data": {"loss": layer(torch.ones(1, 3)).sum() * invalid}}
+    loss = module.training_step(batch, 0)
+    loss.backward()
     module.on_after_backward()
-    layer.bias.grad[1] = invalid
-    with pytest.raises(FloatingPointError, match="atmosphere_model.bias"):
-        module.on_after_backward()
+    assert not torch.isfinite(layer.bias.grad).all()
+    with pytest.raises(FloatingPointError, match="assembled joint objective"):
+        model.evaluate_batches(batch)
 
 
 def test_same_modality_metrics_keep_both_streams():
