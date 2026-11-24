@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -N hinode-ar11158
+#PBS -A P22100000
+#PBS -q main
+#PBS -l select=1:ncpus=8:ngpus=1:mem=96gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(dirname "$0")/../..}"
+
+iteration=2000000
+source_dir=/glade/campaign/hao/radmhd/Rempel/ASD_2023/Run_Corona_1728x1024x1024_ASD_open/3D
+output_dir=/glade/derecho/scratch/rjarolim/muram_synthetic_observations/hinode_ar11158_${iteration}_uniform32
+PYTHONPATH=src python -m prom3theus.muram.cli synthesize \
+  --source-path "$source_dir" --iterations "$iteration" \
+  --out "$output_dir" --output-format store \
+  --instrument-config configs/muram/hinode/synthesis.yaml \
+  --inversion-depth-grid configs/muram/hinode/mhs.yaml --photosphere-height-megameters 7.5 \
+  --batch-size 16 --device cuda

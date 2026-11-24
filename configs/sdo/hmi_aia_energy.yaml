@@ -1,0 +1,218 @@
+# sdo/hmi_aia_energy
+# Run-defining settings and overrides; omitted options use schema defaults.
+schema_version: 5
+solver:
+  kind: joint
+  output_directory: /glade/work/rjarolim/lte/hmi_aia_energy_20261108_01
+  work_directory: /glade/derecho/scratch/rjarolim/lte/hmi_aia_energy_20261108_01
+scene:
+  reference_stream: photospheric_stokes
+  time_window:
+    start: '2011-02-14T00:00:00'
+    end: '2011-02-14T01:00:00'
+atmosphere:
+  geometry:
+    type: spherical_shell
+    time_dependent: true
+    height_input_scale_m: 10000000.0
+    outer_height_megameter: 50.0
+    inner_height_megameter: -0.5
+    tangent_margin_m: 1000.0
+    line_formation_outer_height_megameter: 2.5
+    uniform_spatial_scaling: true
+  reference_atmosphere: falc_82
+  parameters:
+    temperature:
+      log_scale: 0.1
+    velocity:
+      scale_m_per_s: 1000.0
+    magnetic_field:
+      scale_gauss: 1000.0
+      representation: vector_potential
+      scale_vector_potential: 0.01
+    microturbulence:
+      log_scale: 0.2
+    gas_pressure:
+      log_scale: 0.5
+  network:
+    type: siren
+    first_omega_0: 5.0
+    hidden_dimension: 256
+    hidden_layers: 8
+    radial_weighting: null
+  upper_atmosphere:
+    type: hydrostatic_corona
+    # Keep the transition-region top 1 megameters above the line-formation domain.
+    transition_region_top_megameter: 3.5
+    coronal_temperature_k: 1000000.0
+synthesis:
+  windows:
+    - id: fe_i_6173
+      line_ids:
+        - FeI_6173.3352
+      wavelength_bounds_vacuum_angstrom:
+        - 6172.0
+        - 6179.0
+      radiance_scale: 25000000000000.0
+      # Trial depth budget; compare against a denser grid after fitting.
+      depth_count: 32
+      jitter_fraction: 1.0
+      shell_height_bounds_megameter:
+        - -0.5
+        - 2.5
+      lateral_halo_megameter: 5.0
+physics:
+  vector_basis_matches_spatial_coordinates: true
+  collocation:
+    volume_points_per_step: 2048
+    upper_boundary_points_per_step: 256
+    validation_height_layers: 12
+    validation_points_per_height: 32
+    side_boundary_points_per_step: 512
+    validation_side_boundary_points: 256
+    validation_upper_height_layers: 6
+    height_sampling_power: 2.5
+    volume_sampling: fully_random
+    hard_example_enabled: true
+    hard_example_count: 256
+    hard_example_start_step: 500
+    hard_example_jitter_time_hours: 0.05
+  normalization:
+    length_m: 1000000.0
+    time_s: 3600.0
+    force_balance_pressure_floor_pa: 1.0
+  equations:
+    momentum:
+      enabled: true
+      weight: 0.001
+    induction:
+      enabled: true
+      weight: 0.001
+    continuity:
+      enabled: true
+      weight: 0.001
+    coronal_energy:
+      enabled: true
+      weight: 0.001
+      # Apply the coronal closure above the 3.5 Mm transition-region top.
+      minimum_height_megameter: 4.0
+    upper_boundary_gas_pressure_prior:
+      enabled: true
+      weight: 0.001
+    # Weak local curl(B) penalties on the top and all four side faces.
+    upper_boundary_current_free:
+      enabled: true
+      weight: 0.001
+    side_boundary_current_free:
+      enabled: true
+      weight: 0.001
+    upper_boundary_no_inflow:
+      enabled: true
+      weight: 0.001
+    side_boundary_no_inflow:
+      enabled: true
+      weight: 0.001
+streams:
+  - id: photospheric_stokes
+    observation:
+      type: hmi_stokes
+      directory: /glade/work/rjarolim/data/prom3theus/2011_02/hmi/prepared
+      selection: {}
+      loader:
+        workers: 4
+        batch_size: 128
+        validation_batch_size: 16
+        validation_stride: 16
+        preparation_workers: 8
+      calibration:
+        transmission_profile_directory: /glade/work/rjarolim/data/prom3theus/2011_02/hmi/responses
+        require_quality_zero: true
+        quiet_sun_max_fractional_polarization: 0.01
+        quiet_sun_trim_quantiles:
+          - 0.05
+          - 0.95
+        minimum_quiet_sun_pixels: 128
+        calibration_sample_limit: 4096
+    data_term:
+      type: lte_stokes
+      synthesis_window: fe_i_6173
+      weight: 1.0
+      instrument:
+        type: hmi_filter_profiles
+        magnetic_azimuth_offset_deg: 90.0
+        optimize_line_of_sight_velocity_correction: true
+      objective:
+        type: mse
+        stokes_weights: {i: 1.0, q: 1.0, u: 1.0, v: 1.0}
+        continuum_normalization: true
+        stokes_scales: {I: 1.0, Q: 0.1, U: 0.1, V: 0.1}
+  - id: coronal_euv
+    observation:
+      type: aia_euv
+      directory: /glade/work/rjarolim/data/prom3theus/2011_02/aia/prepared
+      channels_angstrom:
+        - 171
+        - 193
+        - 211
+      selection:
+        validation_exposure_group: target-0000
+      loader:
+        workers: 4
+        batch_size: 256
+        validation_batch_size: 4096
+    data_term:
+      type: aia_optically_thin
+      weight: 1.0
+      synthesis:
+        response_resource: aia_euv_v1:aia_temperature_response
+        ray_samples: 96
+        coarse_to_fine:
+          enabled: true
+          fine_sample_count: 96
+          uniform_weight_floor: 0.05
+      objective:
+        type: asinh_mse
+        channel_weights:
+          - channel_angstrom: 171
+            weight: 1.0
+          - channel_angstrom: 193
+            weight: 1.0
+          - channel_angstrom: 211
+            weight: 1.0
+diagnostics:
+  visualization:
+    ray_sampling:
+      batch_size: 16
+      max_pixels: 4096
+      max_profile_samples: 2048
+    slice_sampling:
+      batch_size: 512
+      longitude_points: 128
+      latitude_points: 128
+      radial_points: 256
+    meridional_slice:
+      enabled: true
+      longitude_deg: 35.3
+    contribution_ray_count: 0
+training:
+  max_steps: -1
+  learning_rate: 0.001
+  final_learning_rate: 0.0001
+  optimizer: soap
+  device: cuda
+  steps_per_epoch: 1000
+  learning_rate_decay_steps: 10000
+logging:
+  type: wandb
+  project: PROM3THEUS
+  run_name: HMI AIA energy SIREN SOAP dynamic MHD vector potential 2011-02-14 00:00-01:00
+  tags:
+    - hmi
+    - aia
+    - sdo
+    - lte
+    - dynamic-mhd
+    - coronal-energy
+    - vector-potential
+    - one-hour
+    - spherical-shell
